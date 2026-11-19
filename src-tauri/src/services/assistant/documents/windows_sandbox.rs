@@ -18,6 +18,7 @@ mod startup_comparison;
 mod startup_comparison_protocol;
 #[cfg(test)]
 mod trace_launch;
+mod tree_reader;
 #[cfg(test)]
 mod winsock_grant;
 use probe::{
@@ -832,7 +833,7 @@ fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
 
 /// Hash warm public resources without retaining a second whole runtime in RAM.
 fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
-    let _pins = pin_ancestors(root)?;
+    let mut reader = tree_reader::TreeReader::new(root)?;
     let (mut pending, mut names, mut entries) = (vec![root.to_path_buf()], Vec::new(), 0usize);
     while let Some(directory) = pending.pop() {
         let _directory = open_path(&directory, true)?;
@@ -864,7 +865,7 @@ fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
     names.sort();
     let (mut hash, mut total, mut chunk) = (Sha256::new(), 0u64, [0u8; 64 * 1024]);
     for relative in names {
-        let mut file = open_regular(root, &root.join(&relative), max)?;
+        let mut file = reader.open(&root.join(&relative), max)?;
         let length = io(file.metadata())?.len();
         total = total.checked_add(length).ok_or(UNSAFE_FILE)?;
         if total > max {
@@ -1303,6 +1304,33 @@ impl Profile {
                 observation.evidence(|evidence| evidence.native_status = Some(labelled.0));
             }
             labelled.ok().map_err(|_| UNAVAILABLE.to_owned())?;
+        }
+        Ok(())
+    }
+    fn prepare_private_temp(&self, home: &Path) -> Result<(), String> {
+        let name = String::from_utf16(self.name.strip_suffix(&[0]).ok_or(UNAVAILABLE)?)
+            .map_err(|_| UNAVAILABLE.to_owned())?;
+        let mut components = Path::new(&name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(UNSAFE_FILE.into());
+        }
+        // GetTempPath2W uses LOCALAPPDATA/Packages/<profile name>/AC/Temp.
+        // LOCALAPPDATA is this fresh task's private home, so inherit its low
+        // integrity and package-only write grant before any code is resumed.
+        let mut path = home.to_path_buf();
+        let mut pins = pin_ancestors(home)?;
+        for component in ["Packages", &name, "AC", "Temp"] {
+            path.push(component);
+            io(fs::create_dir(&path).or_else(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }))?;
+            // An existing component must still be a real directory. Keep each
+            // parent pinned while preparing the next fixed child.
+            pins.push(open_path(&path, true)?);
         }
         Ok(())
     }
@@ -2509,6 +2537,21 @@ fn remap(
     }
     Err(UNSAFE_FILE.into())
 }
+
+fn engine_arguments(exe: &Path, args: Vec<String>, runtime: &CachedRuntime) -> Vec<String> {
+    if exe != runtime.root.join("node/node.exe") {
+        return args;
+    }
+    // The host has already rejected reparses in the runtime and task trees.
+    // Node's default module realpath walk needs metadata from ancestors outside
+    // those grants. Keep our verified paths for both CJS dependencies and the
+    // ESM main entry; Windows still checks every actual file/image access.
+    ["--preserve-symlinks", "--preserve-symlinks-main"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(args)
+        .collect()
+}
 fn bounded_text(bytes: Vec<u8>, limit: usize) -> String {
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     while text.len() > limit {
@@ -2787,11 +2830,15 @@ fn run_blocking(
         observation.enter(Phase::TaskHome);
         let task_home = task.0.join(home_relative);
         io(fs::create_dir_all(&task_home))?;
+        profile.prepare_private_temp(&task_home)?;
         let actual_exe = PathBuf::from(remap(&exe.to_string_lossy(), &runtime, &cwd, &task.0)?);
         let actual_args = args
             .iter()
             .map(|arg| remap(arg, &runtime, &cwd, &task.0))
             .collect::<Result<Vec<_>, _>>()?;
+        // Python identification and its owned serialization guard were acquired
+        // before this worker; prefix only the final verified Node command.
+        let actual_args = engine_arguments(&actual_exe, actual_args, &runtime);
         if cancelled.load(Ordering::Acquire) {
             return Err(CANCELLED.into());
         }
@@ -3072,9 +3119,63 @@ else if (
   childResult = childCode;
 console.error("OFOX_LPAC_CHILD_RESULT:" + childResult);
 assert.ok(
-  childResult === "EPERM" || childResult === "EACCES",
-  "child process denial was not proven",
+  ["EPERM", "EACCES", "UNKNOWN"].includes(childResult),
+  "the fixed child request did not fail before a child was created",
 );
+// libuv does not map ERROR_CHILD_PROCESS_BLOCKED (367). Read the exact Win32
+// result inside this same verified Node process using the bundled fixed probe.
+// The native request is fixed and suspended; an unexpected child is reclaimed.
+let nativeChildProbe;
+try {
+  nativeChildProbe = require(process.argv[3]);
+} catch (error) {
+  console.error("OFOX_LPAC_NATIVE_CHILD_RESULT:" +
+    (error?.code === "MODULE_NOT_FOUND" ? "module-missing" : "module-load-failed"));
+  const loadCode = ["MODULE_NOT_FOUND", "ERR_DLOPEN_FAILED", "EISDIR", "EACCES", "EPERM"].includes(error?.code)
+    ? error.code : "other";
+  const moduleArg = process.argv[3];
+  console.error("OFOX_LPAC_NATIVE_CHILD_LOAD_CODE:" + loadCode);
+  console.error("OFOX_LPAC_NATIVE_CHILD_MODULE_ARG_NAMESPACED:" + moduleArg.startsWith("\\\\?\\"));
+  let leafStat = "failed";
+  try { leafStat = fs.statSync(moduleArg).isFile() ? "file" : "other"; } catch {}
+  console.error("OFOX_LPAC_NATIVE_CHILD_LEAF_STAT:" + leafStat);
+  let realpath = "failed";
+  try { fs.realpathSync(moduleArg); realpath = "resolved"; } catch {}
+  console.error("OFOX_LPAC_NATIVE_CHILD_REALPATH:" + realpath);
+  if (loadCode === "ERR_DLOPEN_FAILED") {
+    const message = typeof error.message === "string" ? error.message : "";
+    const { toNamespacedPath } = require("node:path");
+    const matching = NATIVE_CHILD_LOADER_PREFIXES.filter(([code, prefix]) => {
+      // libuv inserts the fixed DLL filename in ERROR_BAD_EXE_FORMAT only.
+      const expected = code === 193 ? prefix.replace("%1", () => toNamespacedPath(moduleArg)) : prefix;
+      return message.startsWith(expected);
+    });
+    console.error("OFOX_LPAC_NATIVE_CHILD_LOADER_WIN32:" +
+      (matching.length === 1 ? matching[0][0] : "unknown"));
+  }
+  let skia = "failed";
+  try { require(process.argv[1]); skia = "loaded"; } catch {}
+  console.error("OFOX_LPAC_NATIVE_CHILD_SKIA_LOAD:" + skia);
+  throw new Error("the fixed native child probe could not load");
+}
+let denial;
+try {
+  denial = nativeChildProbe.probe();
+} catch {
+  console.error("OFOX_LPAC_NATIVE_CHILD_RESULT:probe-failed");
+  throw new Error("the fixed native child probe could not run");
+}
+const nativeChildResult = denial?.created ? "child-created" : ({
+  367: "child-process-blocked", 5: "access-denied", 2: "file-not-found",
+  3: "path-not-found", 6: "invalid-handle", 0: "no-error",
+})[denial?.error] ?? "other";
+console.error("OFOX_LPAC_NATIVE_CHILD_RESULT:" + nativeChildResult);
+for (const [key, value] of Object.entries({
+  created: false, error: 367, processId: 0, threadId: 0,
+  processHandle: false, threadHandle: false, cleanupComplete: true,
+})) assert.equal(denial?.[key], value, "native child process denial was not proven");
+assert.equal(fs.existsSync("child-marker"), false);
+console.error("OFOX_LPAC_NATIVE_CHILD_DENIED:367");
 const native = process.argv[1];
 checkpoint(8);
 require(native); // Prove the original binary actually loads before the denial.
@@ -3170,6 +3271,81 @@ impl ProbeStage {
     }
 }
 
+const CHILD_LOADER_WIN32_CODES: [u32; 8] = [5, 126, 127, 193, 1114, 577, 14001, 998];
+
+fn child_loader_prefix(code: u32) -> Option<String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn FormatMessageW(
+            flags: u32,
+            source: *const c_void,
+            message: u32,
+            language: u32,
+            buffer: *mut u16,
+            size: u32,
+            arguments: *const c_void,
+        ) -> u32;
+    }
+    const FROM_SYSTEM_IGNORE_INSERTS: u32 = 0x1000 | 0x0200;
+    const ENGLISH_US: u32 = 0x0409;
+    let mut buffer = [0u16; 512];
+    // Match libuv's system-message language preference. Keep the complete
+    // prefix (including its terminator whitespace) and no variable inserts.
+    let mut format = |language| unsafe {
+        FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            std::ptr::null(),
+            code,
+            language,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            std::ptr::null(),
+        )
+    };
+    let english_len = format(ENGLISH_US);
+    let len = if english_len == 0 {
+        format(0)
+    } else {
+        english_len
+    };
+    let message = String::from_utf16(buffer.get(..len as usize)?).ok()?;
+    (!message.trim().is_empty()).then_some(message)
+}
+
+fn one_probe_value<'a>(stderr: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut results = stderr.lines().filter_map(|line| line.strip_prefix(prefix));
+    let result = results.next()?;
+    results.next().is_none().then_some(result)
+}
+
+fn parse_native_child_result(stderr: &str) -> Option<&str> {
+    let result = one_probe_value(stderr, "OFOX_LPAC_NATIVE_CHILD_RESULT:")?;
+    matches!(
+        result,
+        "child-process-blocked"
+            | "access-denied"
+            | "file-not-found"
+            | "path-not-found"
+            | "invalid-handle"
+            | "no-error"
+            | "other"
+            | "child-created"
+            | "module-missing"
+            | "module-load-failed"
+            | "probe-failed"
+    )
+    .then_some(result)
+}
+
+fn parse_native_child_loader_win32(stderr: &str) -> Option<&str> {
+    let result = one_probe_value(stderr, "OFOX_LPAC_NATIVE_CHILD_LOADER_WIN32:")?;
+    if result == "unknown" {
+        return Some(result);
+    }
+    let code = result.parse::<u32>().ok()?;
+    (CHILD_LOADER_WIN32_CODES.contains(&code) && code.to_string() == result).then_some(result)
+}
+
 struct ProbeTrace {
     #[cfg(test)]
     child_call: bool,
@@ -3229,10 +3405,41 @@ impl ProbeTrace {
             )
             .then_some(result)
         });
+        let load_code = one_probe_value(&output.stderr, "OFOX_LPAC_NATIVE_CHILD_LOAD_CODE:")
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "MODULE_NOT_FOUND"
+                        | "ERR_DLOPEN_FAILED"
+                        | "EISDIR"
+                        | "EACCES"
+                        | "EPERM"
+                        | "other"
+                )
+            });
+        let namespaced = one_probe_value(
+            &output.stderr,
+            "OFOX_LPAC_NATIVE_CHILD_MODULE_ARG_NAMESPACED:",
+        )
+        .and_then(|value| value.parse::<bool>().ok());
+        let skia = one_probe_value(&output.stderr, "OFOX_LPAC_NATIVE_CHILD_SKIA_LOAD:")
+            .filter(|value| matches!(*value, "loaded" | "failed"));
+        let leaf_stat = one_probe_value(&output.stderr, "OFOX_LPAC_NATIVE_CHILD_LEAF_STAT:")
+            .filter(|value| matches!(*value, "file" | "other" | "failed"));
+        let realpath = one_probe_value(&output.stderr, "OFOX_LPAC_NATIVE_CHILD_REALPATH:")
+            .filter(|value| matches!(*value, "resolved" | "failed"));
         self.engine = Some(serde_json::json!({
             "status":output.status, "timedOut":output.timed_out,
             "stdoutBytes":output.stdout.len(), "stderrBytes":output.stderr.len(),
-            "nodeCheckpointBeforeStep":marker, "childSpawnResult":child_result
+            "nodeCheckpointBeforeStep":marker, "childSpawnResult":child_result,
+            "nativeChildResult":parse_native_child_result(&output.stderr),
+            "nativeChildLoadCode":load_code, "nativeChildModuleArgNamespaced":namespaced,
+            "nativeChildLoaderWin32":parse_native_child_loader_win32(&output.stderr),
+            "nativeChildSkiaLoad":skia,
+            "nativeChildLeafStat":leaf_stat, "nativeChildRealpath":realpath,
+            "nativeChildDenied":output.stderr.lines()
+                .filter(|line| line.starts_with("OFOX_LPAC_NATIVE_CHILD_DENIED:"))
+                .eq(["OFOX_LPAC_NATIVE_CHILD_DENIED:367"])
         }));
         if output.status != Some(0) || output.timed_out {
             return Err(UNAVAILABLE.into());
@@ -3305,6 +3512,7 @@ impl ProbeTrace {
             "outsideReadWriteDenied",
             "allApplicationPackagesReadDenied",
             "childProcessDenied",
+            "sameProcessWin32ChildDenial",
             "lowImageDenied",
             "networkDenied",
             "nativeCanvas",
@@ -3515,6 +3723,10 @@ async fn probe_inner(
     let _ = io(listener.accept())?;
     drop(control);
     io(listener.set_nonblocking(true))?;
+    let child_loader_prefixes: Vec<_> = CHILD_LOADER_WIN32_CODES
+        .into_iter()
+        .filter_map(|code| child_loader_prefix(code).map(|message| (code, message)))
+        .collect();
     let script = NODE_PROBE
         .replace(
             "OUTSIDE_PATH",
@@ -3524,10 +3736,15 @@ async fn probe_inner(
             "OUTSIDE_AAP_PATH",
             &serde_json::to_string(&outside_aap).map_err(|_| UNAVAILABLE)?,
         )
-        .replace("PROBE_PORT", &address.port().to_string());
+        .replace("PROBE_PORT", &address.port().to_string())
+        .replace(
+            "NATIVE_CHILD_LOADER_PREFIXES",
+            &serde_json::to_string(&child_loader_prefixes).map_err(|_| UNAVAILABLE)?,
+        );
     let native = runtime_root
         .join("runtime/node_modules/@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node");
     let canvas = runtime_root.join("runtime/node_modules/@napi-rs/canvas");
+    let child_probe = runtime_root.join("probes/windows-child-probe.node");
     let node = runtime_root.join("node/node.exe");
     trace.engine(ProbeStage::NodeIsolation);
     #[cfg(test)]
@@ -3560,6 +3777,7 @@ async fn probe_inner(
             &script,
             &native.to_string_lossy(),
             &canvas.to_string_lossy(),
+            &child_probe.to_string_lossy(),
         ],
         &cwd,
         &home,
@@ -3593,6 +3811,7 @@ async fn probe_inner(
         "outsideReadWriteDenied",
         "allApplicationPackagesReadDenied",
         "childProcessDenied",
+        "sameProcessWin32ChildDenial",
         "lowImageDenied",
         "networkDenied",
         "nativeCanvas",

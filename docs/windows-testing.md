@@ -138,6 +138,35 @@ CDB 在 `q;` 报语法错误并停在提示符。B 只去掉文件末尾的换�
 CDB 和目标均按预期退出 1，调试器 stderr 为空。Server 2022 的具体观测错误、
 原始子进程错误码和临时目录清理仍待原生验证。
 
+后续 Server 2022 运行 `44514579681`（`528d89a1`）收到完整的配对返回
+`child-process-blocked`，对应固定 Win32 错误 367。Job 终止、控制器回收和
+Job 归零均成功。私有临时目录删除返回错误 5，整次诊断保持失败。
+
+`dbb96647` 将清理恢复限定为已停止且归零的工具 Job 所拥有的原始目录。
+固定的 WinINet 挂载点通过无跟随句柄移除，目录和联接句柄均阻止重命名，
+保留根身份及祖先固定到唯一一次标准删除重试结束。本机真实 SymChk 目录
+复现错误 5 后恢复成功，外部哨兵字节不变。Server 2022 运行
+[44531568236](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236)
+的诊断与清理门禁均通过；产物摘要核验一致，回执为 `diagnosticRecorded: true`、
+`verdict: child-process-blocked`、`releaseGate: false`。
+
+生产门禁保留 libuv 的固定调用结果，并在同一受限 Node 中加载随包的固定
+Node-API 探针。探针只尝试当前 Node 可执行文件及固定脚本，使用挂起创建，
+立即保存 Win32 返回。只有错误 367、零句柄、零进程与线程标识、完整清理
+以及标记文件不存在时才接受该项。异常创建会在恢复线程前终止和回收。
+普通 Node 的正向对照在有 Job 保护的私有临时目录执行。生产 smoke 只验证
+模块加载、导出和参数拒绝，不在缺少 Job 的普通进程中尝试创建子进程。
+两次调用的返回分别判读。
+探针 C 源码、固定 SDK 摘要和构建配方参与生成记录，产物包含在运行时整树摘要中。
+真实 Win11 对照确认 CommonJS 的默认 realpath 访问未授权祖先，连同 Skia 一起
+拒绝加载。仅对已校验缓存 Node 添加 `--preserve-symlinks` 和
+`--preserve-symlinks-main` 后，两者均可加载；祖先目录权限保持原样。
+另一个原生对照确认 OfficeCLI 的临时目录来自隔离的 LOCALAPPDATA，路径为
+`home/Packages/<profile name>/AC/Temp`。启动器在恢复线程前逐层准备该任务私有
+目录，拒绝 junction 和文件碰撞，沿用任务目录的 Low 与包 SID 权限。
+完整功能门禁仍为每台机器的准入条件，Server 2022 同 SHA 结果与安装版证据见
+[任务 #1723](https://app.fizzy.do/6179973/cards/1723)。
+
 开发工作流设置 `OFOX_DOCUMENT_CHILD_BLOCK_EVENT=1` 时，仅功能前置的 Node 在检查点 7
 以 `UNKNOWN` 退出才触发只读事件查询。控制器从同一个已退出进程的句柄获取创建和退出时间。
 在该窗口内查询 KernelMode 事件 4，窗口最多 60 秒，查询按毫秒向外取整，最多检查 32 条候选。

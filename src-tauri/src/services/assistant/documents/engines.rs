@@ -9,8 +9,8 @@ use std::path::{Component, Path, PathBuf};
 pub struct Engines {
     pub officecli: Option<PathBuf>,
     pub typst: Option<PathBuf>,
-    /// Always `None` off macOS: the Python engine runs only in
-    /// `sandbox-exec` (see `documents::create`).
+    /// Available on macOS and Windows x64. The Host independently requires
+    /// sandbox-exec or a current Windows LPAC proof before offering execution.
     pub python: Option<PythonEngine>,
 }
 
@@ -47,7 +47,10 @@ pub fn engines_at(base: &Path) -> Engines {
     Engines {
         officecli: file(&engine("officecli")["path"]),
         typst: file(&engine("typst")["path"]),
-        python: if cfg!(target_os = "macos") {
+        python: if cfg!(any(
+            target_os = "macos",
+            all(windows, target_arch = "x86_64")
+        )) {
             python()
         } else {
             None
@@ -170,7 +173,10 @@ mod tests {
         let manifest = python_manifest("node/node", "runtime/src/python/runner.mjs");
         let base = python_runtime(manifest.clone(), &PYTHON_FILES, ASSETS);
         let python = engines_at(base.path()).python;
-        if cfg!(target_os = "macos") {
+        if cfg!(any(
+            target_os = "macos",
+            all(windows, target_arch = "x86_64")
+        )) {
             let python = python.unwrap();
             assert_eq!(python.node, base.path().join("node/node"));
             assert_eq!(
@@ -180,7 +186,7 @@ mod tests {
             // The runner's `--assets`: the folder of `assets.json`.
             assert_eq!(python.assets, base.path().join("engines/python"));
         } else {
-            // It runs only in macOS's sandbox-exec: elsewhere there is none.
+            // Other platforms do not offer the isolated Python engine.
             assert_eq!(python, None);
         }
         // Without any one of its files there is no engine: Node, the

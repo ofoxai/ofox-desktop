@@ -1039,15 +1039,11 @@ impl AssistantHost {
         }
     }
 
-    /// Whether Python decks are offered: the engine is there (on macOS
-    /// only), and so are officecli, which checks every deck, and
-    /// `sandbox-exec`; officecli's latest sandbox probe did not fail
-    /// (officecli checks a Python deck only in its sandbox), and the Python
-    /// engine's own probe has not failed. Before a probe has run, Python is
-    /// offered and a call is refused when its sandbox turns out missing. A
-    /// failed Python probe, or a runner that could not start the code (see
-    /// [`Self::python_broken`]), turns it off for the session: Python
-    /// content is then refused before the engine runs again.
+    /// Whether complete Python and officecli engines have working isolation.
+    /// macOS can offer Python before its first sandbox-exec engine probe;
+    /// Windows requires a functional proof of the current runtime digest first.
+    /// A failed sandbox probe or a runner that could not start the code (see
+    /// [`Self::python_broken`]) turns it off before another Python call.
     pub(super) fn python_offered(&self) -> bool {
         let engines = self.engines();
         #[cfg(windows)]
@@ -1071,7 +1067,8 @@ impl AssistantHost {
     pub(super) async fn prepare_document_engines(&self) {
         #[cfg(windows)]
         {
-            if self.engines().python.is_none() {
+            let engines = self.engines();
+            if engines.python.is_none() || engines.officecli.is_none() {
                 return;
             }
             let ready = match self.env.runtime_dir() {
@@ -7129,6 +7126,39 @@ while read line; do :; done"#,
         assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
     }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_preparation_waits_for_both_document_engines() {
+        use crate::services::assistant::documents::engines::PythonEngine;
+
+        for (python, officecli, expected_failed) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            // No runtime directory: no native process can be started. A
+            // complete inventory must fail closed; a partial one waits without
+            // recording an isolation failure against either missing engine.
+            let (_config, host) = fixture();
+            host.engines
+                .set(Engines {
+                    python: python.then(|| PythonEngine {
+                        node: "unused-node".into(),
+                        runner: "unused-runner".into(),
+                        assets: "unused-assets".into(),
+                    }),
+                    officecli: officecli.then(|| "unused-officecli".into()),
+                    typst: None,
+                })
+                .unwrap();
+            host.prepare_document_engines().await;
+            assert_eq!(host.office_sandbox.failed(), expected_failed);
+            assert_eq!(host.python_sandbox.failed(), expected_failed);
+            assert!(!host.python_offered(), "unproven Python was offered");
+        }
+    }
+
     #[tokio::test]
     async fn bootstrap_reports_python_availability() {
         let node = fixture_node_path();
@@ -7180,8 +7210,8 @@ while read line; do :; done"#,
         )
         .await;
         assert_eq!(boot["runtime"]["documents"]["python"], false);
-        // All there: offered on macOS, where sandbox-exec is; the engine
-        // exists nowhere else.
+        // All staged: macOS can use sandbox-exec. Empty Windows fixture
+        // executables never establish LPAC proof, so Python stays unavailable.
         let boot = boot_with(
             &[
                 "runtime/src/python/runner.mjs",

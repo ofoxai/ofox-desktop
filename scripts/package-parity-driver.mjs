@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -20,7 +19,8 @@ export const sourceEnvironment = (environment = process.env) => ({
     ),
   ),
   GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_GLOBAL: os.devNull,
+  // Git accepts /dev/null as an empty config on Windows and Unix.
+  GIT_CONFIG_GLOBAL: "/dev/null",
 });
 const git = (checkout, args) =>
   execFileSync("git", args, {

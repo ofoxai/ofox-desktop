@@ -2,6 +2,9 @@
 //! that a lowbox token, image policy, ACL, or Job is enforced.
 use super::*;
 
+mod module_load;
+mod office_load;
+
 fn runtime() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources")
 }
@@ -969,6 +972,83 @@ fn document_acl_diagnostics_keep_rights_and_flags_without_account_sid_values() {
 }
 
 #[test]
+fn native_child_result_requires_one_known_receipt() {
+    let receipt = |value| format!("OFOX_LPAC_NATIVE_CHILD_RESULT:{value}");
+    let blocked = receipt("child-process-blocked");
+    let denied = receipt("access-denied");
+    let invalid = receipt("private-category");
+    assert_eq!(
+        parse_native_child_result(&format!("unrelated\r\n{blocked}\r\n")),
+        Some("child-process-blocked")
+    );
+    assert_eq!(parse_native_child_result(&denied), Some("access-denied"));
+    assert_eq!(parse_native_child_result(""), None);
+    assert_eq!(parse_native_child_result(&invalid), None);
+    for stderr in [
+        format!("{blocked}\n{blocked}"),
+        format!("{blocked}\n{denied}"),
+        format!("{invalid}\n{blocked}"),
+        format!("{blocked}\n{invalid}"),
+    ] {
+        assert_eq!(parse_native_child_result(&stderr), None, "{stderr}");
+    }
+}
+
+#[test]
+fn native_child_loader_diagnostics_keep_only_single_fixed_values() {
+    let recognized = concat!(
+        "OFOX_LPAC_NATIVE_CHILD_RESULT:module-load-failed\n",
+        "OFOX_LPAC_NATIVE_CHILD_LOAD_CODE:ERR_DLOPEN_FAILED\n",
+        "OFOX_LPAC_NATIVE_CHILD_MODULE_ARG_NAMESPACED:true\n",
+        "OFOX_LPAC_NATIVE_CHILD_LEAF_STAT:file\n",
+        "OFOX_LPAC_NATIVE_CHILD_REALPATH:failed\n",
+        "OFOX_LPAC_NATIVE_CHILD_LOADER_WIN32:193\n",
+        "OFOX_LPAC_NATIVE_CHILD_SKIA_LOAD:loaded\n",
+    );
+    let private = "private-addon-path-and-token";
+    let mut trace = ProbeTrace::new();
+    trace.engine(ProbeStage::NodeIsolation);
+    let mut inspect = |stderr| {
+        assert!(trace
+            .success(EngineOutput {
+                status: Some(1),
+                timed_out: false,
+                stdout: private.into(),
+                stderr,
+            })
+            .is_err());
+        trace.engine.clone().unwrap()
+    };
+    let evidence = inspect(format!("{recognized}{private}\n"));
+    assert_eq!(evidence["nativeChildResult"], "module-load-failed");
+    assert_eq!(evidence["nativeChildLoadCode"], "ERR_DLOPEN_FAILED");
+    assert_eq!(evidence["nativeChildModuleArgNamespaced"], true);
+    assert_eq!(evidence["nativeChildLeafStat"], "file");
+    assert_eq!(evidence["nativeChildRealpath"], "failed");
+    assert_eq!(evidence["nativeChildLoaderWin32"], "193");
+    assert_eq!(evidence["nativeChildSkiaLoad"], "loaded");
+    assert!(!evidence.to_string().contains(private));
+
+    let duplicate = inspect(format!("{recognized}{recognized}"));
+    for key in [
+        "nativeChildResult",
+        "nativeChildLoadCode",
+        "nativeChildModuleArgNamespaced",
+        "nativeChildLeafStat",
+        "nativeChildRealpath",
+        "nativeChildLoaderWin32",
+        "nativeChildSkiaLoad",
+    ] {
+        assert!(duplicate[key].is_null(), "{key}");
+    }
+    let unknown = inspect(format!(
+        "OFOX_LPAC_NATIVE_CHILD_LOAD_CODE:{private}\nOFOX_LPAC_NATIVE_CHILD_LOADER_WIN32:0193\n"
+    ));
+    assert!(unknown["nativeChildLoadCode"].is_null());
+    assert!(unknown["nativeChildLoaderWin32"].is_null());
+}
+
+#[test]
 fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     let mut trace = ProbeTrace::new();
     trace.engine(ProbeStage::NodeIsolation);
@@ -977,7 +1057,7 @@ fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     let output = EngineOutput {
         status: Some(7),
         stdout: private.into(),
-        stderr: format!("{private}\nOFOX_LPAC_PROBE_STAGE:9\nOFOX_LPAC_PROBE_STAGE:99\nOFOX_LPAC_PROBE_STAGE:{private}\nOFOX_LPAC_CHILD_RESULT:{private}\nOFOX_LPAC_CHILD_RESULT:EPERM\n"),
+        stderr: format!("{private}\nOFOX_LPAC_PROBE_STAGE:9\nOFOX_LPAC_PROBE_STAGE:99\nOFOX_LPAC_PROBE_STAGE:{private}\nOFOX_LPAC_CHILD_RESULT:{private}\nOFOX_LPAC_CHILD_RESULT:EPERM\nOFOX_LPAC_NATIVE_CHILD_RESULT:child-process-blocked\nOFOX_LPAC_NATIVE_CHILD_DENIED:367\n"),
         timed_out: false,
     };
     assert!(trace.success(output).is_err());
@@ -993,6 +1073,11 @@ fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     assert_eq!(detail["engine"]["timedOut"], false);
     assert_eq!(detail["engine"]["nodeCheckpointBeforeStep"], 9);
     assert_eq!(detail["engine"]["childSpawnResult"], "EPERM");
+    assert_eq!(
+        detail["engine"]["nativeChildResult"],
+        "child-process-blocked"
+    );
+    assert_eq!(detail["engine"]["nativeChildDenied"], true);
     assert_eq!(
         detail["completedChecks"],
         serde_json::json!(["windowsBuild", "nativeCanvas"])
@@ -1025,6 +1110,8 @@ fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     assert_eq!(detail["engine"]["status"], serde_json::Value::Null);
     assert_eq!(detail["reason"], "process_timeout");
     assert!(detail["engine"]["nodeCheckpointBeforeStep"].is_null());
+    assert!(detail["engine"]["nativeChildResult"].is_null());
+    assert_eq!(detail["engine"]["nativeChildDenied"], false);
     assert_eq!(
         detail["completedChecks"],
         serde_json::json!(["windowsBuild"])

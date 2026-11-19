@@ -252,7 +252,7 @@ describe("native acceptance safety and evidence", () => {
       SSH_AUTH_SOCK: "/ssh",
       NODE_OPTIONS: "--require=evil",
     });
-    expect(env.CODEX_HOME).toBe("/sandbox/home/.codex");
+    expect(env.CODEX_HOME).toBe(join("/sandbox", "home", ".codex"));
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.HTTP_PROXY).toBeUndefined();
     expect(env.SSH_AUTH_SOCK).toBeUndefined();

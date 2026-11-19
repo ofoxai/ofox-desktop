@@ -62,7 +62,7 @@ test("Windows case-insensitive Git environment aliases cannot redirect build pro
   assert.equal(Object.hasOwn(environment, "git_dir"), false);
   assert.equal(Object.hasOwn(environment, "git_work_tree"), false);
   assert.equal(Object.hasOwn(environment, "GiT_InDeX_FiLe"), false);
-  assert.equal(environment.GIT_CONFIG_GLOBAL, os.devNull);
+  assert.equal(environment.GIT_CONFIG_GLOBAL, "/dev/null");
   assert.equal(environment.GIT_CONFIG_NOSYSTEM, "1");
 });
 
@@ -118,15 +118,7 @@ async function checkoutFixture(t) {
       cwd: checkout,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([name]) => !name.toUpperCase().startsWith("GIT_"),
-          ),
-        ),
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: os.devNull,
-      },
+      env: sourceEnvironment(),
     });
   git("init", "--quiet");
   git("add", ".");

@@ -20,6 +20,13 @@ Windows 10 22H2 和 Windows 11 分别保留报告。Windows Server CI 通过不�
 不创建 tag、不发布 Release、不使用签名 secret。安装包使用正常应用标识和
 用户数据；使用专用测试账户进行安装版验收。
 
+用户明确选择当前账户时，先退出应用并备份旧安装、应用数据、WebView 数据、
+Roaming 下的应用路径 Store，以及 HKCU 的卸载和协议注册项。使用私有
+`CC_SWITCH_TEST_HOME`、`WEBVIEW2_USER_DATA_FOLDER` 和各 agent 目录 override；
+Tauri Store 仍使用系统 Roaming 路径，不能仅靠 APPDATA 环境变量隔离。
+登录通过正式 OAuth 流程，专用模型 API Key 不能替代登录。测试后按备份恢复
+原先的 Store 状态，保留原用户配置与会话。
+
 使用同 SHA 的桌面测试包，逐项记录系统 build、应用版本、SHA、
 截图及结果，不复制 key、配置正文或私人会话：
 
@@ -43,11 +50,27 @@ US$10，费用未知或预算不足即停止；不在这个离线脚本中调用
 临时 TestEnv 和应用的 LPAC 引擎；它不运行已安装的桌面窗口，不能代替上述 UI
 检查。此入口有开发环境前置，不属于一键离线探针。
 
-客户端需要 Git、pnpm 10.12.3 和现有 npm CLI；不需要 Rust/MSVC 或系统 Python。
-先 checkout 完整提交 SHA，保持 tracked 和 untracked 都干净。在该 checkout
-安装锁定依赖并准备运行时；这些命令不调用模型：
+客户端需要 Git、pnpm 10.12.3 和现有 npm CLI。先 checkout 完整提交 SHA，
+保持 tracked 和 untracked 都干净。要在客户端免装 Rust、MSVC 和系统 Python，
+从该 SHA 的 Windows Probe 下载 `document-engine-acceptance-<完整SHA>`，
+解压到 checkout 外的同级目录。在 checkout 里运行以下命令。
+先让包内验收脚本校验完整 manifest 和文件摘要，再把已校验的原生探针与构建回执
+复制到 checkout 忽略的资源目录。后续准备脚本会复用该产物。
 
 ```powershell
+$sha = (git rev-parse HEAD).Trim()
+$bundle = (Resolve-Path -LiteralPath "..\document-engine-acceptance-$sha").Path
+$manifest = Get-Content -Raw -LiteralPath (Join-Path $bundle 'acceptance-manifest.json') | ConvertFrom-Json
+if ($manifest.commit -cne $sha) { throw 'Windows Probe artifact SHA does not match checkout' }
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'test-document-engine.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Offline artifact verification or native probe failed' }
+$probes = Join-Path (Get-Location).Path 'assistant-runtime\resources\probes'
+foreach ($name in @('windows-child-probe.node', 'windows-child-probe.source.json')) {
+    if ($manifest.files.path -cnotcontains "runtime/probes/$name") { throw "Missing verified probe file $name" }
+}
+New-Item -ItemType Directory -Force -Path $probes | Out-Null
+Copy-Item -LiteralPath (Join-Path $bundle 'runtime\probes\windows-child-probe.node'), (Join-Path $bundle 'runtime\probes\windows-child-probe.source.json') -Destination $probes
+
 pnpm install --frozen-lockfile
 pnpm assistant:install
 pnpm assistant:prepare
@@ -56,7 +79,9 @@ git rev-parse HEAD
 git status --porcelain --untracked-files=normal
 ```
 
-只运行第一条不能满足 controller 的 sidecar 依赖。准备脚本使用现有 npm CLI
+这些命令只准备离线资源和验证工具。安装版界面与实模验收分别记录。
+
+controller 通过 `pnpm assistant:install` 安装 sidecar 依赖。准备脚本使用现有 npm CLI
 执行锁定的 `npm ci`，实际 controller 则必须使用包内 Node 22.23.4。
 将 driver artifact 和 root 提供的唯一 campaign 目录放在 checkout 外；以下
 示例假定它们是 checkout 的两个同级目录：

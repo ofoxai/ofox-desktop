@@ -393,6 +393,49 @@ const functionalFailure = z.object({
       stdoutBytes: count,
       stderrBytes: count,
       nodeCheckpointBeforeStep: z.int().min(1).max(14).nullable(),
+      nativeChildDenied: flag.optional(),
+      nativeChildResult: z
+        .enum([
+          "child-process-blocked",
+          "access-denied",
+          "file-not-found",
+          "path-not-found",
+          "invalid-handle",
+          "no-error",
+          "other",
+          "child-created",
+          "module-missing",
+          "module-load-failed",
+          "probe-failed",
+        ])
+        .nullish(),
+      nativeChildLoadCode: z
+        .enum([
+          "MODULE_NOT_FOUND",
+          "ERR_DLOPEN_FAILED",
+          "EISDIR",
+          "EACCES",
+          "EPERM",
+          "other",
+        ])
+        .nullish(),
+      nativeChildModuleArgNamespaced: flag.nullish(),
+      nativeChildLoaderWin32: z
+        .enum([
+          "5",
+          "126",
+          "127",
+          "193",
+          "1114",
+          "577",
+          "14001",
+          "998",
+          "unknown",
+        ])
+        .nullish(),
+      nativeChildSkiaLoad: z.enum(["loaded", "failed"]).nullish(),
+      nativeChildLeafStat: z.enum(["file", "other", "failed"]).nullish(),
+      nativeChildRealpath: z.enum(["resolved", "failed"]).nullish(),
       childSpawnResult: z
         .enum([
           "EPERM",

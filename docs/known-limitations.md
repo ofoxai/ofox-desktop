@@ -79,9 +79,29 @@ The functional gate rejected the result. A [follow-up kernel event check](https:
 returned `no-match`. Its report combined an empty query with an event whose caller
 could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
 completed successfully and found no KernelMode event 4 during the fixed Node
-process's lifetime. The underlying Windows error remains unknown.
-The remaining isolation checks, Pyodide and OfficeCLI still require native verification.
-Windows Python capability stays disabled until the native functional gate and client acceptance pass.
+process's lifetime. Run
+[44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
+paired the fixed request's failed return with Win32 error 367
+(`ERROR_CHILD_PROCESS_BLOCKED`). The diagnostic's private-directory removal
+separately returned access denied (5), leaving its overall result inconclusive.
+The fixed-scope cleanup in `dbb96647` passed the Server 2022
+[follow-up diagnostic](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236).
+Its digest-verified artifact records `diagnosticRecorded: true` and
+`verdict: child-process-blocked`; this is diagnostic evidence, not release admission.
+The candidate adds a fixed Node-API probe to observe the native denial inside
+the same restricted Node process. Native Win11 regressions reproduce the CommonJS
+loader's denied ancestor realpath lookup for both the probe and Skia. The verified
+cached Node now preserves its main and dependency paths; both native modules load
+without granting ancestor access. The unassisted functional run passes the
+same-process child denial, filesystem, network and image controls, Skia, and
+Pyodide. A separate native comparison locates OfficeCLI's missing temporary
+directory under the scrubbed LOCALAPPDATA, rather than the real Windows profile:
+`home/Packages/<profile name>/AC/Temp`. The launcher prepares this private task
+subtree before resume, with existing task permissions and no extra ACL grant.
+Per-machine admission still requires the entire native functional gate.
+Same-SHA Server 2022 and installed Win11 acceptance are tracked on
+[card #1723](https://app.fizzy.do/6179973/cards/1723); Windows 10 client evidence
+remains a separate requirement of the parent capability campaign.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

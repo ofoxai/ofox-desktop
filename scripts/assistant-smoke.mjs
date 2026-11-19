@@ -25,9 +25,8 @@ const environment = Object.fromEntries(
 // Run the actual copied production tree with no user credentials or SDK config.
 async function productionSmoke() {
   const assert = (await import("node:assert/strict")).default;
-  const { mkdir, mkdtemp, readFile, rm, writeFile } = await import(
-    "node:fs/promises"
-  );
+  const { mkdir, mkdtemp, readFile, rm, writeFile } =
+    await import("node:fs/promises");
   const { execFileSync } = await import("node:child_process");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
@@ -61,6 +60,16 @@ async function productionSmoke() {
   );
   const testToken = "in-memory-production-smoke-credential";
   try {
+    if (process.platform === "win32") {
+      const childProbe = require(
+        path.join(process.argv[3], "probes/windows-child-probe.node"),
+      );
+      // The Job-owned native verifier covers the suspended-child control.
+      assert.equal(typeof childProbe.probe, "function");
+      assert.throws(() => childProbe.probe("unexpected argument"), {
+        code: "ERR_PROBE_ARGUMENTS",
+      });
+    }
     // The legacy PDF.js build reads text (CJK through the shipped CMaps) and
     // renders a page without text through the native canvas.
     const { AttachmentStore } = await import(
