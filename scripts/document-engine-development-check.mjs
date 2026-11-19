@@ -157,11 +157,61 @@ const childCallStages = new Set([
   "native-test",
 ]);
 
+function childCallCleanup(result) {
+  const marker = "OFOX_CHILD_CALL_CLEANUP_V1";
+  const rows = (result.stderr ?? "")
+    .split(/\r?\n/)
+    .filter((row) => row.startsWith(marker));
+  if (!rows.length) return null;
+  // Even a malformed cleanup failure disqualifies a purported final verdict.
+  if (
+    rows.length !== 1 ||
+    result.outputLimited ||
+    result.exitCode !== 101 ||
+    result.childCall ||
+    result.incompleteStage
+  )
+    return {};
+  const headers = result.output.match(/^running \d+ tests?\r?$/gm) ?? [];
+  const summaries = result.output.match(/^test result: .*$/gm) ?? [];
+  if (
+    headers.length !== 1 ||
+    headers[0].trim() !== "running 1 test" ||
+    summaries.length !== 1 ||
+    !summaries[0].startsWith(
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;",
+    )
+  )
+    return {};
+  const [prefix, before, ...flags] = rows[0].split(" ");
+  if (
+    prefix !== marker ||
+    flags.length !== 4 ||
+    !flags.includes("false") ||
+    !flags.every((flag) => flag === "true" || flag === "false")
+  )
+    return {};
+  const [jobTerminated, controllerReaped, jobEmpty, scratchRemoved] = flags.map(
+    (flag) => flag === "true",
+  );
+  const cleanup = { jobTerminated, controllerReaped, jobEmpty, scratchRemoved };
+  if (childCallVerdicts.has(before))
+    return { controllerVerdict: before, cleanup };
+  if (before !== "cleanup" && childCallStages.has(before))
+    return { controllerIncompleteStage: before, cleanup };
+  return {};
+}
+
 function childCallReport(result) {
+  const cleanup = childCallCleanup(result);
   let verdict = "inconclusive";
   try {
     assertRustResult(result, true);
-    if (!result.incompleteStage && childCallVerdicts.has(result.childCall))
+    if (
+      !cleanup &&
+      !result.incompleteStage &&
+      childCallVerdicts.has(result.childCall)
+    )
       verdict = result.childCall;
   } catch {
     /* A failed test cannot establish a debugger observation. */
@@ -172,9 +222,12 @@ function childCallReport(result) {
     diagnosticRecorded: verdict !== "inconclusive",
     verdict,
     ...(verdict === "inconclusive" && {
-      incompleteStage: childCallStages.has(result.incompleteStage)
-        ? result.incompleteStage
-        : "native-test",
+      incompleteStage: cleanup
+        ? "cleanup"
+        : childCallStages.has(result.incompleteStage)
+          ? result.incompleteStage
+          : "native-test",
+      ...cleanup,
     }),
   };
 }

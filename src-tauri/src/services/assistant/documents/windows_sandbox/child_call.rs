@@ -89,6 +89,83 @@ fn check_time(deadline: Instant, cancelled: &AtomicBool) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ControllerCleanup {
+    job_terminated: bool,
+    controller_reaped: bool,
+    job_empty: bool,
+    scratch_removed: bool,
+}
+
+impl ControllerCleanup {
+    fn failure_receipt(self, result: &Result<&str, String>, failure_stage: &str) -> Option<String> {
+        if self.job_terminated && self.controller_reaped && self.job_empty && self.scratch_removed {
+            return None;
+        }
+        // The controller result predates cleanup and is never a final receipt here.
+        let before = result.as_ref().copied().unwrap_or(failure_stage);
+        Some(format!(
+            "OFOX_CHILD_CALL_CLEANUP_V1 {before} {} {} {} {}",
+            self.job_terminated, self.controller_reaped, self.job_empty, self.scratch_removed
+        ))
+    }
+}
+
+#[test]
+fn fixed_child_cleanup_receipt_preserves_the_controller_result_and_each_operation() {
+    let clean = ControllerCleanup {
+        job_terminated: true,
+        controller_reaped: true,
+        job_empty: true,
+        scratch_removed: true,
+    };
+    let observed = Ok("child-process-blocked");
+    let failed = Err("private controller error".to_owned());
+    assert_eq!(clean.failure_receipt(&observed, "exit"), None);
+    assert_eq!(clean.failure_receipt(&failed, "symbols"), None);
+    for (outcome, expected) in [
+        (
+            ControllerCleanup {
+                job_terminated: false,
+                ..clean
+            },
+            "false true true true",
+        ),
+        (
+            ControllerCleanup {
+                controller_reaped: false,
+                ..clean
+            },
+            "true false true true",
+        ),
+        (
+            ControllerCleanup {
+                job_empty: false,
+                ..clean
+            },
+            "true true false true",
+        ),
+        (
+            ControllerCleanup {
+                scratch_removed: false,
+                ..clean
+            },
+            "true true true false",
+        ),
+    ] {
+        assert_eq!(
+            outcome.failure_receipt(&observed, "exit"),
+            Some(format!(
+                "OFOX_CHILD_CALL_CLEANUP_V1 child-process-blocked {expected}"
+            ))
+        );
+        assert_eq!(
+            outcome.failure_receipt(&failed, "symbols"),
+            Some(format!("OFOX_CHILD_CALL_CLEANUP_V1 symbols {expected}"))
+        );
+    }
+}
+
 pub(super) fn observe(
     pid: u32,
     tid: u32,
@@ -214,6 +291,7 @@ pub(super) fn observe(
                 }
                 Ok(Ok(line)) if input.is_none() && observed.is_none() => {
                     observed = Some(verdict(&line).ok_or(UNAVAILABLE)?);
+                    failure_stage = "exit";
                 }
                 Ok(_) => return Err(UNAVAILABLE.into()),
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -239,8 +317,14 @@ pub(super) fn observe(
     let empty = wait_for_empty_job(&job, |_| {});
     drop(job);
     let removed = io(scratch.close());
-    if terminated.is_err() || reaped.is_err() || empty.is_err() || removed.is_err() {
-        eprintln!("OFOX_CHILD_CALL_INCOMPLETE_V1 cleanup");
+    let cleanup = ControllerCleanup {
+        job_terminated: terminated.is_ok(),
+        controller_reaped: reaped.is_ok(),
+        job_empty: empty.is_ok(),
+        scratch_removed: removed.is_ok(),
+    };
+    if let Some(receipt) = cleanup.failure_receipt(&result, failure_stage) {
+        eprintln!("{receipt}");
         return Err(UNAVAILABLE.into());
     }
     if result.is_err() {
