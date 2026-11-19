@@ -892,3 +892,16 @@ Server 2022 的检查点 7 结果。功能前置仍失败，后续隔离检查�
 尚未执行。事件 4 不含 `CreateProcessW` 返回点的 Win32 错误码。内置 libuv 会将未映射的
 错误归为 `UV_UNKNOWN`，无法从 Node 结果反推原值。Server 2022 的原始错误仍待独立诊断。
 [Node 22.23.4 的 libuv 错误映射](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/error.c#L153-L167)
+
+### Server 2022 检查点 7 的原始错误码复核
+
+运行 [44437664975](https://github.com/ofoxai/ofox-desktop/actions/runs/44437664975)
+（`d1af0ec4`，手动，第 1 次）要确认固定请求的 `CreateProcessW` 失败返回点上，
+同一线程记录的原始 Win32 错误。生产运行时准备和完整性检查通过，独立诊断失败。
+已核对产物 SHA-256，`summary.json` 和 `child-call-trace.log` 均记录
+`diagnosticRecorded=false`、`verdict=inconclusive`、`incompleteStage=cleanup`。
+
+诊断宿主在终止调试工具的 Job、等待控制器退出、确认该 Job 归零、移除私有临时目录
+四项中任一项出错时，只报告 `cleanup`。该分支会覆盖此前的观测结果或失败阶段。
+现有回执无法区分哪一项失败，也无法判定此次是否读到了错误码。Server 2022 的原始
+错误码仍待验证，Win11 的事件 4 无法补足这个数值。此次仅运行独立诊断。
