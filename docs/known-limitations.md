@@ -2,6 +2,20 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant task progress (2026-11-16)
+
+Task checklists are model-reported presentation. The shared plan tool and prompt
+guidance make multi-stage planning available without local configuration, but a
+model may omit a plan or leave it incomplete. The UI preserves those reported
+states rather than inferring success from tool returns or run completion.
+Historical summaries require new optional message metadata; older messages are
+not reconstructed into invented plans, and interrupted runs without an observed
+end time have no computed duration. Routine local operation records are live-only.
+See [the progress contract](assistant-progress.md) for persistence and validation.
+Browser verification uses actual components with synthetic data, and bundled
+runtime verification uses local mock gateways. Installed desktop acceptance,
+production-model planning and native Windows execution remain unverified.
+
 ## Assistant command verification scope (2026-11-14)
 
 Host-confirmed changes (`changed: true`) always require verification, including

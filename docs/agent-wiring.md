@@ -2,6 +2,11 @@
 
 This describes the implementation in this repository. External agents may change their own precedence and schemas; validate the installed version before changing it. Paths below use `~` as the user's home, not a developer-specific path. Shared policies are in [AGENTS](../AGENTS.md); unresolved limits are listed [separately](known-limitations.md).
 
+The builtin Assistant's [task progress](assistant-progress.md) is presentation
+independent of local configuration permissions. It uses a shared plan tool and
+optional per-reply snapshots; local file, shell, skill and MCP authority remain
+under their existing grants.
+
 ## Resolution, selection and restoration
 
 [agent_env](../src-tauri/src/agent_env.rs) resolves Codex/Claude directories in order: explicit application override, process environment, cached/refreshed login-shell environment, platform default. `CODEX_HOME` defaults to `~/.codex`; `CLAUDE_CONFIG_DIR` defaults to `~/.claude`. Claude MCP is normally `~/.claude.json`, but moves inside an explicit `CLAUDE_CONFIG_DIR`. The snapshot is seeded from last successful discovery and refreshed in the background; first discovery may wait. Hermes uses application override, `HERMES_HOME`, then `~/.hermes` on Unix or `%LOCALAPPDATA%/hermes` on Windows. Pi/dsh accept absolute or `~/` overrides through `PI_CODING_AGENT_DIR` / `DSH_HOME`.
