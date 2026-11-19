@@ -937,3 +937,13 @@ Win11 25H2 对照使用同版本 Rust 1.95 和 `tempfile 3.27.0`。在独立临�
 6/6 通过，Rust 1.95 控制器定点用例 1/1 通过。回放覆盖返回点的单行读数、缺失退出记录
 及旧格式记录。出现后续矛盾或观测工具报错时，分别记录 `return-conflict` 或
 `return-observer-error`，两者均撤销配对类别。本次仅验证协议，未测得原始 Win32 错误码。
+
+运行 [44450426997](https://github.com/ofoxai/ofox-desktop/actions/runs/44450426997)
+（`2be96f85`，Server 2022，手动，第 1 次）通过生产运行时准备和完整性检查。
+归档 SHA-256 已核对，`summary.json` 与 `child-call-trace.log` 两份记录一致。
+清理前的阶段为 `return-observer-error`。宿主只有在已收到固定调用的配对结果后才接受
+这一阶段。后续观测出错使该结果失效，回执没有 `pairedReturn` 或 `controllerVerdict`。
+这一阶段不能识别具体的工具错误，也不能还原已撤销的返回类别。
+
+工具 Job 终止、控制器回收及 Job 归零均成功；私有临时目录删除再次返回错误 5。
+整次独立诊断失败，检查点 7 的原始 Win32 错误码仍未知。无调试器功能门禁尚未通过。
