@@ -136,6 +136,11 @@ e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能�
 `diagnosticRecorded` 表示。目录删除失败时，`scratchRemovalError` 单独给出删除操作
 的 Windows 错误类别。两个字段均不参与引擎准入。
 
+控制器核对进程、主线程、返回地址、栈位置和调用次数后，在该返回点记录一次结果。
+固定请求参数已经匹配，但尚未核对到返回时可能报告 `return-pair`。
+已取得返回后，记录矛盾会报告 `return-conflict`，观测工具报错会报告
+`return-observer-error`。两种情形均撤销返回类别。
+
 开发工作流设置 `OFOX_DOCUMENT_CHILD_BLOCK_EVENT=1` 时，仅功能前置的 Node 在检查点 7
 以 `UNKNOWN` 退出才触发只读事件查询。控制器从同一个已退出进程的句柄获取创建和退出时间。
 在该窗口内查询 KernelMode 事件 4，窗口最多 60 秒，查询按毫秒向外取整，最多检查 32 条候选。

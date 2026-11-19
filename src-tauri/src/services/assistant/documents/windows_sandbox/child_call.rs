@@ -112,6 +112,8 @@ impl ControllerReplies {
                 "observation",
                 "request",
                 "return-pair",
+                "return-conflict",
+                "return-observer-error",
                 "last-error",
                 "last-error-zero",
                 "last-error-unreadable",
@@ -122,8 +124,8 @@ impl ControllerReplies {
                 "exit-stderr",
             ];
             let stage = stages.into_iter().find(|v| *v == stage).ok_or(())?;
-            if stage == "return-pair" {
-                self.paired = None;
+            if matches!(stage, "return-conflict" | "return-observer-error") {
+                self.paired.take().ok_or(())?;
             } else if self.paired.is_some() && !stage.starts_with("exit") {
                 return Err(());
             }
@@ -152,6 +154,7 @@ impl ControllerReplies {
 fn fixed_child_paired_return_requires_an_armed_consistent_protocol() {
     let mut r = ControllerReplies::default();
     assert!(r.accept("PAIRED access-denied").is_err());
+    assert!(r.accept("INCOMPLETE return-conflict").is_err());
     r.accept("ARMED").unwrap();
     assert!(r.accept("PAIRED not-reached").is_err());
     assert!(r.accept("PAIRED private-path").is_err());
@@ -164,12 +167,14 @@ fn fixed_child_paired_return_requires_an_armed_consistent_protocol() {
     r.accept("INCOMPLETE exit-marker").unwrap();
     assert_eq!(r.terminal, Some(Err("exit-marker")));
     assert!(r.accept("access-denied").is_err());
-    let mut contradicted = ControllerReplies::default();
-    for row in ["ARMED", "PAIRED access-denied", "INCOMPLETE return-pair"] {
-        contradicted.accept(row).unwrap();
+    for stage in ["return-conflict", "return-observer-error"] {
+        let mut invalidated = ControllerReplies::default();
+        invalidated.accept("ARMED").unwrap();
+        invalidated.accept("PAIRED access-denied").unwrap();
+        invalidated.accept(&format!("INCOMPLETE {stage}")).unwrap();
+        assert_eq!(invalidated.paired, None);
+        assert_eq!(invalidated.terminal, Some(Err(stage)));
     }
-    assert_eq!(contradicted.paired, None);
-    assert_eq!(contradicted.terminal, Some(Err("return-pair")));
     for value in ["child-process-blocked", "not-reached"] {
         let mut r = ControllerReplies::default();
         r.accept("ARMED").unwrap();

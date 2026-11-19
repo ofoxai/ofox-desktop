@@ -196,6 +196,46 @@ test("only a closed failure stage and verdict survive the native artifact bounda
       },
     ],
     [
+      [failure + "return-conflict none true true true access-denied"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerIncompleteStage: "return-conflict",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: false,
+        },
+        scratchRemovalError: "access-denied",
+      },
+    ],
+    [
+      [
+        failure +
+          "return-conflict child-process-blocked true true true removed",
+      ],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [failure + "return-observer-error none true true true removed"],
+      101,
+      "inconclusive",
+      "return-observer-error",
+      {
+        controllerIncompleteStage: "return-observer-error",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: true,
+        },
+      },
+    ],
+    [
       [failure + "exit private-path true true true removed"],
       101,
       "inconclusive",
