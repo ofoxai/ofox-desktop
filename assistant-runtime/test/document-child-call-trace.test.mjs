@@ -105,8 +105,156 @@ test("only a closed failure stage and verdict survive the native artifact bounda
   const { spawn } = await import("node:child_process");
   const marker = "OFOX_CHILD_CALL_V1 ";
   const cleanup = "OFOX_CHILD_CALL_CLEANUP_V1 ";
+  const failure = "OFOX_CHILD_CALL_FAILURE_V2 ";
   for (const [rows, exit, verdict, incompleteStage, detail] of [
     [[marker + "access-denied"], 0, "access-denied", undefined],
+    [
+      ["OFOX_CHILD_CALL_CONTROLLER_V1 access-denied"],
+      101,
+      "inconclusive",
+      "native-test",
+      { controllerVerdict: "access-denied", pairedReturn: "access-denied" },
+    ],
+    [
+      ["OFOX_CHILD_CALL_CONTROLLER_V1 not-reached"],
+      101,
+      "inconclusive",
+      "native-test",
+      { controllerVerdict: "not-reached" },
+    ],
+    [
+      [
+        "OFOX_CHILD_CALL_CONTROLLER_V1 access-denied",
+        marker + "child-process-blocked",
+      ],
+      0,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      ["OFOX_CHILD_CALL_CONTROLLER_V1 access-denied", marker + "access-denied"],
+      0,
+      "access-denied",
+      undefined,
+    ],
+    [
+      [
+        "OFOX_CHILD_CALL_CONTROLLER_V1 access-denied",
+        "OFOX_CHILD_CALL_CONTROLLER_V1 access-denied",
+      ],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [failure + "exit child-process-blocked true true true sharing-violation"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerIncompleteStage: "exit",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: false,
+        },
+        pairedReturn: "child-process-blocked",
+        scratchRemovalError: "sharing-violation",
+      },
+    ],
+    [
+      [failure + "exit access-denied true true true removed"],
+      101,
+      "inconclusive",
+      "exit",
+      {
+        controllerIncompleteStage: "exit",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: true,
+        },
+        pairedReturn: "access-denied",
+      },
+    ],
+    [
+      [failure + "symbols none true true true access-denied"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerIncompleteStage: "symbols",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: false,
+        },
+        scratchRemovalError: "access-denied",
+      },
+    ],
+    [
+      [failure + "exit private-path true true true removed"],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [failure + "exit not-reached true true true removed"],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [failure + "symbols access-denied true true true removed"],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [
+        failure +
+          "child-process-blocked access-denied true true true sharing-violation",
+      ],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [
+        failure +
+          "child-process-blocked child-process-blocked true true true removed",
+      ],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [failure + "exit none true true true private-path"],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [
+        failure + "exit access-denied true true true removed",
+        marker + "access-denied",
+      ],
+      0,
+      "inconclusive",
+      "native-test",
+    ],
+    [
+      [
+        failure + "exit access-denied true true true removed",
+        cleanup + "exit true false true true",
+      ],
+      101,
+      "inconclusive",
+      "native-test",
+    ],
     [
       [cleanup + "child-process-blocked true true true false"],
       101,

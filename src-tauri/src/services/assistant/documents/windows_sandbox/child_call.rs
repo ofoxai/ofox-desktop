@@ -89,24 +89,164 @@ fn check_time(deadline: Instant, cancelled: &AtomicBool) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Default)]
+struct ControllerReplies {
+    armed: bool,
+    paired: Option<&'static str>,
+    terminal: Option<Result<&'static str, &'static str>>,
+}
+
+impl ControllerReplies {
+    // Only ARMED releases the fixture. A paired return is provisional until
+    // the controller exits successfully and the original Node test finishes.
+    fn accept(&mut self, line: &str) -> Result<(), ()> {
+        if self.terminal.is_some() {
+            return Err(());
+        }
+        if let Some(stage) = line.strip_prefix("INCOMPLETE ") {
+            let stages = [
+                "target",
+                "import",
+                "symbols",
+                "arm",
+                "observation",
+                "request",
+                "return-pair",
+                "last-error",
+                "last-error-zero",
+                "last-error-unreadable",
+                "exit",
+                "exit-marker",
+                "exit-wait",
+                "exit-status",
+                "exit-stderr",
+            ];
+            let stage = stages.into_iter().find(|v| *v == stage).ok_or(())?;
+            if stage == "return-pair" {
+                self.paired = None;
+            } else if self.paired.is_some() && !stage.starts_with("exit") {
+                return Err(());
+            }
+            self.terminal = Some(Err(stage));
+        } else if line == "ARMED" && !self.armed {
+            self.armed = true;
+        } else if !self.armed {
+            return Err(());
+        } else if let Some(value) = line.strip_prefix("PAIRED ") {
+            if self.paired.is_some() {
+                return Err(());
+            }
+            self.paired = Some(verdict(value).filter(|v| *v != "not-reached").ok_or(())?);
+        } else {
+            let value = verdict(line).ok_or(())?;
+            if self.paired != (value != "not-reached").then_some(value) {
+                return Err(());
+            }
+            self.terminal = Some(Ok(value));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn fixed_child_paired_return_requires_an_armed_consistent_protocol() {
+    let mut r = ControllerReplies::default();
+    assert!(r.accept("PAIRED access-denied").is_err());
+    r.accept("ARMED").unwrap();
+    assert!(r.accept("PAIRED not-reached").is_err());
+    assert!(r.accept("PAIRED private-path").is_err());
+    r.accept("PAIRED access-denied").unwrap();
+    assert_eq!(r.paired, Some("access-denied"));
+    assert_eq!(r.terminal, None);
+    assert!(r.accept("PAIRED access-denied").is_err());
+    assert!(r.accept("child-process-blocked").is_err());
+    assert!(r.accept("INCOMPLETE symbols").is_err());
+    r.accept("INCOMPLETE exit-marker").unwrap();
+    assert_eq!(r.terminal, Some(Err("exit-marker")));
+    assert!(r.accept("access-denied").is_err());
+    let mut contradicted = ControllerReplies::default();
+    for row in ["ARMED", "PAIRED access-denied", "INCOMPLETE return-pair"] {
+        contradicted.accept(row).unwrap();
+    }
+    assert_eq!(contradicted.paired, None);
+    assert_eq!(contradicted.terminal, Some(Err("return-pair")));
+    for value in ["child-process-blocked", "not-reached"] {
+        let mut r = ControllerReplies::default();
+        r.accept("ARMED").unwrap();
+        if value != "not-reached" {
+            assert!(r.accept(value).is_err());
+            r.accept(&format!("PAIRED {value}")).unwrap();
+        }
+        r.accept(value).unwrap();
+        assert_eq!(r.terminal, Some(Ok(value)));
+    }
+}
+
+fn remove_controller_scratch(scratch: tempfile::TempDir) -> &'static str {
+    // TempDir::close wraps the native error with its path. Perform its one
+    // removal operation directly so only the native classification is kept.
+    match fs::remove_dir_all(scratch.keep()) {
+        Ok(()) => "removed",
+        Err(error) => match error.raw_os_error() {
+            Some(5) => "access-denied",
+            Some(32) => "sharing-violation",
+            Some(33) => "lock-violation",
+            Some(145) => "directory-not-empty",
+            Some(2 | 3) => "not-found",
+            _ => "other",
+        },
+    }
+}
+
+#[test]
+fn fixed_child_scratch_removal_classifies_an_exclusive_file_handle() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let parent = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir_in(parent.path()).unwrap();
+    assert_eq!(remove_controller_scratch(scratch), "removed");
+    let scratch = tempfile::tempdir_in(parent.path()).unwrap();
+    let path = scratch.path().join("fixture");
+    let held = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    let reason = remove_controller_scratch(scratch);
+    drop(held);
+    parent.close().unwrap();
+    assert_eq!(reason, "sharing-violation");
+}
+
 #[derive(Clone, Copy)]
 struct ControllerCleanup {
     job_terminated: bool,
     controller_reaped: bool,
     job_empty: bool,
-    scratch_removed: bool,
+    removal: &'static str,
 }
 
 impl ControllerCleanup {
-    fn failure_receipt(self, result: &Result<&str, String>, failure_stage: &str) -> Option<String> {
-        if self.job_terminated && self.controller_reaped && self.job_empty && self.scratch_removed {
+    fn failure_receipt(
+        self,
+        result: &Result<&str, String>,
+        failure_stage: &str,
+        paired: Option<&str>,
+    ) -> Option<String> {
+        if result.is_ok()
+            && self.job_terminated
+            && self.controller_reaped
+            && self.job_empty
+            && self.removal == "removed"
+        {
             return None;
         }
         // The controller result predates cleanup and is never a final receipt here.
         let before = result.as_ref().copied().unwrap_or(failure_stage);
+        let paired = paired.unwrap_or("none");
         Some(format!(
-            "OFOX_CHILD_CALL_CLEANUP_V1 {before} {} {} {} {}",
-            self.job_terminated, self.controller_reaped, self.job_empty, self.scratch_removed
+            "OFOX_CHILD_CALL_FAILURE_V2 {before} {paired} {} {} {} {}",
+            self.job_terminated, self.controller_reaped, self.job_empty, self.removal
         ))
     }
 }
@@ -117,51 +257,61 @@ fn fixed_child_cleanup_receipt_preserves_the_controller_result_and_each_operatio
         job_terminated: true,
         controller_reaped: true,
         job_empty: true,
-        scratch_removed: true,
+        removal: "removed",
     };
     let observed = Ok("child-process-blocked");
     let failed = Err("private controller error".to_owned());
-    assert_eq!(clean.failure_receipt(&observed, "exit"), None);
-    assert_eq!(clean.failure_receipt(&failed, "symbols"), None);
+    assert_eq!(
+        clean.failure_receipt(&observed, "exit", Some("child-process-blocked")),
+        None
+    );
+    assert_eq!(
+        clean
+            .failure_receipt(&failed, "exit-marker", Some("access-denied"))
+            .as_deref(),
+        Some("OFOX_CHILD_CALL_FAILURE_V2 exit-marker access-denied true true true removed")
+    );
     for (outcome, expected) in [
         (
             ControllerCleanup {
                 job_terminated: false,
                 ..clean
             },
-            "false true true true",
+            "false true true removed",
         ),
         (
             ControllerCleanup {
                 controller_reaped: false,
                 ..clean
             },
-            "true false true true",
+            "true false true removed",
         ),
         (
             ControllerCleanup {
                 job_empty: false,
                 ..clean
             },
-            "true true false true",
+            "true true false removed",
         ),
         (
             ControllerCleanup {
-                scratch_removed: false,
+                removal: "sharing-violation",
                 ..clean
             },
-            "true true true false",
+            "true true true sharing-violation",
         ),
     ] {
         assert_eq!(
-            outcome.failure_receipt(&observed, "exit"),
+            outcome.failure_receipt(&observed, "exit", Some("child-process-blocked")),
             Some(format!(
-                "OFOX_CHILD_CALL_CLEANUP_V1 child-process-blocked {expected}"
+                "OFOX_CHILD_CALL_FAILURE_V2 child-process-blocked child-process-blocked {expected}"
             ))
         );
         assert_eq!(
-            outcome.failure_receipt(&failed, "symbols"),
-            Some(format!("OFOX_CHILD_CALL_CLEANUP_V1 symbols {expected}"))
+            outcome.failure_receipt(&failed, "symbols", None),
+            Some(format!(
+                "OFOX_CHILD_CALL_FAILURE_V2 symbols none {expected}"
+            ))
         );
     }
 }
@@ -239,6 +389,7 @@ pub(super) fn observe(
         .stderr(Stdio::null())
         .spawn())?;
     let mut failure_stage = "arm";
+    let mut replies = ControllerReplies::default();
     let result = (|| {
         unsafe {
             win(AssignProcessToJobObject(
@@ -254,46 +405,35 @@ pub(super) fn observe(
         let pipe = child.stdout.take().ok_or(UNAVAILABLE)?;
         let (tx, rx) = mpsc::channel();
         let reader = thread::spawn(move || {
-            // Two short ASCII lines are the entire controller protocol.
-            for line in BufReader::new(pipe.take(256)).lines().take(3) {
+            // ARMED, optional PAIRED and a terminal line. Detect any fourth line.
+            for line in BufReader::new(pipe.take(256)).lines().take(4) {
                 if tx.send(line).is_err() {
                     break;
                 }
             }
         });
         let mut input = Some(input);
-        let mut observed = None;
         loop {
             check_time(deadline, cancelled)?;
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(line)) if line.starts_with("INCOMPLETE ") => {
-                    failure_stage = [
-                        "target",
-                        "import",
-                        "symbols",
-                        "arm",
-                        "observation",
-                        "request",
-                        "return-pair",
-                        "last-error",
-                        "last-error-zero",
-                        "last-error-unreadable",
-                        "exit",
-                    ]
-                    .into_iter()
-                    .find(|phase| line.strip_prefix("INCOMPLETE ") == Some(*phase))
-                    .unwrap_or("native-test");
+                Ok(Ok(line)) => {
+                    replies.accept(&line).map_err(|()| {
+                        failure_stage = "native-test";
+                        UNAVAILABLE.to_owned()
+                    })?;
+                    if line == "ARMED" {
+                        failure_stage = "observation";
+                        io(File::from(input.take().ok_or(UNAVAILABLE)?).write_all(b"G"))?;
+                    } else if let Some(Err(stage)) = replies.terminal {
+                        failure_stage = stage;
+                    } else {
+                        failure_stage = "exit";
+                    }
+                }
+                Ok(Err(_)) => {
+                    failure_stage = "native-test";
                     return Err(UNAVAILABLE.into());
                 }
-                Ok(Ok(line)) if line == "ARMED" && input.is_some() => {
-                    failure_stage = "observation";
-                    io(File::from(input.take().ok_or(UNAVAILABLE)?).write_all(b"G"))?;
-                }
-                Ok(Ok(line)) if input.is_none() && observed.is_none() => {
-                    observed = Some(verdict(&line).ok_or(UNAVAILABLE)?);
-                    failure_stage = "exit";
-                }
-                Ok(_) => return Err(UNAVAILABLE.into()),
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -302,9 +442,14 @@ pub(super) fn observe(
         loop {
             check_time(deadline, cancelled)?;
             if let Some(status) = io(child.try_wait())? {
-                return observed
-                    .filter(|_| status.success())
-                    .ok_or_else(|| UNAVAILABLE.to_owned());
+                return match (replies.terminal, status.success()) {
+                    (Some(Ok(value)), true) => Ok(value),
+                    (Some(Err(_)), true) => {
+                        failure_stage = "native-test";
+                        Err(UNAVAILABLE.into())
+                    }
+                    _ => Err(UNAVAILABLE.into()),
+                };
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -316,19 +461,21 @@ pub(super) fn observe(
     let reaped = io(child.wait());
     let empty = wait_for_empty_job(&job, |_| {});
     drop(job);
-    let removed = io(scratch.close());
     let cleanup = ControllerCleanup {
         job_terminated: terminated.is_ok(),
         controller_reaped: reaped.is_ok(),
         job_empty: empty.is_ok(),
-        scratch_removed: removed.is_ok(),
+        removal: remove_controller_scratch(scratch),
     };
-    if let Some(receipt) = cleanup.failure_receipt(&result, failure_stage) {
+    let paired = replies
+        .paired
+        .filter(|_| result.is_ok() || failure_stage.starts_with("exit"));
+    if let Some(receipt) = cleanup.failure_receipt(&result, failure_stage, paired) {
         eprintln!("{receipt}");
         return Err(UNAVAILABLE.into());
     }
-    if result.is_err() {
-        eprintln!("OFOX_CHILD_CALL_INCOMPLETE_V1 {failure_stage}");
+    if let Ok(value) = &result {
+        eprintln!("OFOX_CHILD_CALL_CONTROLLER_V1 {value}");
     }
     result
 }

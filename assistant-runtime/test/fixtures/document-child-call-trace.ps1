@@ -15,6 +15,21 @@ function Replay([string[]]$Lines, [string[]]$Setup = $typeProof) {
     } catch { return 'inconclusive' }
 }
 function Check($Actual, $Expected) { if ($Actual -cne $Expected) { throw "unexpected fixture result: $Actual (expected $Expected)" } }
+$pending = New-ChildCallState $exe
+foreach ($line in ($typeProof + $allow + @($errorValue))) { Read-ChildCallLine $pending $line }
+Check (Get-ChildCallProgress $pending) $null
+Read-ChildCallLine $pending 'OFOX_CALL RETURN'
+Check (Get-ChildCallProgress $pending) 'PAIRED child-process-blocked'
+$script:failureStage = 'exit-marker'
+$badExit = $false
+try { Read-ChildCallLine $pending 'OFOX_CALL EXIT_NONE' } catch { $badExit = $true }
+Check $badExit $true
+Check $script:failureStage 'return-pair'
+$incomplete = $false
+try { Complete-ChildCall $pending } catch { $incomplete = $true }
+Check $incomplete $true
+Read-ChildCallLine $pending $leave
+Check (Get-ChildCallProgress $pending) $null
 Check (Replay @($armed,$empty)) 'not-reached'
 Check (Replay @($armed,$empty) @()) 'inconclusive'
 Check (Replay @($armed,$empty) @('OFOX_CALL FIELD_BEGIN')) 'inconclusive'

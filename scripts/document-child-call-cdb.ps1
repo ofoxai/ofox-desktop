@@ -10,6 +10,14 @@ function ConvertTo-ChildCallPath([string]$Value) {
 }
 
 function Read-ChildCallLine($State, [string]$Line) {
+    try { Read-ChildCallRecord $State $Line } catch {
+        # A conflicting record after a pair invalidates its attribution.
+        if ($State.stage -in @('returned','done')) { $script:failureStage = 'return-pair' }
+        throw
+    }
+}
+
+function Read-ChildCallRecord($State, [string]$Line) {
     if ($Line -match '^(?:\d+:)?\d+:[a-f0-9]+>\s*(.*)$') {
         $Line = $Matches[1]
         # Anchored markers exclude echoed commands; joined debugger errors still count.
@@ -81,6 +89,11 @@ function Read-ChildCallLine($State, [string]$Line) {
 function Complete-ChildCall($State) {
     if ($State.stage -ne 'done' -or -not $State.result) { throw 'incomplete' }
     return $State.result
+}
+
+function Get-ChildCallProgress($State) {
+    if ($State.stage -eq 'armed') { return 'ARMED' }
+    if ($State.stage -eq 'returned') { return ('PAIRED ' + $State.result) }
 }
 
 # Locate the fixed API in the pinned image's PE32+ import table. The live
@@ -208,7 +221,10 @@ function Invoke-FixedChildCall {
         $out = $debug.StandardOutput.ReadLineAsync()
         $total = 0
         while ($true) {
-            if ($err.IsCompleted -and $err.GetAwaiter().GetResult() -ne 0) { throw 'debugger_error' }
+            if ($err.IsCompleted -and $err.GetAwaiter().GetResult() -ne 0) {
+                if ($state.stage -in @('returned', 'done')) { $script:failureStage = 'exit-stderr' }
+                throw 'debugger_error'
+            }
             if (-not $out.Wait(50)) { continue }
             $line = $out.GetAwaiter().GetResult()
             if ($null -eq $line) { break }
@@ -222,11 +238,14 @@ function Invoke-FixedChildCall {
                 'field' { 'symbols' } 'arm-ready' { 'arm' }
                 'armed' { 'observation' } 'entry' { 'request' } 'image' { 'request' }
                 'args' { 'return-pair' } 'failed' { 'last-error' } 'result' { 'return-pair' }
-                default { 'exit' }
+                'returned' { 'exit-marker' } default { 'exit' }
             }
-            if ($state.stage -eq 'armed') { [Console]::Out.WriteLine('ARMED'); [Console]::Out.Flush() }
+            $progress = Get-ChildCallProgress $state
+            if ($progress) { [Console]::Out.WriteLine($progress); [Console]::Out.Flush() }
         }
-        if (-not $debug.WaitForExit(2000) -or $debug.ExitCode -notin @(0,1) -or $err.GetAwaiter().GetResult() -ne 0) { throw 'exit' }
+        if (-not $debug.WaitForExit(2000)) { $script:failureStage = 'exit-wait'; throw 'exit' }
+        if ($debug.ExitCode -notin @(0,1)) { $script:failureStage = 'exit-status'; throw 'exit' }
+        if ($err.GetAwaiter().GetResult() -ne 0) { $script:failureStage = 'exit-stderr'; throw 'exit' }
         [Console]::Out.WriteLine((Complete-ChildCall $state))
     } finally {
         if (-not $debug.HasExited) { $debug.Kill($true); $null = $debug.WaitForExit(2000) }
