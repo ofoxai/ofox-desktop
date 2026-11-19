@@ -122,7 +122,11 @@ jobs:
           # windows-2022 与 ubuntu 缓存分开——windows 的 target/ 目录里是 .pdb/.lib
           # 与 linux 完全不兼容，共享 cache key 会互相 invalidate。
           key: windows-cargo-debug0-v2-${{ hashFiles('src-tauri/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-cargo-debug0-v2-
+          # Both Windows workflows use MSVC, debug0, and these same paths.
+          # Restore matching development dependencies before a cold build.
+          restore-keys: |
+            document-engine-development-windows-cargo-debug0-v3-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'rust-toolchain.toml') }}
+            windows-cargo-debug0-v2-
 
       # tauri-build 会检查 frontend dist 是否存在（就算这里只 build lib+bins 不装 WebView2
       # 也过一遍 build script）。给个空 dist 占位，与 ci.yml backend job 保持一致。

@@ -80,6 +80,7 @@ jobs:
           key: branch-packages-${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             branch-packages-${{ matrix.platform }}-cargo-
+            ${{ runner.os == 'Windows' && format('windows-cargo-debug0-v2-{0}', hashFiles('src-tauri/Cargo.lock', 'rust-toolchain.toml')) || format('{0}-{1}-cargo-', runner.os, runner.arch) }}
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
