@@ -178,31 +178,6 @@ jobs:
             Write-Host "Verified $probe artifact directory and SHA-256"
           }
 
-      # The fresh-install test asks the real Codex to validate the config Ofox writes
-      # (`codex app-server --strict-config`). Without Codex on PATH it is skipped.
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex
-        shell: powershell
-
-      # Compile and run all tests, including Windows file-lock/cmd fixtures.
-      # Use Windows PowerShell 5.1, the same entry point as a fresh test host.
-      - name: Windows lifecycle checks
-        run: .\scripts\test-windows.ps1 -BackendOnly -OutputDirectory artifacts/windows-tests/ci
-        shell: powershell
-
-      - name: Prove copyback cancellation regressions RED and GREEN
-        run: .\scripts\test-document-copyback-regression.ps1 -OutDirectory "$env:RUNNER_TEMP\document-copyback-regression-$env:GITHUB_RUN_ATTEMPT"
-        shell: powershell
-
-      - name: Upload native copyback regression evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: document-copyback-regression-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/document-copyback-regression-${{ github.run_attempt }}/
-          retention-days: 30
-          if-no-files-found: warn
-
       - name: Package document engine client acceptance
         id: document-package
         run: .\scripts\package-document-acceptance.ps1 -Commit $env:GITHUB_SHA -OutDirectory artifacts/document-engine-acceptance
@@ -229,6 +204,31 @@ jobs:
         with:
           name: document-engine-results-${{ github.sha }}
           path: artifacts/document-engine-results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # The fresh-install test asks the real Codex to validate the config Ofox writes
+      # (`codex app-server --strict-config`). Without Codex on PATH it is skipped.
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+        shell: powershell
+
+      # Compile and run all tests, including Windows file-lock/cmd fixtures.
+      # Use Windows PowerShell 5.1, the same entry point as a fresh test host.
+      - name: Windows lifecycle checks
+        run: .\scripts\test-windows.ps1 -BackendOnly -OutputDirectory artifacts/windows-tests/ci
+        shell: powershell
+
+      - name: Prove copyback cancellation regressions RED and GREEN
+        run: .\scripts\test-document-copyback-regression.ps1 -OutDirectory "$env:RUNNER_TEMP\document-copyback-regression-$env:GITHUB_RUN_ATTEMPT"
+        shell: powershell
+
+      - name: Upload native copyback regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: document-copyback-regression-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/document-copyback-regression-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn
 
