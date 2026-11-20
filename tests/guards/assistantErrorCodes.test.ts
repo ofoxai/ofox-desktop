@@ -55,7 +55,10 @@ function productionSource(source: string) {
     source,
   );
   if (externalTests) return source.slice(0, externalTests.index);
-  return source.split("#[cfg(test)]")[0];
+  const inlineTests = /(?:^|\r?\n)\s*#\[cfg\(test\)\]\s*mod tests\s*\{/.exec(
+    source,
+  );
+  return inlineTests ? source.slice(0, inlineTests.index) : source;
 }
 
 function literalErrorCodes(source: string) {
@@ -138,6 +141,23 @@ describe("assistant error code parity", () => {
       ]);
     },
   );
+
+  it("keeps production after conditional fields and helpers before inline tests", () => {
+    const source = [
+      "struct Host {",
+      "    #[cfg(test)]",
+      "    barrier: (),",
+      "}",
+      "#[cfg(test)]",
+      "fn helper() {}",
+      'fn production() { "assistant_still_production"; }',
+      "#[cfg(test)]",
+      'mod tests { fn fixture() { "assistant_fixture_only"; } }',
+    ].join("\n");
+    expect(literalErrorCodes(productionSource(source))).toEqual([
+      "assistant_still_production",
+    ]);
+  });
 
   it("maps exactly the codes the backend can send, plus the renderer's own", () => {
     const backend = backendCodes();

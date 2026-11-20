@@ -9099,6 +9099,60 @@ it("shows cold catalog progress and offers an explicit retry after a source refr
   await waitFor(() => expect(mocks.bootstrap).toHaveBeenLastCalledWith(true));
 });
 
+it("keeps chat usable while document preparation finishes and replays its early capability update", async () => {
+  let resolveBoot!: (value: AssistantBootstrap) => void;
+  mocks.bootstrap.mockReturnValueOnce(
+    new Promise<AssistantBootstrap>((resolve) => {
+      resolveBoot = resolve;
+    }),
+  );
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(mocks.listener).toBeDefined());
+  const readyRuntime = {
+    ...capabilities.runtime,
+    documents: { formats: ["pptx"], python: true },
+  };
+  const update = {
+    type: "runtime_state",
+    sessionId: "",
+    runId: "",
+    operationId: "",
+    data: {
+      owner: capabilities.owner,
+      generation: capabilities.authorityGeneration,
+      runtime: readyRuntime,
+    },
+  } as unknown as AssistantEvent;
+  act(() => mocks.listener?.(structuredClone(update)));
+  await act(async () =>
+    resolveBoot({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    }),
+  );
+  expect(hook.result.current.bootstrap?.models).toEqual(capabilities.models);
+  expect(hook.result.current.bootstrap?.runtime).toEqual(readyRuntime);
+  const foreign = structuredClone(update) as any;
+  foreign.data.owner = "other";
+  foreign.data.runtime.available = false;
+  act(() => mocks.listener?.(foreign));
+  const stale = structuredClone(foreign) as any;
+  stale.data.owner = capabilities.owner;
+  stale.data.generation++;
+  act(() => mocks.listener?.(stale));
+  expect(hook.result.current.bootstrap?.runtime).toEqual(readyRuntime);
+  mocks.bootstrap.mockResolvedValueOnce({
+    ...capabilities,
+    runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+  });
+  await act(async () => {
+    await hook.result.current.loadBootstrap();
+  });
+  expect(hook.result.current.bootstrap?.runtime.documents).toEqual({
+    formats: ["pptx"],
+  });
+});
+
 it("opens request records after the conversation menu closes and returns keyboard focus", async () => {
   const user = userEvent.setup();
   await openConversation();

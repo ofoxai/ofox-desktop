@@ -243,7 +243,7 @@ export interface AssistantBootstrap {
     reason: string | null;
     version: string | null;
     /** Document formats the runtime can make; absent when it makes none. */
-    documents?: { formats: string[] };
+    documents?: { formats: string[]; python?: boolean };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */
@@ -1091,6 +1091,14 @@ export interface AssistantSwitchVersionRequest {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
+  | {
+      type: "runtime_state";
+      data: {
+        owner: string;
+        generation: number;
+        runtime: AssistantBootstrap["runtime"];
+      };
+    }
   | {
       type: "task_plan";
       data: {

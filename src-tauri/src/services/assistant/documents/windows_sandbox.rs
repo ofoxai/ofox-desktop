@@ -3633,7 +3633,10 @@ pub fn windows_document_engine_proven(runtime_root: &Path) -> bool {
     let Some(caches) = CACHE.get() else {
         return false;
     };
-    let Ok(caches) = caches.lock() else {
+    // Presentation must not block chat while a worker copies/hashes a large
+    // runtime under CACHE. Busy or unproven is unavailable; execution still
+    // waits for, and independently rechecks, the complete native proof.
+    let Ok(caches) = caches.try_lock() else {
         return false;
     };
     let Some(runtime) = caches.get(&root) else {
@@ -3641,7 +3644,7 @@ pub fn windows_document_engine_proven(runtime_root: &Path) -> bool {
     };
     ADMITTED
         .get_or_init(Default::default)
-        .lock()
+        .try_lock()
         .is_ok_and(|proofs| proofs.get(&root) == Some(&runtime.digest))
 }
 

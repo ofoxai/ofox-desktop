@@ -412,6 +412,13 @@ pub struct AssistantHost {
     /// The bundled document engines; found once, as they never change while
     /// the app runs.
     engines: OnceLock<Engines>,
+    /// Optional document isolation is warmed outside opening chat and ordinary
+    /// text turns: 0 = idle/retryable, 1 = pending, 2 = successfully prepared.
+    document_preparation: AtomicU64,
+    document_preparation_finished: tokio::sync::Notify,
+    #[cfg(test)]
+    document_preparation_barrier:
+        Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// The `sandbox-exec` officecli runs under, once a probe showed it works
     /// there (see `documents::create`).
     pub(super) office_sandbox: EngineSandbox,
@@ -838,6 +845,10 @@ impl AssistantHost {
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
+            document_preparation: AtomicU64::new(0),
+            document_preparation_finished: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            document_preparation_barrier: Mutex::default(),
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
             python_sandbox: EngineSandbox::default(),
@@ -1066,10 +1077,72 @@ impl AssistantHost {
             && !self.python_broken.load(Ordering::Relaxed)
     }
 
+    pub(super) fn start_document_preparation(self: &Arc<Self>) {
+        if self.ensure_accepting_runs().is_err()
+            || self.document_preparation.load(Ordering::SeqCst) != 0
+        {
+            return;
+        }
+        let engines = self.engines();
+        let needed = cfg!(windows) && engines.python.is_some() && engines.officecli.is_some();
+        #[cfg(test)]
+        let needed = needed || self.document_preparation_barrier.lock().unwrap().is_some();
+        if !needed
+            || self
+                .document_preparation
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let host = self.clone();
+        self.track(
+            format!("document-preparation-{}", super::types::id()),
+            async move {
+                host.prepare_document_engines().await;
+                // The runtime is machine-local. Publish only for the authority
+                // current when preparation ends, never the account that began it.
+                if let Ok(identity) = host.identity().await {
+                    let generation = host.generation();
+                    let _ = host.publish_runtime(&identity, generation).await;
+                }
+                let state = if host.office_sandbox.failed() || host.python_sandbox.failed() {
+                    0
+                } else {
+                    2
+                };
+                host.document_preparation.store(state, Ordering::SeqCst);
+                host.document_preparation_finished.notify_waiters();
+            },
+        );
+    }
+
+    /// Explicit document work shares the background proof; ordinary chat does
+    /// not wait. A failed proof is retried by a later operation, never a loop.
+    pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+        self.start_document_preparation();
+        loop {
+            let finished = self.document_preparation_finished.notified();
+            if self.document_preparation.load(Ordering::SeqCst) != 1 {
+                return;
+            }
+            finished.await;
+        }
+    }
+
     /// Windows advertises model-code execution only after real functional and
     /// negative probes on the current complete runtime digest. The launcher
     /// independently rechecks that proof before each process creation.
     pub(super) async fn prepare_document_engines(&self) {
+        #[cfg(test)]
+        {
+            let barrier = self.document_preparation_barrier.lock().unwrap().clone();
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                release.notified().await;
+                return;
+            }
+        }
         #[cfg(windows)]
         {
             let engines = self.engines();
@@ -4096,6 +4169,7 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        text_send_enabled: AtomicBool,
         local_home: Mutex<Option<PathBuf>>,
         local_mutation_fixture: Mutex<Option<Arc<LocalMutationFixture>>>,
         local_key_barrier: Mutex<Option<Arc<LocalKeyBarrier>>>,
@@ -4271,7 +4345,13 @@ mod tests {
             _: Option<&'a str>,
             _: &'a Admit<'a>,
         ) -> BoxFuture<'a, Result<String, String>> {
-            Box::pin(async { Err("assistant_key_unavailable".to_string()) })
+            Box::pin(async {
+                if self.text_send_enabled.load(Ordering::SeqCst) {
+                    Ok("synthetic-inert-runtime-key".into())
+                } else {
+                    Err("assistant_key_unavailable".to_string())
+                }
+            })
         }
         fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
             Box::pin(async { false })
@@ -4303,7 +4383,11 @@ mod tests {
             })
         }
         fn gateway_base(&self, _: &str) -> Result<String, String> {
-            Err("assistant_unknown_apex".into())
+            if self.text_send_enabled.load(Ordering::SeqCst) {
+                Ok("https://api.ofox.ai/v1".into())
+            } else {
+                Err("assistant_unknown_apex".into())
+            }
         }
         fn config_dir(&self) -> PathBuf {
             self.config.clone()
@@ -4343,6 +4427,7 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            text_send_enabled: AtomicBool::new(false),
             local_home: Mutex::new(None),
             local_mutation_fixture: Mutex::new(None),
             local_key_barrier: Mutex::new(None),
@@ -7136,6 +7221,118 @@ while read line; do :; done"#,
         assert!(formats.contains(&json!("pdf")));
         assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
+    }
+    #[tokio::test]
+    async fn cache_first_bootstrap_returns_while_document_preparation_is_pending() {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let opening = tokio::spawn({
+            let host = host.clone();
+            async move { host.bootstrap_cached(false).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let boot = tokio::time::timeout(Duration::from_secs(1), opening)
+            .await
+            .expect("opening chat must not wait for document preparation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(boot["models"][0]["id"], "test/model");
+        assert!(!host.python_offered(), "unproven Python stays unavailable");
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.r#type != "runtime_state"));
+        let again = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .expect("a second bootstrap shares the pending probe")
+            .unwrap();
+        assert_eq!(again["models"][0]["id"], "test/model");
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let send = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic text only","presentationWorkflowVersion":1})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), host.send(send))
+            .await
+            .expect("ordinary text must not wait for document isolation")
+            .unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("tool/model", false)
+            .unwrap()
+            .session
+            .id;
+        let deck = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck","presentationWorkflowVersion":1,"presentationStyleId":"auto"})).unwrap();
+        let mut deck_send = tokio::spawn({
+            let host = host.clone();
+            async move { host.send(deck).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut deck_send)
+                .await
+                .is_err(),
+            "explicit document work waits for the shared proof"
+        );
+        host.generation.fetch_add(1, Ordering::SeqCst);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if env
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.r#type == "runtime_state")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion updates runtime capabilities without reopening chat");
+        let event = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.r#type == "runtime_state")
+            .cloned()
+            .unwrap();
+        assert_eq!(event.data["owner"], identity().owner);
+        assert_eq!(event.data["generation"], host.generation());
+        assert_eq!(deck_send.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "the probe is single flight"
+        );
     }
     #[cfg(windows)]
     #[tokio::test]

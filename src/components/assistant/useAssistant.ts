@@ -469,6 +469,13 @@ export function useAssistant(enabled: boolean) {
   if (!listenerReady.current) listenerReady.current = subscriptionReadiness();
   const bootstrapSequence = useRef(0);
   const catalogEvents = useRef(new Map<string, AssistantCatalogSnapshot>());
+  const runtimeEventSequence = useRef(0);
+  const runtimeEvents = useRef(
+    new Map<
+      string,
+      { sequence: number; runtime: AssistantBootstrap["runtime"] }
+    >(),
+  );
   const audioFinished = useRef(new Set<string>());
   const audioPreferenceTime = useRef<{
     identity: string;
@@ -832,6 +839,7 @@ export function useAssistant(enabled: boolean) {
     async (refreshCatalog = false) => {
       const generation = epoch.current;
       const sequence = ++bootstrapSequence.current;
+      const runtimeSequence = runtimeEventSequence.current;
       const audioRevision = audioPreferenceTime.current.revision;
       await listenerReady.current!.promise;
       if (
@@ -852,6 +860,16 @@ export function useAssistant(enabled: boolean) {
           )
             return null;
           const previous = bootstrapRef.current;
+          const runtimeUpdate = runtimeEvents.current.get(
+            `${value.owner}:${value.authorityGeneration}`,
+          );
+          if (
+            runtimeUpdate &&
+            (runtimeUpdate.sequence > runtimeSequence ||
+              previous?.owner !== value.owner ||
+              previous.authorityGeneration !== value.authorityGeneration)
+          )
+            value.runtime = runtimeUpdate.runtime;
           const pending = catalogEvents.current.get(
             `${value.owner}:${value.authorityGeneration}`,
           );
@@ -1272,6 +1290,7 @@ export function useAssistant(enabled: boolean) {
       setBootstrap(null);
       bootstrapRef.current = null;
       catalogEvents.current.clear();
+      runtimeEvents.current.clear();
       videoProgress.current.clear();
       videoNotices.current.clear();
       setChosenModel(null);
@@ -1454,6 +1473,33 @@ export function useAssistant(enabled: boolean) {
         // asks for is fenced on it.
         const generation = epoch.current;
         observeProgress(event);
+        if (event.type === "runtime_state") {
+          const { owner, generation: authority, runtime } = event.data;
+          const current = bootstrapRef.current;
+          if (
+            signedOut.current ||
+            typeof runtime?.available !== "boolean" ||
+            (current &&
+              (owner !== current.owner ||
+                authority !== current.authorityGeneration))
+          )
+            return;
+          const key = `${owner}:${authority}`;
+          runtimeEvents.current.set(key, {
+            sequence: ++runtimeEventSequence.current,
+            runtime,
+          });
+          if (runtimeEvents.current.size > 8)
+            runtimeEvents.current.delete(
+              runtimeEvents.current.keys().next().value!,
+            );
+          if (current) {
+            const next = { ...current, runtime };
+            bootstrapRef.current = next;
+            setBootstrap(next);
+          }
+          return;
+        }
         if (event.type === "catalog_state") {
           const { owner, generation: authority, catalog } = event.data;
           const current = bootstrapRef.current;

@@ -99,12 +99,13 @@ impl AssistantHost {
         let identity = self.identity().await?;
         let generation = self.generation();
         self.refresh_catalog(identity.clone(), generation, refresh)?;
+        self.start_document_preparation();
         let snapshot = self.cached_catalog(&identity, generation)?;
         self.bootstrap_snapshot(identity, generation, snapshot)
             .await
     }
     /// Explicit full-read callers retain source retry and timeout semantics.
-    pub async fn bootstrap(&self) -> Result<Value, String> {
+    pub async fn bootstrap(self: &Arc<Self>) -> Result<Value, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         let (catalog, error) = match self.page_models(&identity.apex).await {
@@ -120,6 +121,7 @@ impl AssistantHost {
                 .load(std::sync::atomic::Ordering::SeqCst),
             refreshing: false,
         };
+        self.wait_document_preparation().await;
         self.bootstrap_snapshot(identity, generation, snapshot)
             .await
     }
@@ -153,13 +155,7 @@ impl AssistantHost {
         })
         .await
         .unwrap_or_default();
-        // Documents only with the runtime that registers their tool.
-        self.prepare_document_engines().await;
-        let runtime = match self.runtime() {
-            Ok(r) => json!({"available":true,"reason":null,"version":r.version,
-                "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
-            Err(reason) => json!({"available":false,"reason":reason,"version":null}),
-        };
+        let runtime = self.runtime_fields();
         let key = if self.env.key_ready(&identity).await {
             "ready"
         } else {
@@ -178,6 +174,34 @@ impl AssistantHost {
         object.insert("rememberedModels".into(), remembered);
         object.insert("speechPreferences".into(), speech);
         Ok(value)
+    }
+    fn runtime_fields(&self) -> Value {
+        // Inventory is independent of the optional, potentially slow native
+        // isolation proof. Python stays unavailable until that proof passes.
+        match self.runtime() {
+            Ok(r) => json!({"available":true,"reason":null,"version":r.version,
+                "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
+            Err(reason) => json!({"available":false,"reason":reason,"version":null}),
+        }
+    }
+    pub(super) async fn publish_runtime(
+        &self,
+        identity: &Identity,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.ensure_current(identity, generation).await?;
+        let mut data =
+            json!({"owner":identity.owner,"generation":generation,"runtime":self.runtime_fields()});
+        super::host::scrub_secrets_in(&mut data, &self.known_keys());
+        self.ensure_current(identity, generation).await?;
+        self.env.emit(Event {
+            session_id: String::new(),
+            run_id: String::new(),
+            operation_id: String::new(),
+            r#type: "runtime_state".into(),
+            data,
+        });
+        Ok(())
     }
     pub(super) async fn publish_catalog(
         &self,
@@ -712,7 +736,23 @@ impl AssistantHost {
 
         // Local configuration where this computer offers it: a conversation
         // still chats when its paths are unavailable.
-        self.prepare_document_engines().await;
+        self.start_document_preparation();
+        // Explicit deck workflows need Python in the first runtime schema.
+        // A normal text turn carries workflowVersion too, so that flag alone
+        // must never make chat wait for optional document isolation.
+        let deck_context = branch.presentation_style_id.is_some()
+            || record.attachments.iter().any(|file| {
+                file.mime_type
+                    == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    && (file.origin.as_deref() == Some("generated")
+                        || branch
+                            .file_references
+                            .iter()
+                            .any(|reference| reference.attachment_id == file.id))
+            });
+        if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
+            self.wait_document_preparation().await;
+        }
         self.ensure_current(&identity, generation).await?;
         let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
             match self.env.local_paths().await.and_then(local_task_paths) {
