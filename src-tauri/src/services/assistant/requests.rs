@@ -697,11 +697,27 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
-        // Local configuration where this computer offers it: a conversation
-        // still chats when its paths are unavailable.
-        let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
+        // The persisted capability is eligibility. Resolve an actual target
+        // from the active user turn, before loading any model-only context.
+        let task = super::tools::task::Task::from_user_text(
+            branch.resent_text.as_deref().unwrap_or(&request.text),
+        );
+        let local_task = if model.tools {
+            task.filter(|task| {
+                task.access == super::tools::task::Access::Diagnose
+                    || (super::capabilities::enabled(&record.session.capabilities)
+                        && request.retry_message_id.is_none()
+                        && request.regenerate_message_id.is_none())
+            })
+        } else {
+            None
+        };
+        let local = if let Some(task) = local_task {
             match self.env.local_paths().await {
-                Ok(paths) => Some(paths),
+                Ok(paths) => match super::tools::scope::resolve(&paths.home) {
+                    Ok(folder) => Some((task, folder, paths.skill)),
+                    Err(_) => None,
+                },
                 Err(error) => {
                     log::warn!("[Assistant] local configuration is unavailable: {error}");
                     None
@@ -710,8 +726,9 @@ impl AssistantHost {
         } else {
             None
         };
-        let mut local_config = local_paths.map(|paths| {
-            json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
+        let mut local_config = local.as_ref().map(|(task, folder, skill)| {
+            let target = (task.tool, folder.clone());
+            json!({"task":task,"cwd":folder,"platform":std::env::consts::OS,"skillPath":skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id, Some(&target))})
         });
         self.remember_key(&key);
         let ui_language = request_ui_language(
@@ -734,7 +751,8 @@ impl AssistantHost {
             && self.runtime().is_ok()
             && self.engines().formats().contains(&"pptx");
         control.ui_language = ui_language.clone();
-        control.local_enabled = local_config.is_some();
+        control.local_task = local.map(|(task, folder, _)| (task, folder));
+        control.local_enabled = control.local_task.is_some();
         control.mcp = super::mcp::current(self.env.config_dir())
             .await
             .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
@@ -893,6 +911,18 @@ impl AssistantHost {
         });
         if let Some(params) = params.as_object_mut() {
             params.insert("skills".into(), skills["skills"].clone());
+            if super::capabilities::enabled(&record.session.capabilities) {
+                params.insert("localEligible".into(), Value::Bool(true));
+            }
+            if model.tools
+                && control
+                    .skills
+                    .lock()
+                    .map_err(|_| "assistant_state_unavailable")?
+                    .has_selected()
+            {
+                params.insert("readSelectedSkill".into(), Value::Bool(true));
+            }
             params.insert(
                 "mcp".into(),
                 if control.mcp["servers"]
@@ -949,14 +979,8 @@ impl AssistantHost {
                 if !source_files.is_empty() {
                     documents.insert("sourceFiles".into(), json!(source_files));
                 }
-            }
-            if let Some(style) = branch
-                .presentation_style_id
-                .as_deref()
-                .filter(|style| *style != "auto")
-            {
-                if let Some(documents) = params.get_mut("documents").and_then(Value::as_object_mut)
-                {
+                // An explicit Auto picker selection also commits this turn to PPTX creation.
+                if let Some(style) = branch.presentation_style_id.as_deref() {
                     documents.insert("selectedStyle".into(), json!(style));
                 }
             }

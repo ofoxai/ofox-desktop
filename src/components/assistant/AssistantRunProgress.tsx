@@ -63,6 +63,7 @@ export function AssistantRunProgress({
   approvals = 0,
   retryAttempt,
   thinking = false,
+  replyStarted = false,
   onFinish,
   status = "streaming",
   completedAt,
@@ -79,6 +80,7 @@ export function AssistantRunProgress({
   approvals?: number;
   retryAttempt?: 1 | 2 | null;
   thinking?: boolean;
+  replyStarted?: boolean;
   onFinish?: () => void;
   status?: AssistantMessage["status"];
   completedAt?: number | null;
@@ -91,17 +93,38 @@ export function AssistantRunProgress({
   const summary = useRef<HTMLButtonElement>(null);
   const focused = useRef(false);
   const previousLive = useRef(live);
+  const previousExecution = useRef(false);
   const detailId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [, tick] = useReducer((n: number) => n + 1, 0);
+  const operationGroups = recentOperationGroups(activities);
+  const failures = operationGroups.filter((item) => item.status === "failed");
+  const operationCount = operationGroups.reduce(
+    (count, group) => count + group.count,
+    0,
+  );
+  const hasExecution =
+    plan.length > 0 ||
+    (live &&
+      Boolean(
+        approvals ||
+        warning ||
+        failures.length ||
+        intent ||
+        mcpSteps.length ||
+        operationCount > 1,
+      ));
   useEffect(() => {
-    if (!live) return;
+    if (!live || !hasExecution) return;
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [live]);
+  }, [live, hasExecution]);
   useLayoutEffect(() => {
-    if (previousLive.current && !live) {
+    if (
+      (previousLive.current && !live) ||
+      (previousExecution.current && !hasExecution)
+    ) {
       setDetailsOpen(false);
       setSummaryOpen(false);
       if (focused.current) {
@@ -110,7 +133,8 @@ export function AssistantRunProgress({
       }
     }
     previousLive.current = live;
-  }, [live, onFinish]);
+    previousExecution.current = hasExecution;
+  }, [live, hasExecution, onFinish]);
   useLayoutEffect(
     () => () => {
       if (surface.current?.contains(document.activeElement)) onFinish?.();
@@ -157,10 +181,12 @@ export function AssistantRunProgress({
               name: activeMcp.server ?? activeMcp.tool,
             })
           : thinking
-            ? t("assistant.progress.thinking")
+            ? t(
+                hasExecution
+                  ? "assistant.progress.thinking"
+                  : "assistant.typing",
+              )
             : t("assistant.progress.working");
-  const operationGroups = recentOperationGroups(activities);
-  const failures = operationGroups.filter((item) => item.status === "failed");
   const mcpFailures = mcpSteps.filter(
     (step) => step.status === "failed" || step.status === "unavailable",
   );
@@ -253,7 +279,7 @@ export function AssistantRunProgress({
       })}
     </ul>
   );
-  const clock = duration && (
+  const clock = hasExecution && duration && (
     <span className="shrink-0 tabular-nums text-ink-muted">
       {t("assistant.progress.elapsed", { duration })}
     </span>
@@ -277,7 +303,7 @@ export function AssistantRunProgress({
           {clock}
         </>
       )}
-      {hasDetails && (
+      {hasExecution && hasDetails && (
         <ChevronRight
           aria-hidden
           className={cn(
@@ -288,7 +314,15 @@ export function AssistantRunProgress({
       )}
     </>
   );
-  if (!live && plan.length === 0) return null;
+  if (!hasExecution) {
+    if (!live || (replyStarted && !activity && !retryAttempt && !thinking))
+      return null;
+    return (
+      <div className="my-2 flex min-w-0 items-center gap-2 text-note text-ink-muted">
+        {activityLine}
+      </div>
+    );
+  }
   return (
     <section
       ref={surface}

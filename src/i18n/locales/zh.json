@@ -5142,6 +5142,7 @@
       "localScanLimit": "扫描已达到上限，请缩小文件夹范围。",
       "localUnavailable": "本机诊断暂不可用，请检查运行时安装。",
       "localCommandUnknown": "命令停止，但无法确认执行结果。请先检查影响，再决定是否重试。",
+      "localTaskInProgress": "本地任务正在进行。将消息加入队列后，可作为新一轮发送。",
       "localJournalUnavailable": "无法读取或保存加密改动记录，已停止继续修改。",
       "localRepairFailed": "无法自动修复此工具，请检查配置和绑定状态。",
       "localRestoreConflict": "文件或绑定设置在此操作后有变化。为保留这些编辑，已停止还原。",
@@ -5155,6 +5156,7 @@
       "localCostLimit": "已达到本轮设置的费用暂停阈值，后续请求已暂停。已发出的请求及其重试仍可能产生额外费用。",
       "localVerificationRequired": "改动尚未验证成功。",
       "localInvalidPlan": "任务步骤格式无效。",
+      "planRequired": "助手需要先准备下一步操作才能继续执行。请重试。",
       "localCostUnavailable": "费用信息不完整，已暂停以避免继续产生不确定费用。请查看请求记录后再决定是否重试。",
       "localPartialChange": "修复失败前已产生部分改动。请检查改动记录后再试。",
       "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。",
@@ -5210,7 +5212,7 @@
       "confirmingPlan": "正在确认生成计划…"
     },
     "welcome": "有什么可以帮你？",
-    "emptyBoundary": "助手只读取你附加的文件；开启联网后才会搜索网页。",
+    "emptyBoundary": "你可以添加文件、开启联网搜索最新信息，也可以请助手检查这台电脑上的 AI 工具。",
     "message": "消息",
     "composerPlaceholder": "输入消息…",
     "send": "发送",
@@ -5730,23 +5732,22 @@
       "restore": "还原",
       "restoreAll": "还原本对话的改动",
       "fullTitle": "开启全自动？",
-      "fullMessage": "助手可以使用你的系统权限执行命令、修改文件，以及安装、更新和卸载工具，不再逐项询问。此选择仅对当前对话有效，重启应用后恢复为「默认」。",
+      "fullMessage": "全自动只对当前请求范围内的本地操作跳过逐项确认，例如修复启动器或 Ofox 绑定。此设置仅在当前对话中生效，重启应用后恢复为「默认」。",
       "fullConfirm": "开启全自动",
       "toolEntry": "用不了？让助手看看",
       "toolPrompt": "帮我诊断并修复 {{tool}}。",
-      "modelSwitched": "已切换到推荐的配置任务模型，你可以手动换回。",
-      "modelUnconfigured": "尚未配置推荐的配置任务模型，或该模型暂不可用。继续使用当前模型。",
+      "shortcutModel": "此诊断对话使用支持工具的 {{model}}。",
+      "shortcutNeedsTools": "请选择支持工具的聊天模型来诊断这台电脑。",
       "enable": "开启本机配置",
-      "boundary": "助手可以检查和修复本机的 AI 工具，并读取你附加的文件；开启联网后才会搜索网页。",
       "modes": {
         "default": "默认",
         "autoEdit": "自动编辑",
         "fullAuto": "全自动"
       },
       "modeNotes": {
-        "default": "改配置、执行命令和安装前都会询问",
-        "autoEdit": "改工具配置不再询问；执行命令、安装，或改其他文件前询问",
-        "fullAuto": "不再询问，仅限当前对话"
+        "default": "修复启动器或 Ofox 绑定前询问",
+        "autoEdit": "自动执行修复，签发新密钥前询问",
+        "fullAuto": "跳过每次请求范围内的本地操作确认"
       },
       "steps": {
         "pending": "待处理",

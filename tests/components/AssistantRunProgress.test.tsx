@@ -85,13 +85,17 @@ describe("a live assistant task", () => {
   });
 
   it("keeps simple replies to a lightweight line and hides generic card copy", () => {
-    const { container } = render(<AssistantRunProgress {...props()} />);
+    render(<AssistantRunProgress {...props()} />);
     expect(
       screen.queryByText(
         "New task steps and results will appear here as work continues.",
       ),
     ).toBeNull();
-    expect(container.querySelector("section")).not.toHaveClass("border");
+    expect(screen.queryByRole("region", { name: "Task progress" })).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Working on your request",
+    );
+    expect(screen.queryByText(/Elapsed/)).toBeNull();
   });
 
   it("shows the checklist before a collapsed execution log", async () => {
@@ -267,20 +271,39 @@ describe("a live assistant task", () => {
     },
   );
 
-  it("has useful progress before model planning, without invented steps or percentages", () => {
-    render(<AssistantRunProgress {...props()} />);
-    const region = screen.getByRole("region", { name: "Task progress" });
-    expect(within(region).getByRole("status")).toHaveTextContent(
-      "Working on your request",
+  it("shows a single search until reply text starts, without opening execution details", () => {
+    const view = render(
+      <AssistantRunProgress
+        {...props()}
+        activity="searching"
+        activities={[
+          { id: "search", activity: "searching", status: "running" },
+        ]}
+      />,
     );
-    expect(within(region).queryByRole("progressbar")).toBeNull();
-    expect(within(region).queryByRole("list")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent(/Search/);
+    expect(screen.queryByRole("region", { name: "Task progress" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Execution details" }),
+    ).toBeNull();
+    expect(view.container.querySelector(".lucide-chevron-right")).toBeNull();
+    view.rerender(
+      <AssistantRunProgress
+        {...props()}
+        replyStarted
+        activities={[
+          { id: "search", activity: "searching", status: "completed" },
+        ]}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("counts total elapsed time without making each clock tick a live announcement", () => {
     vi.useFakeTimers();
     const start = Date.now();
-    const view = render(<AssistantRunProgress {...props()} />);
+    const plan = [{ step: "Make the slides", status: "in_progress" as const }];
+    const view = render(<AssistantRunProgress {...props()} plan={plan} />);
     act(() => vi.advanceTimersByTime(354_000));
     expect(screen.getByText("Elapsed 5m 54s")).toBeVisible();
     expect(screen.getByRole("status")).not.toHaveTextContent("5m 54s");
@@ -288,6 +311,7 @@ describe("a live assistant task", () => {
     view.rerender(
       <AssistantRunProgress
         {...props()}
+        plan={plan}
         startedAt={start}
         lastEventAt={Date.now()}
         activity="makingDocument"
@@ -428,7 +452,13 @@ describe("a live assistant task", () => {
     ["ja", "タスクの進捗", "次の手順を整理しています"],
   ])("localizes the active task in %s", async (language, label, title) => {
     await i18n.changeLanguage(language);
-    render(<AssistantRunProgress {...props()} thinking />);
+    render(
+      <AssistantRunProgress
+        {...props()}
+        plan={[{ step: "Make the slides", status: "in_progress" }]}
+        thinking
+      />,
+    );
     expect(screen.getByRole("region", { name: label })).toHaveTextContent(
       title,
     );

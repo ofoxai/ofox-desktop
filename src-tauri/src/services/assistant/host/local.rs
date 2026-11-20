@@ -24,7 +24,7 @@ pub(super) struct LocalState {
     grants: HashSet<String>,
     // A repair still waiting for verification, carried into the next run of
     // the conversation. Memory only: a restart does not resume tasks.
-    task: Option<Value>,
+    tasks: HashMap<Option<(crate::app_config::BindableTool, PathBuf)>, Value>,
 }
 
 /// Keeps only the pending-verification shape the runtime's task gate reads.
@@ -132,20 +132,37 @@ impl AssistantHost {
         if !run.local_enabled {
             return;
         }
-        self.local_states
+        let target = run
+            .local_task
+            .as_ref()
+            .map(|(task, folder)| (task.tool, folder.clone()));
+        let mut states = self
+            .local_states
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let tasks = &mut states
             .entry(session_key(&run.identity.owner, &run.session_id))
             .or_default()
-            .task = task_state(state);
+            .tasks;
+        if let Some(state) = task_state(state) {
+            tasks.insert(target, state);
+        } else {
+            tasks.remove(&target);
+        }
     }
 
-    pub(crate) fn local_task_state(&self, owner: &str, sid: &str) -> Value {
+    pub(crate) fn local_task_state(
+        &self,
+        owner: &str,
+        sid: &str,
+        target: Option<&(crate::app_config::BindableTool, PathBuf)>,
+    ) -> Value {
         self.local_states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&session_key(owner, sid))
-            .and_then(|state| state.task.clone())
+            .and_then(|state| state.tasks.get(&target.cloned()))
+            .cloned()
             .unwrap_or(Value::Null)
     }
 
@@ -411,13 +428,34 @@ impl AssistantHost {
         })
         .await?;
         capabilities::validate(&record.session.assistant_id, &record.session.capabilities)?;
-        if (tool.name != "use_skill"
-            && !super::super::skill_tools::is_tool(tool.name)
-            && (!run.local_enabled || !capabilities::enabled(&record.session.capabilities)))
-            || record.session.deleted_at.is_some()
-            || run.compact_only
-        {
+        if record.session.deleted_at.is_some() || run.compact_only {
             return Err("assistant_capability_disabled".into());
+        }
+        let read_selected =
+            tool.name == "read" && run.skills.lock().map_err(|_| STATE)?.has_selected();
+        if !read_selected
+            && tool.name != "use_skill"
+            && !super::super::skill_tools::is_tool(tool.name)
+        {
+            let read_scope = run.local_task.as_ref().is_some_and(|(task, _)| {
+                task.access == super::super::tools::task::Access::Diagnose
+            });
+            if !run.local_enabled
+                || (!read_scope && !capabilities::enabled(&record.session.capabilities))
+            {
+                return Err("assistant_capability_disabled".into());
+            }
+            match &run.local_task {
+                Some((task, folder))
+                    if task.allows(tool.name, &call.args)
+                        && (!matches!(tool.name, "diagnose_in_folder" | "verify_in_folder")
+                            || call.args["folder"].as_str().map(Path::new)
+                                == Some(folder.as_path())) => {}
+                // The internal command, path and transaction tests exercise
+                // low-level executors using controls they create directly.
+                None if cfg!(test) => {}
+                _ => return Err("assistant_operation_denied".into()),
+            }
         }
         let fingerprint = format!(
             "{:x}",
@@ -443,7 +481,21 @@ impl AssistantHost {
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
         }
-        let result = if super::super::skill_tools::is_tool(tool.name) {
+        let result = if read_selected {
+            async {
+                let args: registry::PathArgs = registry::decode(&call.args)?;
+                let mut result = self
+                    .read_selected_skill_reference(run, Path::new(&args.path))
+                    .await?;
+                self.validate_run(run)?;
+                if self.identity().await? != run.identity {
+                    return Err(IDENTITY_CHANGED.into());
+                }
+                scrub_secrets_in(&mut result, &self.known_keys());
+                Ok(result)
+            }
+            .await
+        } else if super::super::skill_tools::is_tool(tool.name) {
             self.dispatch_skill_tool(run, &call).await
         } else if tool.name == "use_skill" {
             self.load_run_skill(
@@ -488,6 +540,11 @@ impl AssistantHost {
             return Ok(json!({"approved":true}));
         }
         let (paths, scope) = self.local_scope().await?;
+        if let Some((_, folder)) = &run.local_task {
+            if super::super::tools::scope::resolve(&paths.home)? != *folder {
+                return Err("assistant_operation_denied".into());
+            }
+        }
         let scope = self.skill_scope(run, scope).await?;
         let requested = args["path"]
             .as_str()

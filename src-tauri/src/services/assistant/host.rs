@@ -233,6 +233,7 @@ pub struct RunControl {
     /// the language its documents are set in.
     pub(super) ui_language: String,
     pub(super) local_enabled: bool,
+    pub(super) local_task: Option<(super::tools::task::Task, PathBuf)>,
     pub identity: Identity,
     pub session_id: String,
     pub run_id: String,
@@ -276,6 +277,7 @@ impl RunControl {
             artifact: None,
             ui_language: "zh".into(),
             local_enabled: false,
+            local_task: None,
             identity,
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
@@ -1710,6 +1712,9 @@ impl AssistantHost {
             return Err(IDENTITY_CHANGED.into());
         }
         self.validate_run(&run)?;
+        if run.local_enabled || super::tools::task::Task::from_user_text(&request.text).is_some() {
+            return Err("assistant_local_task_in_progress".into());
+        }
         if request.id == run.run_id || request.id == run.operation_id {
             return Err("assistant_stale_operation".into());
         }
@@ -4105,12 +4110,12 @@ mod tests {
         let pending =
             json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":false}]});
         host.keep_local_task(&run, &json!({"localTaskState":pending}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         // A run that ends without reporting keeps the debt; one that verified clears it.
         host.keep_local_task(&run, &json!({"status":"error"}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         host.keep_local_task(&run, &json!({"localTaskState":null}));
-        assert_eq!(host.local_task_state(&owner, &sid), Value::Null);
+        assert_eq!(host.local_task_state(&owner, &sid, None), Value::Null);
         host.release_run(&run);
     }
 

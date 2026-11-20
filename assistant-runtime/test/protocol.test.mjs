@@ -217,8 +217,8 @@ test(
           assert.equal(body.includes(token), false);
           assert.equal(body.includes(inheritedContextMarker), false);
           assert.deepEqual(
-            request.body.tools.map((tool) => tool.function.name),
-            ["updatePlan"],
+            request.body.tools.map((tool) => tool.function.name).sort(),
+            ["beginSingleStep", "updatePlan"],
           );
         }
         await resumed.close();
@@ -328,6 +328,7 @@ test(
           writeModelToolCall(response, probeToolName, { command: "write" });
         else writeModelStream(response, "A later operation can continue");
       },
+      { openFirstTool: true },
     );
     const wire = fixture.spawnSidecar("empty", { probeTool: true });
     const params = fixture.params("pending-tool", token);
@@ -377,6 +378,7 @@ test(
               writeModelToolCall(response, probeToolName, { command: "write" });
             else writeModelStream(response, "Host operation reply received");
           },
+          { openFirstTool: true },
         );
         const wire = fixture.spawnSidecar("restricted", { probeTool: true });
         const params = fixture.params("tool", token);
@@ -674,6 +676,7 @@ test(
             `Readable final reply ${original} ${rotated} ${mcp}`,
           );
       },
+      { openFirstTool: true },
     );
     const wire = fixture.spawnSidecar("restricted", { probeTool: true });
     const params = fixture.params("rotated-private-scrub", original, {
@@ -755,6 +758,7 @@ test(
             "\n\ndata: [DONE]\n\n",
         );
       },
+      { openFirstTool: true },
     );
     const wire = fixture.spawnSidecar("restricted", { probeTool: true });
     const params = fixture.params("long-rotated-scrub", original);

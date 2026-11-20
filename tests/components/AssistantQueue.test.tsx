@@ -307,6 +307,47 @@ describe("ordinary chat queue", () => {
     expect(mocks.send).not.toHaveBeenCalled();
   });
 
+  it("queues an interruption rejected by a local task as a separate turn", async () => {
+    mocks.steer.mockRejectedValueOnce("assistant_local_task_in_progress");
+    await openConversation();
+    fireEvent.change(composer(), { target: { value: "A different question" } });
+    await userEvent.click(screen.getByRole("button", { name: "Interrupt" }));
+    const queued = await screen.findByRole("region", { name: "Message queue" });
+    expect(within(queued).getByText("A different question")).toBeVisible();
+    expect(composer()).toHaveValue("");
+    expect(mocks.send).not.toHaveBeenCalled();
+
+    finish();
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "A different question",
+        runId: expect.not.stringMatching(initialRun.runId),
+      }),
+    );
+  });
+
+  it("preserves an edited draft when an old interruption cannot steer a local task", async () => {
+    const pending = deferred<null>();
+    mocks.steer.mockReturnValueOnce(pending.promise);
+    const hook = await openHook();
+    act(() => hook.result.current.setDraft("Earlier draft"));
+    let admitted: Promise<boolean>;
+    act(() => {
+      admitted = hook.result.current.steer();
+    });
+    await waitFor(() => expect(mocks.steer).toHaveBeenCalledOnce());
+    act(() => hook.result.current.setDraft("Edited draft"));
+    await act(async () => {
+      pending.reject("assistant_local_task_in_progress");
+      expect(await admitted!).toBe(false);
+    });
+    expect(hook.result.current.draft).toBe("Edited draft");
+    expect(hook.result.current.queue).toBeUndefined();
+    expect(hook.result.current.error).toBeNull();
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
   it("rotates streaming replies when the sidecar consumes an interruption", async () => {
     const hook = await openHook();
     act(() => hook.result.current.setDraft("An unrelated newer draft"));

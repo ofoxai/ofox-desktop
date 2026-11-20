@@ -30,7 +30,7 @@ test("ordinary tool-capable chats can report task plans without local configurat
   const { events, tools, context } = fixture();
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ["updatePlan"],
+    ["updatePlan", "beginSingleStep"],
   );
   const steps = [
     { step: "Gather references", status: "completed" },
@@ -81,6 +81,24 @@ test("planning guidance covers multi-stage work and skips simple conversations",
   assert.match(guidance, /3.6/);
   assert.match(guidance, /before finishing/);
   assert.match(guidance, /greetings.*translations.*short questions/);
+  assert.match(guidance, /single-step requests/);
+});
+
+test("PPTX delivery requires a successful final file receipt in checklist guidance", () => {
+  const pptx = fixture({ documents: { formats: ["pptx"] } }).tools.find(
+    (tool) => tool.name === "updatePlan",
+  );
+  const plain = fixture().tools.find((tool) => tool.name === "updatePlan");
+  assert.ok(pptx);
+  assert.ok(plain);
+  const guidance = pptx.promptGuidelines.join("\n");
+  assert.match(
+    guidance,
+    /mark delivery complete only after a successful create_document result/,
+  );
+  assert.match(guidance, /fromPreview/);
+  assert.match(guidance, /preview or a promise.*delivery/);
+  assert.doesNotMatch(plain.promptGuidelines.join("\n"), /create_document/);
 });
 
 test("task plan limits and redaction apply without exposing execution capabilities", async () => {
@@ -133,9 +151,13 @@ test("plan updates retain the shared tool budget and unknown-outcome gate", asyn
   );
   context.unknownOutcome = false;
   context.callCount = 20;
-  await assert.rejects(
-    plan.execute("budget", args),
-    /Maximum tool-call count reached/,
+  const over = await plan.execute("budget", args);
+  assert.equal(over.details.code, "assistant_tool_limit");
+  assert.equal(over.isError, true);
+  assert.equal(over.terminate, true);
+  assert.equal(
+    events.some((event) => event.type === "task_plan"),
+    false,
   );
 });
 

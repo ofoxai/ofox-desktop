@@ -318,7 +318,6 @@ export function useAssistant(enabled: boolean) {
   const [localIntent, setLocalIntent] = useState<string | null>(null);
   const localIntentCall = useRef<string | null>(null);
   const [localWarning, setLocalWarning] = useState<string | null>(null);
-  const [localModelNotice, setLocalModelNotice] = useState<string | null>(null);
   // Thinking for the conversation the first message creates: it belongs to
   // the model chosen for it, so choosing another model clears it.
   const [newThinkingLevel, setNewThinkingState] =
@@ -1293,7 +1292,6 @@ export function useAssistant(enabled: boolean) {
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
-      setLocalModelNotice(null);
       setNewWebSearch(false);
       setNewThinking(null);
       setRunSearch(null);
@@ -2346,7 +2344,6 @@ export function useAssistant(enabled: boolean) {
       setFileReferences([]);
       newLocalConfigRef.current = false;
       setNewLocalConfig(false);
-      setLocalModelNotice(null);
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
@@ -3144,44 +3141,19 @@ export function useAssistant(enabled: boolean) {
   const setLocalConfig = useCallback(
     async (on: boolean) => {
       if (busy || loading || runRef.current) return false;
-      const definition = bootstrapRef.current?.localConfigDefinition;
-      const currentModel = detailRef.current?.session.modelId ?? newModelId;
-      const recommended =
-        on && !definition?.suitableModels.includes(currentModel)
-          ? bootstrapRef.current?.models.find(
-              (m) =>
-                m.id === definition?.recommendedModel &&
-                (m.kind ?? "chat") === "chat" &&
-                m.tools !== false,
-            )
-          : undefined;
       if (!selectedRef.current) {
         newLocalConfigRef.current = on;
         setNewLocalConfig(on);
-        if (recommended) {
-          setChosenModel(recommended.id);
-          setNewThinking(null);
-        }
       } else {
         const saved = await update({
           capabilities: on ? [{ id: "local_config", version: 1 }] : [],
-          ...(recommended ? { modelId: recommended.id } : {}),
         });
         if (!saved) return false;
         setLocalModes((old) => ({ ...old, [saved.id]: "default" }));
       }
-      setLocalModelNotice(
-        on
-          ? recommended
-            ? "modelSwitched"
-            : !definition?.suitableModels.includes(currentModel)
-              ? "modelUnconfigured"
-              : null
-          : null,
-      );
       return true;
     },
-    [busy, loading, newModelId, update, setNewThinking],
+    [busy, loading, update],
   );
 
   const localConfig =
@@ -3288,17 +3260,26 @@ export function useAssistant(enabled: boolean) {
     async (prompt: string) => {
       if (busy || loading || transferInFlight.current) return false;
       const generation = epoch.current;
-      const identity = requireIdentity(bootstrapRef.current);
-      const definition = bootstrapRef.current?.localConfigDefinition;
-      const recommended = bootstrapRef.current?.models.find(
-        (m) =>
-          m.id === definition?.recommendedModel &&
-          (m.kind ?? "chat") === "chat" &&
-          m.tools !== false,
-      );
+      const catalog = bootstrapRef.current;
+      const identity = requireIdentity(catalog);
+      const { models = [], localConfigDefinition } = catalog ?? {};
+      const preferred = models.find(({ id }) => id === newModelId);
+      const nonChat = (preferred?.kind ?? "chat") !== "chat";
+      const needsTools = nonChat || preferred?.tools === false;
+      const compatible = needsTools
+        ? models.filter(
+            (model) =>
+              (model.kind ?? "chat") === "chat" && model.tools !== false,
+          )
+        : [];
+      const alternative =
+        compatible.find(
+          ({ id }) => id === localConfigDefinition?.recommendedModel,
+        ) ?? compatible[0];
+      if (nonChat && !alternative) return { needsToolModel: true };
       try {
         const session = await assistantApi.createSession({
-          modelId: recommended?.id ?? newModelId,
+          modelId: alternative?.id ?? (newModelId || undefined),
           webSearch: false,
           capabilities: [{ id: "local_config", version: 1 }],
         });
@@ -3310,7 +3291,10 @@ export function useAssistant(enabled: boolean) {
         if (generation !== epoch.current) return false;
         drafts.current.set(session.id, prompt);
         select(session.id);
-        return true;
+        return {
+          modelName: alternative?.name,
+          needsToolModel: needsTools && !alternative,
+        };
       } catch (reason) {
         if (generation === epoch.current) showError(reason);
         return false;
@@ -3881,6 +3865,14 @@ export function useAssistant(enabled: boolean) {
     const generation = epoch.current;
     const selection = selectionSequence.current;
     const draftVersion = draftSequence.current;
+    const visualPolicy = visualPolicyRef.current;
+    const currentDraft = () =>
+      mounted.current &&
+      generation === epoch.current &&
+      selection === selectionSequence.current &&
+      sid === selectedRef.current &&
+      draftRef.current === text &&
+      draftVersion === draftSequence.current;
     steerSending.current = true;
     try {
       const authority = requireIdentity(bootstrapRef.current);
@@ -3891,24 +3883,32 @@ export function useAssistant(enabled: boolean) {
         id: crypto.randomUUID(),
         text,
       });
-      if (
-        mounted.current &&
-        generation === epoch.current &&
-        selection === selectionSequence.current &&
-        sid === selectedRef.current &&
-        draftRef.current === text &&
-        draftVersion === draftSequence.current
-      )
-        setDraft("");
+      if (currentDraft()) setDraft("");
       return true;
     } catch (reason) {
+      if (assistantErrorCode(reason) === "assistant_local_task_in_progress") {
+        const current = runRef.current;
+        // The host refused to apply the text to the old local scope. Only the
+        // untouched draft can become a separate turn in the ordinary queue.
+        return (
+          currentDraft() &&
+          activeRef.current &&
+          current?.runId === active.runId &&
+          current.operationId === active.operationId &&
+          !skillRef.current &&
+          !presentationStyleRef.current &&
+          !fileReferencesRef.current.length &&
+          visualPolicyRef.current === visualPolicy &&
+          enqueue()
+        );
+      }
       if (generation === epoch.current && sid === selectedRef.current)
         showError(reason);
       return false;
     } finally {
       steerSending.current = false;
     }
-  }, [queueAvailable, compacting, setDraft, showError]);
+  }, [queueAvailable, compacting, setDraft, showError, enqueue]);
 
   /** An explicit resume rechecks the saved conversation before any send. */
   const resumeQueue = useCallback(async () => {
@@ -4575,7 +4575,6 @@ export function useAssistant(enabled: boolean) {
     localConfig,
     setLocalConfig,
     startLocalConfig,
-    localModelNotice,
     localMode: selectedId ? (localModes[selectedId] ?? "default") : "default",
     localApprovals: localApprovals.map((e) => e.data),
     localChanges,

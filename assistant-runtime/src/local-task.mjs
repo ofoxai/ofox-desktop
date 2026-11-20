@@ -180,6 +180,6 @@ export class LocalTask {
     )
       return null;
     this.retries++;
-    return `Host verification is still missing after configuration changes. Do not claim a successful repair. ${this.targets.size ? `Run verify_in_folder for these original problem folders: ${JSON.stringify([...this.targets.values()].filter((t) => !t.verified))}` : "Run verify_in_folder for the changed tool in the user's home folder (leave folder out), or in the folder the user said fails."}`;
+    return "Host verification is still missing after configuration changes. Call verify_in_folder for this task's tool. The host uses the original authorized folder. Report what is still uncertain until verification succeeds.";
   }
 }

@@ -95,11 +95,11 @@ test("pending verification survives into the next run and clears once verified",
       false,
     );
 });
-test("a change with no diagnosed folder is verified in the home folder", () => {
+test("a change with no diagnosed folder is verified in the authorized folder", () => {
   const home = "/Users/me";
   const task = new LocalTask(limits, Date.now, null, home);
   task.observe("write", { path: "/config" }, { changed: true });
-  assert.match(task.continuation(), /home folder/);
+  assert.match(task.continuation(), /authorized folder/);
   task.observe(
     "verify_in_folder",
     { tool: "codex", folder: "/elsewhere" },

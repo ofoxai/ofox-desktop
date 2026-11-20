@@ -28,8 +28,7 @@ export interface LocalPlanStep {
 const MODES = ["default", "autoEdit", "fullAuto"] as const;
 
 /**
- * The composer's `权限：默认 ▾`: how much the assistant may do on this
- * computer without asking. Full auto asks first.
+ * Controls approval for local operations that the current task can access.
  */
 export function PermissionControl({
   mode,

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { withPlanningOpening } from "./fixtures/planning-opening.mjs";
 const limits = {
   repeatWarning: 3,
   repeatStop: 5,
@@ -20,7 +21,7 @@ const sse = (chunks) =>
     { headers: { "content-type": "text/event-stream" } },
   );
 let id = 0;
-const call = (name, args) =>
+const call = (name, args, ...additional) =>
   sse([
     {
       choices: [
@@ -28,14 +29,14 @@ const call = (name, args) =>
           index: 0,
           delta: {
             role: "assistant",
-            tool_calls: [
-              {
-                index: 0,
+            tool_calls: [[name, args], ...additional].map(
+              ([tool, input], index) => ({
+                index,
                 id: `local-${++id}`,
                 type: "function",
-                function: { name, arguments: JSON.stringify(args) },
-              },
-            ],
+                function: { name: tool, arguments: JSON.stringify(input) },
+              }),
+            ),
           },
         },
       ],
@@ -47,30 +48,32 @@ const call = (name, args) =>
   ]);
 const reply = (
   usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  content = "Finished.",
 ) =>
   sse([
     {
-      choices: [
-        { index: 0, delta: { role: "assistant", content: "Finished." } },
-      ],
+      choices: [{ index: 0, delta: { role: "assistant", content } }],
     },
     {
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
       usage,
     },
   ]);
-async function fixture(t, turns, host, extra = {}) {
+async function fixture(t, turns, host, extra = {}, opening) {
   const root = await mkdtemp(path.join(os.tmpdir(), "ofox-local-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [],
     events = [],
     calls = [];
+  const scriptedFetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return turns[requests.length - 1]?.() ?? reply();
+  };
   const runtime = new AssistantRuntime({
     retrySleep: async () => {},
-    fetch: async (url, options) => {
-      requests.push(JSON.parse(options.body));
-      return turns[requests.length - 1]?.() ?? reply();
-    },
+    fetch: opening
+      ? withPlanningOpening(scriptedFetch, opening)
+      : scriptedFetch,
     emit: (e) => events.push(e),
     hostCall: async (c) => {
       calls.push(c);
@@ -97,6 +100,7 @@ async function fixture(t, turns, host, extra = {}) {
     localConfig: {
       cwd: root,
       platform: process.platform === "win32" ? "windows" : "macos",
+      task: { tool: "codex", access: "configure" },
       skillPath: fileURLToPath(
         new URL("../skills/local-config/SKILL.md", import.meta.url),
       ),
@@ -104,24 +108,181 @@ async function fixture(t, turns, host, extra = {}) {
     },
     ...extra,
   };
-  return { requests, events, calls, params, run: () => runtime.run(params) };
+  return {
+    requests,
+    events,
+    calls,
+    params,
+    run: () => runtime.run(params),
+    steer: (input) =>
+      runtime.steer({
+        sessionId: params.sessionId,
+        runId: params.runId,
+        operationId: params.operationId,
+        ...input,
+      }),
+  };
 }
+function plannedFixture(t, turns, host, extra) {
+  return fixture(t, turns, host, extra, "plan");
+}
+
+function singleStepFixture(t, turns, host, extra) {
+  return fixture(t, turns, host, extra, "single");
+}
+
 const providerFailure = () =>
   new Response(JSON.stringify({ error: { message: "Insufficient balance" } }), {
     status: 402,
     headers: { "content-type": "application/json" },
   });
-test("a provider failure after a change keeps its own error and is not retried by the verification gate", async (t) => {
+test("the Fizzy question answers in one request with a previously enabled local capability", async (t) => {
+  const answer = "如果你指官方在线版，选 1. Hosted (app.fizzy.do)。";
+  const prompt =
+    "Are you using the hosted or self-hosted version?\n1. Hosted (app.fizzy.do)\n2. Self-hosted\nEnter a number between 1 and 2:\n\n哪个是global？";
+  const shell = process.platform === "win32" ? "powershell" : "bash";
   const f = await fixture(
     t,
     [
-      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
-      () => call("write", { path: "/configuration", content: "safe" }),
+      () =>
+        f.requests[0].tools?.some(({ function: tool }) => tool.name === shell)
+          ? call(shell, {
+              command:
+                'ls -la; echo ---; grep -rl "app.fizzy.do" . 2>/dev/null | head -20',
+            })
+          : reply(undefined, answer),
+    ],
+    () => {
+      throw new Error("assistant_command_outcome_unknown");
+    },
+    { prompt },
+  );
+  delete f.params.localConfig.task;
+  const result = await f.run();
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(
+    f.requests[0].tools.map(({ function: tool }) => tool.name).sort(),
+    ["beginSingleStep", "updatePlan"],
+  );
+  assert.doesNotMatch(
+    f.requests[0].messages[0].content,
+    /local-config|Use host tools to inspect configuration|local configuration tools are unavailable this turn/i,
+  );
+  assert.match(
+    f.requests[0].messages[0].content,
+    /Mention local diagnostic capabilities only if the user asks/i,
+  );
+  assert.equal(
+    f.events.some((event) => event.type === "task_plan"),
+    false,
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(
+    result.entries.findLast((entry) => entry.role === "assistant")?.content,
+    answer,
+  );
+});
+
+test("a local tool with an unknown outcome gets one text-only reply while retaining its failure", async (t) => {
+  const explanation = "检查命令已停止，无法确认结果。";
+  const f = await plannedFixture(
+    t,
+    [
+      () =>
+        call("diagnose_in_folder", { tool: "codex" }, [
+          "tool_status",
+          { tool: "codex" },
+        ]),
+      () => reply(undefined, explanation),
+    ],
+    () => {
+      throw new Error("assistant_command_outcome_unknown");
+    },
+    { prompt: "检查我这台机器的 Codex 当前模型" },
+  );
+  f.params.localConfig.task = { tool: "codex", access: "diagnose" };
+  f.params.model.reasoning = true;
+  f.params.model.maxOutputTokens = 4096;
+  f.params.thinkingLevel = "high";
+  const result = await f.run();
+  assert.deepEqual(
+    f.calls.map((c) => c.name),
+    ["diagnose_in_folder"],
+  );
+  assert.ok(
+    f.events.some(
+      (e) =>
+        e.type === "tool_end" &&
+        e.data.name === "diagnose_in_folder" &&
+        e.data.success === false &&
+        e.data.message.includes("assistant_command_outcome_unknown"),
+    ),
+  );
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[0].reasoning_effort, "high");
+  assert.equal(f.requests[1].reasoning_effort, undefined);
+  assert.equal(f.requests[1].max_tokens, 1024);
+  assert.equal(f.requests[1].tools?.length ?? 0, 0);
+  assert.equal(result.status, "error");
+  assert.match(result.errorMessage, /assistant_command_outcome_unknown/);
+  assert.equal(
+    result.entries.findLast((entry) => entry.role === "assistant")?.content,
+    explanation,
+  );
+});
+
+test(
+  "live input cannot inherit a local configuration scope",
+  { timeout: 5000 },
+  async (t) => {
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const f = await fixture(
+      t,
+      [
+        async () => {
+          entered.resolve();
+          await release.promise;
+          return reply();
+        },
+      ],
+      () => assert.fail("Unexpected local call"),
+    );
+    const running = f.run();
+    try {
+      await Promise.race([
+        entered.promise,
+        running.then(() =>
+          assert.fail("Run ended before reaching the gateway"),
+        ),
+      ]);
+      for (const behavior of ["steer", "followUp"])
+        await assert.rejects(
+          f.steer({ id: behavior, behavior, text: "哪个是global?" }),
+          /assistant_local_task_in_progress/,
+        );
+    } finally {
+      release.resolve();
+      await running;
+    }
+    assert.equal(f.requests.length, 1);
+  },
+);
+
+test("a provider failure after a change keeps its own error and is not retried by the verification gate", async (t) => {
+  const f = await plannedFixture(
+    t,
+    [
+      () => call("diagnose_in_folder", { tool: "codex" }),
+      () => call("rebind_tool", { tool: "codex" }),
       providerFailure,
       reply,
     ],
     (name) =>
-      name === "write" ? { changed: true } : { verified: false, exists: true },
+      name === "rebind_tool"
+        ? { changed: true }
+        : { verified: false, exists: true },
   );
   const result = await f.run();
   assert.equal(result.status, "error");
@@ -129,16 +290,16 @@ test("a provider failure after a change keeps its own error and is not retried b
   assert.equal(f.requests.length, 3);
   assert.equal(result.localTaskState.changed, true);
 });
-test("a repair with no named folder completes after verification in the home folder", async (t) => {
-  const f = await fixture(
+test("a repair completes after verification in the host-selected folder", async (t) => {
+  const f = await plannedFixture(
     t,
     [
-      () => call("write", { path: "/configuration", content: "safe" }),
-      () => call("verify_in_folder", { tool: "opencode" }),
+      () => call("repair_launcher", { tool: "codex" }),
+      () => call("verify_in_folder", { tool: "codex" }),
       reply,
     ],
     (name, args) =>
-      name === "write"
+      name === "repair_launcher"
         ? { changed: true }
         : { folder: args.folder, verified: true },
   );
@@ -159,7 +320,7 @@ test("pending verification from an earlier run still has to be done", async (t) 
   assert.equal(f.requests.length, 3);
 });
 test("real Pi run stops the fifth repeated operation and emits warning before it", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     Array.from(
       { length: 7 },
@@ -178,11 +339,11 @@ test("real Pi run stops the fifth repeated operation and emits warning before it
   );
 });
 test("last model step has no tools and cannot execute a provider-invented call", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_status", { tool: "codex" }),
-      () => call("tool_status", { tool: "claude" }),
+      () => call("diagnose_in_folder", { tool: "codex" }),
       () => call("repair_launcher", { tool: "codex" }),
     ],
     () => ({ installed: true }),
@@ -190,7 +351,7 @@ test("last model step has no tools and cannot execute a provider-invented call",
   // Inject a small budget through the trusted capability definition.
   const run = f.run; // fixture uses a shared definition intentionally only in this test.
   const old = limits.maxToolCalls;
-  limits.maxToolCalls = 3;
+  limits.maxToolCalls = 4; // one planning call, two operations, one text-only closeout
   try {
     await run();
     assert.equal(f.calls.length, 2);
@@ -201,14 +362,13 @@ test("last model step has no tools and cannot execute a provider-invented call",
 });
 for (const apex of ["ofox.ai", "ofox.io"])
   test(`repair completion requires host verification in the diagnosed folder (${apex})`, async (t) => {
-    const folder = "/problem";
-    const f = await fixture(
+    const f = await plannedFixture(
       t,
       [
-        () => call("diagnose_in_folder", { tool: "codex", folder }),
+        () => call("diagnose_in_folder", { tool: "codex" }),
         () => call("rebind_tool", { tool: "codex" }),
         reply,
-        () => call("verify_in_folder", { tool: "codex", folder }),
+        () => call("verify_in_folder", { tool: "codex" }),
         reply,
       ],
       (name, args) =>
@@ -221,20 +381,25 @@ for (const apex of ["ofox.ai", "ofox.io"])
     assert.equal(result.status, "completed");
     assert.equal(f.requests.length, 5);
     assert.equal(result.entries.filter((e) => e.role === "user").length, 1);
-    assert.ok(f.calls.some((c) => c.name === "verify_in_folder"));
+    assert.equal(
+      f.calls.find((c) => c.name === "verify_in_folder").args.folder,
+      f.calls.find((c) => c.name === "diagnose_in_folder").args.folder,
+    );
   });
 test("two unsuccessful completion continuations remain unverified, regardless of reply text", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
-      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
-      () => call("write", { path: "/configuration", content: "safe" }),
+      () => call("diagnose_in_folder", { tool: "codex" }),
+      () => call("rebind_tool", { tool: "codex" }),
       reply,
       reply,
       reply,
     ],
     (name) =>
-      name === "write" ? { changed: true } : { verified: false, exists: true },
+      name === "rebind_tool"
+        ? { changed: true }
+        : { verified: false, exists: true },
   );
   const result = await f.run();
   assert.equal(f.requests.length, 5);
@@ -258,7 +423,7 @@ test("unknown pricing blocks before the first provider request with a stable hos
   assert.equal(result.errorKind, "not_sent");
 });
 test("paid usage stops additional model requests and preserves the completed request ledger", async (t) => {
-  const f = await fixture(
+  const f = await singleStepFixture(
     t,
     [() => call("tool_status", { tool: "codex" })],
     () => ({}),
@@ -280,10 +445,10 @@ test("paid usage stops additional model requests and preserves the completed req
 });
 
 test("a partially failed repair still requires verification and never completes from prose alone", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
-      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
+      () => call("diagnose_in_folder", { tool: "codex" }),
       () => call("rebind_tool", { tool: "codex" }),
       reply,
       reply,
@@ -300,46 +465,22 @@ test("a partially failed repair still requires verification and never completes 
   assert.equal(f.requests.length, 5);
 });
 
-test("a failed shell repair cannot bypass the original-folder verification gate", async (t) => {
-  const shell = process.platform === "win32" ? "powershell" : "bash";
-  const f = await fixture(
-    t,
-    [
-      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
-      () => call(shell, { command: "repair", folder: "/problem" }),
-      reply,
-      reply,
-      reply,
-    ],
-    (name, args) =>
-      name === shell
-        ? {
-            output: "repair partially failed",
-            exitCode: 1,
-            requiresVerification: true,
-          }
-        : { folder: args.folder, verified: false },
-  );
-  const result = await f.run();
-  assert.equal(result.errorCode, "assistant_verification_required");
-  assert.equal(f.requests.length, 5);
-});
-
 for (const apex of ["ofox.ai", "ofox.io"])
   for (const platform of ["macos", "windows"])
-    test(`a command-assisted question finishes without a verification turn (${apex}, ${platform})`, async (t) => {
-      const shell = platform === "windows" ? "powershell" : "bash";
-      const f = await fixture(
+    test(`a Codex diagnosis uses only scoped reads and finishes without verification (${apex}, ${platform})`, async (t) => {
+      const f = await singleStepFixture(
         t,
-        [
-          () =>
-            call(shell, { command: 'curl -s "https://example.invalid/rate"' }),
-          reply,
-        ],
-        () => ({ output: "82.85", exitCode: 0, requiresVerification: true }),
-        { apex, prompt: "300,000 卢布是多少美金？" },
+        [() => call("diagnose_in_folder", { tool: "codex" }), reply],
+        (_name, args) => ({
+          folder: args.folder,
+          verified: true,
+          model: "test/codex",
+        }),
+        { apex, prompt: "检查我这台机器的 Codex 当前模型" },
       );
       f.params.localConfig.platform = platform;
+      f.params.localConfig.task.access = "diagnose";
+      f.params.localConfig.taskState = { changed: true, targets: [] };
       const result = await f.run();
       assert.equal(result.status, "completed");
       assert.equal(result.errorCode, undefined);
@@ -350,12 +491,20 @@ for (const apex of ["ofox.ai", "ofox.io"])
       );
       assert.deepEqual(
         f.calls.map((c) => c.name),
-        [shell],
+        ["diagnose_in_folder"],
+      );
+      assert.deepEqual(f.calls[0].args, {
+        tool: "codex",
+        folder: f.params.localConfig.cwd,
+      });
+      assert.deepEqual(
+        f.requests[0].tools.map(({ function: tool }) => tool.name).sort(),
+        ["beginSingleStep", "diagnose_in_folder", "tool_status", "updatePlan"],
       );
       assert.equal(
-        result.localTaskState,
-        null,
-        "no verification debt on the next run",
+        Object.hasOwn(result, "localTaskState"),
+        false,
+        "a diagnosis must leave previous verification state alone",
       );
       assert.equal(
         f.events.some((e) => e.data?.warning === "verification_required"),
@@ -364,31 +513,228 @@ for (const apex of ["ofox.ai", "ofox.io"])
     });
 
 for (const platform of ["macos", "windows"])
-  test(`a status check followed by a shell repair still needs verification (${platform})`, async (t) => {
+  test(`a provider-invented shell call cannot run during configuration (${platform})`, async (t) => {
     const shell = platform === "windows" ? "powershell" : "bash";
-    const f = await fixture(
+    const f = await plannedFixture(
       t,
       [
         () => call("tool_status", { tool: "codex" }),
         () => call(shell, { command: "repair" }),
         reply,
-        () => call("verify_in_folder", { tool: "codex" }),
-        reply,
       ],
-      (name, args) =>
-        name === shell
-          ? { output: "repaired", exitCode: 0, requiresVerification: true }
-          : { folder: args.folder, verified: name === "verify_in_folder" },
+      () => ({ installed: true }),
     );
     f.params.localConfig.platform = platform;
-    const result = await f.run();
-    assert.equal(result.status, "completed");
-    assert.equal(f.requests.length, 5);
-    assert.ok(
-      f.events.some((e) => e.data?.warning === "verification_required"),
+    await f.run();
+    assert.deepEqual(
+      f.calls.map((entry) => entry.name),
+      ["tool_status"],
     );
-    assert.equal(result.localTaskState, null);
+    assert.equal(
+      f.requests[0].tools.some(({ function: tool }) => tool.name === shell),
+      false,
+    );
   });
+
+test("a follow-up in the same conversation can create a PPTX without local tool scope", async (t) => {
+  const report = {
+    name: "transformer.pptx",
+    format: "pptx",
+    content: [{ command: "add", parent: "/", type: "slide" }],
+  };
+  const f = await singleStepFixture(
+    t,
+    [
+      () => call("tool_status", { tool: "codex" }),
+      reply,
+      () => call("create_document", report),
+      reply,
+    ],
+    (name) =>
+      name === "tool_status"
+        ? { installed: true }
+        : {
+            status: "completed",
+            file: {
+              id: "transformer-deck",
+              name: report.name,
+              mimeType:
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+              bytes: 512,
+              slides: 1,
+            },
+            issues: [],
+          },
+  );
+  f.params.localConfig.task.access = "diagnose";
+  const diagnosis = await f.run();
+  assert.equal(diagnosis.status, "completed");
+
+  delete f.params.localConfig.task;
+  f.params.runId = "presentation-run";
+  f.params.operationId = "presentation-operation";
+  f.params.prompt = "做一个 Transformer 介绍 PPT";
+  f.params.documents = { formats: ["pptx"] };
+  const presentation = await f.run();
+  assert.equal(presentation.status, "completed");
+  assert.deepEqual(
+    f.calls.map((entry) => entry.name),
+    ["tool_status", "create_document"],
+  );
+  assert.deepEqual(f.calls[1].args, report);
+  assert.deepEqual(
+    f.requests[2].tools.map(({ function: tool }) => tool.name).sort(),
+    [
+      "beginSingleStep",
+      "create_document",
+      "get_presentation_style",
+      "updatePlan",
+    ],
+  );
+  assert.match(
+    JSON.stringify(
+      f.requests[3].messages.filter((entry) => entry.role === "tool"),
+    ),
+    /transformer-deck/,
+  );
+});
+
+test("an admitted Codex diagnosis ignores a stale selected PPTX chip", async (t) => {
+  const opening = [
+    { step: "Inspect the Codex configuration", status: "in_progress" },
+    { step: "Report the active model", status: "pending" },
+  ];
+  const completed = opening.map(({ step }) => ({ step, status: "completed" }));
+  const f = await fixture(
+    t,
+    [
+      () => call("updatePlan", { steps: opening }),
+      () => call("diagnose_in_folder", { tool: "codex" }),
+      () => call("updatePlan", { steps: completed }),
+      reply,
+    ],
+    () => ({ installed: true }),
+    {
+      prompt: "检查本机 Codex 当前模型",
+      documents: { formats: ["pptx"], selectedStyle: "auto" },
+    },
+  );
+  f.params.localConfig.task.access = "diagnose";
+  const result = await f.run();
+  assert.equal(f.requests[0].tool_choice, undefined);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    f.calls.map((entry) => entry.name),
+    ["diagnose_in_folder"],
+  );
+  assert.deepEqual(
+    f.events
+      .filter((event) => event.type === "task_plan")
+      .map((event) => event.data.steps),
+    [opening, completed],
+  );
+  const lastTool = f.requests
+    .at(-1)
+    .messages.findLast((message) => message.role === "tool");
+  assert.deepEqual(JSON.parse(lastTool.content).steps, completed);
+});
+
+test("a selected PPTX checklist stays open until the Host keeps the final file", async (t) => {
+  const deck = {
+    name: "deck.pptx",
+    format: "pptx",
+    content: [{ command: "add", parent: "/", type: "slide" }],
+    preview: true,
+  };
+  const keep = {
+    name: deck.name,
+    format: deck.format,
+    fromPreview: "preview-1",
+  };
+  const plan = {
+    steps: [
+      { step: "Prepare slides", status: "completed" },
+      { step: "Deliver deck", status: "completed" },
+    ],
+  };
+  const file = {
+    id: "kept-deck",
+    name: deck.name,
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    bytes: 512,
+  };
+  let keepAttempts = 0;
+  const f = await fixture(
+    t,
+    [
+      () => call("updatePlan", plan),
+      () => call("create_document", deck, ["updatePlan", plan]),
+      () => call("create_document", keep, ["updatePlan", plan]),
+      () => call("create_document", keep, ["updatePlan", plan]),
+      () => call("create_document", keep, ["updatePlan", plan]),
+      reply,
+      () => call("updatePlan", plan),
+      reply,
+    ],
+    (name, args) => {
+      assert.equal(name, "create_document");
+      if (args.preview) {
+        return {
+          status: "completed",
+          preview: true,
+          previewId: "preview-1",
+          file,
+        };
+      }
+      if (++keepAttempts === 1)
+        return {
+          status: "error",
+          error: { message: "Preview could not be kept" },
+        };
+      if (keepAttempts === 2)
+        return {
+          status: "completed",
+          file: { ...file, mimeType: "text/plain" },
+        };
+      return { status: "completed", file };
+    },
+    {
+      localConfig: undefined,
+      prompt: "Make a PowerPoint presentation",
+      documents: { formats: ["pptx"], selectedStyle: "auto", python: true },
+    },
+  );
+  assert.equal((await f.run()).status, "completed");
+  assert.equal(keepAttempts, 3);
+  const statuses = ["pending", "pending", "pending", "pending", "completed"];
+  const plans = f.events.filter((event) => event.type === "task_plan");
+  assert.deepEqual(
+    plans.map((event) => event.data.steps.at(-1).status),
+    statuses,
+  );
+  const messages = f.requests.at(-1).messages;
+  const planCalls = new Set(
+    messages
+      .flatMap((message) => message.tool_calls ?? [])
+      .filter(({ function: tool }) => tool.name === "updatePlan")
+      .map(({ id }) => id),
+  );
+  const results = messages
+    .filter((message) => planCalls.has(message.tool_call_id))
+    .map((message) => JSON.parse(message.content));
+  assert.deepEqual(
+    results.map((result) => result.steps.at(-1).status),
+    statuses,
+  );
+  f.params.runId = "next-deck-run";
+  f.params.operationId = "next-deck-operation";
+  f.params.prompt = "Make a second PowerPoint presentation";
+  assert.equal((await f.run()).status, "completed");
+  const next = f.events.findLast((event) => event.type === "task_plan");
+  assert.equal(next.runId, "next-deck-run");
+  assert.equal(next.data.steps.at(-1).status, "pending");
+});
 
 for (const [name, usage] of [
   [
@@ -435,7 +781,7 @@ test("unknown retry receipts stay unknown while the task goes on to its tools an
   for (const status of [502, 503]) {
     const refused = () =>
       Response.json({ error: { message: "upstream unavailable" } }, { status });
-    const f = await fixture(
+    const f = await singleStepFixture(
       t,
       [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
       () => ({ installed: true }),
@@ -453,9 +799,11 @@ test("unknown retry receipts stay unknown while the task goes on to its tools an
       result.entries
         .filter((e) => e.role === "request")
         .map((e) => e.request.status),
-      ["unknown", "unknown", "completed", "completed"],
+      ["completed", "unknown", "unknown", "completed", "completed"],
     );
-    const success = result.entries.find((e) => e.role === "assistant");
+    const success = result.entries.find(
+      (e) => e.role === "assistant" && e.usage?.output === 5,
+    );
     assert.equal(success.usage.input, 10);
     assert.equal(success.usage.output, 5);
     assert.ok(success.usage.cost.total > 0);
@@ -476,7 +824,7 @@ test("rejected and reliably unsent retry receipts do not block local tools or th
       });
     },
   ]) {
-    const f = await fixture(
+    const f = await singleStepFixture(
       t,
       [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
       () => ({ installed: true }),
@@ -501,7 +849,7 @@ test("an unknown OFox retry cost does not block use_skill", async (t) => {
       reviewed: false,
     },
   ];
-  const f = await fixture(
+  const f = await singleStepFixture(
     t,
     [
       () =>

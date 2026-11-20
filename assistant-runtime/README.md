@@ -234,8 +234,10 @@ run_end. message_end is a runtime summary, not the application's message object.
 
 Host tools call `{id:"tool-...",method:"tool",params:{
 sessionId,runId,operationId,toolCallId,name,args}}`. A host reply with
-`error.code:"unknown_outcome"` or `error.data:{outcomeUnknown:true}` ends the
-run without replaying an uncertain paid or mutating operation. Identical
+`error.code:"unknown_outcome"` or `error.data:{outcomeUnknown:true}` stops
+tool dispatch without replaying an uncertain paid or mutating operation.
+Scoped local command and mutation failures can get a text-only closeout
+while the operation stays failed. Identical
 tool-call IDs are deduplicated within a run and conflicting arguments are
 rejected.
 
@@ -244,8 +246,10 @@ rejected.
 Sessions now carry `assistantId` (legacy default `ofox`) and versioned
 `capabilities` (legacy default `[]`). `local_config` version 1 is the initial
 host capability. Its policy, limits and model recommendation placeholder live
-in Rust. Unknown capability versions cannot authorize a callback. Each run
-freezes its initial capability choice; a UI capability change cancels the run.
+in Rust. A direct request to diagnose one supported local tool can open
+read-only diagnostics for that turn. The saved capability makes scoped
+repair requests eligible. Each run freezes the target and access level after
+resolving the active user message. A UI capability change cancels the run.
 
 Local callbacks use the existing `tool` frame above. The host validates the
 run identity, registered name, strict arguments and session capability before
@@ -253,12 +257,10 @@ claiming a call ID. A repeated ID returns its saved result; changed arguments
 are refused and a still-pending claim returns `unknown_outcome`. The probe
 operation is test-only and is never shipped as a model tool.
 
-Permission modes follow AionUi's built-in agent and are memory-only:
-`default` (reads, diagnostics and allow-listed read-only commands run; other
-operations ask), `autoEdit` (configuration changes inside the tools'
-configuration folders also run; writes elsewhere, such as shell profiles or
-LaunchAgents, can make code run later and ask like commands) and `fullAuto`
-(everything runs). Protected stores (private keys, keychains, browser data) are
+Permission modes are memory-only and apply after scope checks:
+`default` (diagnostics run and changes ask), `autoEdit` (managed configuration
+changes also run) and `fullAuto` (admitted changes run without an ordinary
+approval). Protected stores (private keys, keychains, browser data) are
 denied in every mode. Changing permissions cancels the current run, and entering
 `fullAuto` requires explicit UI confirmation. Approval events bind the
 confirmation to owner, generation, session, run and operation. Responses are
@@ -646,33 +648,23 @@ smoke checks verify the SDK, native canvas, PDF and history paths after pruning.
 
 ### Local configuration reads
 
-A host-issued `localConfig` run parameter registers scoped `read`, `ls`, `find`,
-`grep` and tool diagnostics. Pi's read/list/find definitions
-retain their output formatting, with every filesystem operation overridden by
-an engine-neutral host callback. Grep is implemented by Rust and never starts
-`rg` in Node. Host reads are bounded, reject sensitive paths (including resolved
-symlink targets), and redact credentials before returning text. Directory scans
-honor ignore files and never follow symlinks.
+A host-issued `localConfig.task` names one supported AI tool and its access level.
+Diagnosis exposes installation and binding status and the structured launcher
+probe. Repair also exposes verification and the managed launcher and binding
+writers. The runtime pins the tool and diagnostic directory, and Rust checks
+both again before executing. Ordinary turns expose no local configuration tools.
+Selecting a library skill can expose reference reads under its verified root.
 
 The bundled `skills/local-config/SKILL.md` is copied into the production runtime.
 The loader uses `noSkills: true` **with** `additionalSkillPaths`: Pi 1.4.0 still
 loads those explicit files, while disabling its global/project discovery. A
 private `cwd` and `agentDir` alone do not prevent discovery of user Skills.
 
-Folder grants come only from a renderer action bound to the account, authority
-generation and session. Picker results, pasted paths and single-directory drops
-are canonicalized by Rust. Dropped paths remain behind one-use host tokens until
-authorized. Grants are memory-only, and diagnostic probes use the supplied
-folder as their working directory.
+The first version uses the resolved home directory as the working directory
+for the structured launcher probe. Generic filesystem search and terminal
+execution are outside this model tool set.
 
 ### Local writes and restoration
-
-Pi write/edit and shell tools use host-backed operations. Edit sends the scrubbed
-text it observed alongside its proposed result; Rust rejects stale text and
-preserves unchanged credential-bearing lines. Changing or deleting a hidden
-credential through generic text editing is refused: use a structured binding or
-model operation. Parent directory creation is part of the journaled host write,
-not a Node filesystem operation.
 
 Structured operations reuse the application writers. Snapshot guards run inside
 the binding/launcher writers' locks and include tool-scoped binding/provider DB
@@ -692,17 +684,6 @@ Restoration skips database state that already matches the original snapshot,
 and an unfinished restoration blocks new snapshots. File snapshots preserve
 Unix modes or the Windows read-only attribute, not a full Windows ACL.
 
-Shell processes belong to an owned process group or Windows Job and are killed
-on cancellation or timeout. Windows uses system PowerShell with `-NoProfile`;
-folder diagnostics separately probe the user's shell environment. Rust drains
-bounded output, redacts it, and sends
-at most 32 KiB / 800 lines, below Pi's temporary-output spill thresholds. No
-plaintext shell output temp file is written by Node. Protected path and store
-commands are refused directly, but arbitrary executables have the user's OS
-rights: command recognition is deliberately not an OS sandbox. Install/update/
-uninstall tools require individual confirmation and do not promise rollback;
-an installer opened in an external terminal can continue independently.
-
 ### Local task lifecycle
 
 The Rust capability definition supplies repetition (warn 3 / stop 5), 900-second,
@@ -719,22 +700,16 @@ prices fail closed. The budget is checked between requests: an already-issued
 provider request can exceed $1, so this is not an exact provider billing cap.
 A successful host mutation or a failed operation with recorded partial changes
 invalidates prior verification. A failure to record the mutation outcome blocks
-automatic retries as an unknown outcome. Verification is required after
-arbitrary shell commands too: Rust marks commands outside the
-read-only whitelist as possibly changing configuration, even on a nonzero exit.
-It does not claim that those arbitrary side effects are journaled. Completion requires
-`verify_in_folder` succeeding after the last mutation in every folder originally
-diagnosed, for the same tool, or in the home folder when no folder was
-diagnosed. Verification still owed when a run ends is kept in host memory and
-handed to the next run of the conversation. Up to two hidden custom-message continuations ask
+automatic retries as an unknown outcome. The runtime can make one bounded,
+tool-free request to explain this failure while retaining its error code. A
+user-stopped run skips that request. Completion of a repair requires
+`verify_in_folder` succeeding for the scoped tool after the last mutation.
+Verification still owed when a run ends is kept in host memory and read by a
+subsequent repair for the same tool and directory. Up to two hidden custom-message continuations ask
 for verification; unresolved verification ends with a stable error. Assistant
 prose never satisfies the gate. Hidden continuations are not user messages.
 
-Only the user's toggle or tool-page entry enables the capability. Ordinary chat
-can render `[[enable_local_config]]` as a user-operated button. The recommended
-model and suitable-model allowlist live in Rust's capability definition. Both
-currently select `openai/gpt-6.1-sol`, the canonical catalog ID of the chosen
-`gpt-6.1-sol` alias. If the model is unavailable, the UI retains the current
-model and explains why. Permission modes and approvals
+The user's toggle and tool-page entry grant repair eligibility. Ordinary chat
+can render `[[enable_local_config]]` as a user-operated button. Permission modes and approvals
 are host memory only. Session details expose the current permission for display
 without writing it into session files, forks or backups.

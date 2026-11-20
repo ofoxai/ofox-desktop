@@ -3,6 +3,10 @@
 import { AssistantRuntime } from "../../src/runtime.mjs";
 import { probeTools } from "./probe-tool.mjs";
 
-AssistantRuntime.prototype.tools = function (context) {
-  return probeTools(this, context);
+const originalTools = AssistantRuntime.prototype.tools;
+AssistantRuntime.prototype.tools = function (context, model) {
+  return [
+    ...originalTools.call(this, context, model),
+    ...probeTools(this, context),
+  ];
 };

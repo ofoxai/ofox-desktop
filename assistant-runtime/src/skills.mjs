@@ -47,7 +47,7 @@ export function skillPrompt(context) {
   if (!skills.length) return "";
   const lines = [
     "Available skills",
-    "Call use_skill when a skill is useful; use its dir with the existing read and command tools for references and scripts.",
+    "Call use_skill when its instructions help fulfill the user's current request.",
   ];
   let used = lines.join("\n").length;
   let listed = 0;
@@ -74,10 +74,7 @@ export function skillTools(runtime, context) {
     runtime.wrapTool(
       context,
       "use_skill",
-      "Load an automatic skill's instructions and relative file list. Use the returned dir with the existing read and command tools to read references or run scripts; skill files cannot be edited with generic tools. " +
-        (context.params.localConfig
-          ? "Scripts use normal command approvals; commands are not OS-sandboxed."
-          : "Local tools are unavailable: scripts cannot run here."),
+      "Load an automatic skill's instructions and relative file list. Scripts cannot run here. The read tool, when available, reads references only for a skill the user selected.",
       Type.Object(
         { name: Type.String({ minLength: 1, maxLength: 128 }) },
         { additionalProperties: false },
@@ -103,7 +100,7 @@ export function skillTools(runtime, context) {
             result.truncated ||
             [...result.body].length > 60000 ||
             result.files.length > 200,
-          scriptsUnavailable: !context.params.localConfig,
+          scriptsUnavailable: true,
         };
         // The body as written, never inside JSON: encoded, a JSON example
         // in a skill shows the model doubled escapes (`\\n`), which it then
@@ -120,7 +117,7 @@ export function skillTools(runtime, context) {
           details.truncated
             ? "Truncated: the body or the file list was cut."
             : "",
-          details.scriptsUnavailable ? "Scripts cannot run here." : "",
+          "Scripts cannot run here.",
         ].filter(Boolean);
         return {
           content: [
