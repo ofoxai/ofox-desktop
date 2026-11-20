@@ -3,8 +3,8 @@
 use super::{
     attachments, catalog,
     host::{
-        blocking, local_gateway_allowed, native_entries, navigate_native, read_optional, restore,
-        session_key, AssistantHost, CatalogSnapshot, Identity, RunControl,
+        blocking, native_entries, navigate_native, read_optional, restore, session_key,
+        AssistantHost, CatalogSnapshot, Identity, RunControl,
     },
     projection::merge_native,
     store::{self, SessionList, SessionRecord},
@@ -902,7 +902,7 @@ impl AssistantHost {
             "knownSecrets": control.secrets(),
             "apex": identity.apex,
             "baseUrl": base_url,
-            "allowLocalGateway": local_gateway_allowed(&base_url),
+            "allowLocalGateway": self.env.allows_local_gateway(&base_url),
             "proxy": proxy,
             "prompt": text,
             "editEntryId": branch.edit_entry,

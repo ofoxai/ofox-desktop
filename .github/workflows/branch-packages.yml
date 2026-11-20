@@ -43,6 +43,53 @@ jobs:
           EXPECTED_REPOSITORY: ${{ github.repository }}
         run: node scripts/check-windows-probe.mjs --wait
 
+  # Developer model acceptance may overlap the independent native/CI gates.
+  # This publishes no installer and never contacts a paid model.
+  early-parity-driver:
+    name: Early Windows parity driver (keyless preflight)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore Cargo without competing cache writes
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: branch-packages-windows-x86_64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            branch-packages-windows-x86_64-cargo-
+            windows-cargo-debug0-v2-${{ hashFiles('src-tauri/Cargo.lock', 'rust-toolchain.toml') }}
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare bundled assistant production closure
+        run: pnpm assistant:prepare
+      - name: Verify bundled assistant production closure
+        run: pnpm assistant:smoke
+      - name: Compile release driver and run keyless gateway preflight
+        shell: pwsh
+        run: .\assistant-runtime\resources\node\node.exe scripts/package-parity-driver.mjs --sha $env:GITHUB_SHA --out "$env:RUNNER_TEMP/assistant-parity-driver-early-windows-x86_64-$env:GITHUB_SHA"
+      - name: Upload early developer driver
+        uses: actions/upload-artifact@v7
+        with:
+          name: assistant-parity-driver-early-windows-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/assistant-parity-driver-early-windows-x86_64-${{ github.sha }}/
+          if-no-files-found: error
+          retention-days: 30
+
   build:
     name: Package (${{ matrix.platform }})
     needs: [verify, windows-probe]

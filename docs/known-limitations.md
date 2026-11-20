@@ -99,6 +99,14 @@ directory under the scrubbed LOCALAPPDATA, rather than the real Windows profile:
 `home/Packages/<profile name>/AC/Temp`. The launcher prepares this private task
 subtree before resume, with existing task permissions and no extra ACL grant.
 Per-machine admission still requires the entire native functional gate.
+
+The first FCE release parity attempt stopped before any model request with
+`Host-resolved model gateway is not allowed`: the release Host correctly refused
+the harness's localhost transport under its application default policy. The
+failed attempt and zero-request ledger remain audit evidence. Driver packaging
+now requires a separate keyless, fixed-localhost release preflight; only the
+temporary TestEnv grants its registered strict localhost gateway. This check
+does not establish paid-model, document or installed-UI acceptance.
 Same-SHA Server 2022 and installed Win11 acceptance are tracked on
 [card #1723](https://app.fizzy.do/6179973/cards/1723); Windows 10 client evidence
 remains a separate requirement of the parent capability campaign.

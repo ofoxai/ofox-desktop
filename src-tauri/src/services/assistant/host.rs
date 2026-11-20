@@ -174,6 +174,11 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
     /// The LLM gateway base of `apex`.
     fn gateway_base(&self, apex: &str) -> Result<String, String>;
+    /// A trusted host may grant its own loopback test transport. Application
+    /// environments retain the debug-only policy; no runtime input grants it.
+    fn allows_local_gateway(&self, base_url: &str) -> bool {
+        local_gateway_allowed(base_url)
+    }
     /// Keyless, model-specific provider pricing for a media quote.
     fn provider_prices<'a>(
         &'a self,
@@ -546,7 +551,7 @@ pub fn scrub_detail(text: &str, secrets: &[String]) -> String {
 
 /// The runtime may talk to a plain `http://localhost:<port>` gateway (the
 /// `OFOX_USE_LOCAL` dev gateway, a test's mock) only in debug builds. A
-/// release build always sends `allowLocalGateway: false`.
+/// release application's default environment sends `allowLocalGateway: false`.
 pub(super) fn local_gateway_allowed(base_url: &str) -> bool {
     cfg!(debug_assertions) && is_local_gateway(base_url)
 }
@@ -4864,8 +4869,13 @@ mod tests {
 
     #[test]
     fn the_runtime_may_use_a_local_gateway_only_in_debug_builds() {
+        let (_config, env, _host) = fixture_with_env();
         assert_eq!(
             local_gateway_allowed("http://localhost:8088"),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(
+            env.allows_local_gateway("http://localhost:8088"),
             cfg!(debug_assertions)
         );
         for refused in [
@@ -4880,6 +4890,7 @@ mod tests {
             "http://127.0.0.1:8088",
         ] {
             assert!(!local_gateway_allowed(refused), "{refused}");
+            assert!(!env.allows_local_gateway(refused), "{refused}");
         }
     }
 

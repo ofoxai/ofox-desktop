@@ -32,6 +32,74 @@ fn write_json(path: &Path, value: &Value, token: &str) {
     file.write_all(text.as_bytes()).unwrap();
     file.sync_all().unwrap();
 }
+
+/// Run by the release packager before publishing any paid-task driver. The
+/// fixed chat fixture uses the real runtime without document startup probes.
+#[test]
+#[ignore = "keyless release-driver packaging gate; fixed localhost replies only"]
+#[serial_test::serial]
+fn release_gateway_preflight() {
+    assert!(std::env::var_os("OFOX_API_KEY").is_none());
+    assert!(std::env::var_os("OFOX_REAL_EVAL_KEY").is_none());
+    assert!(std::env::var_os("OFOX_PARITY_PROXY_TOKEN").is_none());
+    let bundle = runtime_dir().expect("prepared runtime is mandatory");
+    let fixture = title_runtime(&bundle);
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let unregistered = Gateway::start();
+        let env = TestEnv::new(config.path(), fixture.path(), &[(apex, &gateway)]);
+        assert!(env.allows_local_gateway(&gateway.base_url()));
+        assert!(!env.allows_local_gateway(&unregistered.base_url()));
+        // Even explicitly registered malformed/nonlocal bases cannot grant it.
+        for denied in [
+            "https://api.ofox.ai",
+            "http://localhost",
+            "http://localhost:0",
+            "http://localhost:08088",
+            "http://localhost:65536",
+            "http://127.0.0.1:8088",
+            "http://localhost.evil.com:8088",
+            "http://localhost:8088/v1",
+            "http://localhost:8088?query=1",
+            "http://user@localhost:8088",
+        ] {
+            env.route(apex, denied.into());
+            assert!(!env.allows_local_gateway(denied), "{denied}");
+        }
+        env.route(apex, gateway.base_url());
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            host.set_preferences(
+                serde_json::from_value(json!({
+                    "instructions":"","autoTitle":false,"notifyOnFinish":false,
+                    "expectedOwner":owner(),"expectedGeneration":host.generation()
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let sid = create(&host).await;
+            gateway.reply(Reply::Stream("Fixed release gateway response.".into()));
+            let (_, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Fixed gateway preflight", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].path, "/v1/chat/completions");
+            assert_eq!(requests[0].authorization, format!("Bearer {KEY}"));
+            assert_eq!(requests[0].body["model"], MODEL);
+            let detail = host.get_session(&sid).await.unwrap();
+            assert!(active(&detail)
+                .contains(&("assistant".into(), "Fixed release gateway response.".into())));
+            host.shutdown().await;
+        });
+    }
+}
 fn captured_calls(history: &str) -> Vec<Value> {
     history
         .lines()
