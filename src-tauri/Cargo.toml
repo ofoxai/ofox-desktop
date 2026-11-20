@@ -132,6 +132,11 @@ opt-level = "s"
 panic = "unwind"
 strip = "symbols"
 
+# Native sandbox tests rehash the pinned runtime before each engine launch.
+# Optimize this test dependency so hashing does not dominate request deadlines.
+[profile.test.package."sha2@0.10.9"]
+opt-level = 3
+
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"

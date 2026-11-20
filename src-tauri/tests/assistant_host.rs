@@ -4276,14 +4276,48 @@ fn title_events(env: &TestEnv, sid: &str, runs: &[&str]) -> Vec<Value> {
         .collect()
 }
 
+/// The real chat/title runtime without document engines or their startup probes.
+fn title_runtime(bundle: &Path) -> tempfile::TempDir {
+    let fixture = tempfile::tempdir().unwrap();
+    let node = Path::new("node").join(if cfg!(windows) { "node.exe" } else { "node" });
+    std::fs::create_dir(fixture.path().join("node")).unwrap();
+    std::fs::copy(bundle.join(&node), fixture.path().join(&node)).unwrap();
+    std::fs::create_dir_all(fixture.path().join("runtime/src")).unwrap();
+    let entry = bundle.join("runtime/src/main.mjs");
+    assert!(entry.is_absolute());
+    std::fs::write(
+        fixture.path().join("runtime/src/main.mjs"),
+        format!(
+            "import {{ pathToFileURL }} from 'node:url';\nawait import(pathToFileURL({}).href);\n",
+            serde_json::to_string(&entry).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest["sdkVersion"]
+        .as_str()
+        .is_some_and(|version| !version.is_empty()));
+    manifest["engines"] = json!({});
+    std::fs::write(
+        fixture.path().join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let engines = cc_switch_lib::assistant::documents::engines::engines_at(fixture.path());
+    assert!(engines.officecli.is_none() && engines.python.is_none());
+    fixture
+}
+
 #[test]
 fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
     };
+    let title_bundle = title_runtime(&runtime_dir);
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
-    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let env = TestEnv::new(config.path(), title_bundle.path(), &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     runtime().block_on(async {
         let sid = create(&host).await;
@@ -4301,6 +4335,7 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
         )
         .await;
         assert_eq!(end.data["status"], "completed");
+        let asked = title_requests(&gateway, 1).await;
         // A turn sent at once is not named again; it waits for the title,
         // which is being written into the native history.
         gateway.reply(Reply::Stream("Day two: Arashiyama.".into()));
@@ -4308,7 +4343,6 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
             .send(request(&sid, "And day two?", json!({})))
             .await
             .unwrap();
-        let asked = title_requests(&gateway, 1).await;
         // The second turn is held back until the title is written.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(gateway.requests().len(), 1, "the next turn waits");
@@ -4366,6 +4400,7 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
             host.get_session(&sid).await.unwrap().session.title,
             "Kyoto Trip Plan"
         );
+        host.shutdown().await;
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
