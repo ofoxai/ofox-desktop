@@ -2,11 +2,53 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant task progress after a model rejection
+
+An installed macOS run retained its last checklist when a Chat Completions
+request returned HTTP 400 after seven successful plan updates. The earlier
+requests and the rejection have gateway correlation IDs. The actual upstream
+resource for each request remains unverified. The synthetic replay and Host
+persistence tests cover the failure behavior on both apexes. See the
+[task progress evidence](assistant-progress.md#follow-up-on-the-rejected-model-request).
+
+An isolated DeepSeek V4.1 Flash 1017 run emitted its initial checklist and
+lost the continuation before the test forwarder received an HTTP status.
+The account request detail includes the first request. Attribution of the
+disconnect remains open pending production ingress evidence. See the
+[continuation investigation](assistant-progress.md#continuation-investigation).
+
+The explicit PPTX workflow now requires a model-authored initial checklist.
+The isolated DeepSeek 1017 acceptance delivered three slides and displayed
+all four steps checked. One final visual-plan discrepancy was reported.
+General tool execution now uses the same per-turn task preparation boundary.
+Multi-operation work needs a visible plan; single-step preparation permits one
+operation. The semantic choice for a purely textual answer remains model-owned;
+answer length alone is not a reliable complexity classifier. Checklist completion
+is model-reported and is never inferred from a successful run. A provider declining
+the initial PPT checklist currently receives the standard model-failure UI. See the
+[native checklist acceptance](assistant-progress.md#automatic-checklist-native-acceptance-2026-11-19).
+
+Task preparation consumes the existing shared tool budget. A caller with a
+one-call execution limit can exhaust it on preparation before performing its
+requested operation; the installed Host currently supplies the normal twenty-call
+MCP budget. This change does not expand a caller's configured budget.
+
+The general non-PPT DeepSeek acceptance verified the actual production Host,
+packaged runtime, persisted 5/5 plan and generated CSV amounts. Its report still
+contains five recorded semantic defects, including a mistaken identifier and a
+reversed signed expression; a checked plan does not certify document correctness.
+The final isolated native window could not be attached after restart, so final
+GUI verification remains open. Earlier GUI checks cover progress and a direct
+simple answer before the last automatic-promotion correction. See the
+[general task verification](assistant-progress.md#general-task-promotion-and-final-verification).
+
 ## Assistant task progress (2026-11-16)
 
 Task checklists are model-reported presentation. The shared plan tool and prompt
-guidance make multi-stage planning available without local configuration, but a
-model may omit a plan or leave it incomplete. The UI preserves those reported
+guidance make multi-stage planning available without local configuration. The
+generic execution gate now requires a plan before multiple tool operations; a
+model may still omit one for purely textual work or leave it incomplete. The UI
+preserves those reported
 states rather than inferring success from tool returns or run completion.
 Historical summaries require new optional message metadata; older messages are
 not reconstructed into invented plans, and interrupted runs without an observed
@@ -16,6 +58,30 @@ Browser verification uses actual components with synthetic data, and bundled
 runtime verification uses local mock gateways. An installed Mac build using
 GPT-6.1 Sol passed manual stop and conversation reopen. A separate run ended
 with HTTP 400 after several plan updates. Native Windows acceptance is pending.
+
+## Assistant local task scope
+
+The first version identifies direct, single-target diagnostic requests in
+Chinese, English and Japanese and the Tools page's predefined repair prompts.
+Open-ended local requests can still receive a conversational answer and a
+supported example. Repairs require the local configuration capability and a new
+explicit request after an uncertain outcome. Live input during a scoped local
+task enters the regular message queue for independent admission.
+
+Assistant configuration actions currently cover structured read-only
+diagnostics and repair via the managed launcher and binding writers. Generic
+terminal, directory search, skill scripts and arbitrary config writes are
+outside the model's tool set. A selected skill can read references inside its
+verified directory. The prior shell verification entry below describes the
+older tool surface and the underlying executors.
+
+The macOS host regression uses the original Fizzy question and an existing
+capability record in Full Auto. It exercises both apexes with a loopback
+provider, and the same test can assert the installed Codex version through
+the real native probe. This change was verified with Codex CLI 0.166.0.
+The timeout regression injects an unknown tool outcome and verifies an
+additional tool-free reply with the operation error retained. Live provider
+answer quality and the native Windows build are outside that evidence.
 
 ## Assistant command verification scope (2026-11-14)
 
