@@ -1140,6 +1140,7 @@ impl AssistantHost {
             if let Some((entered, release)) = barrier {
                 entered.notify_one();
                 release.notified().await;
+                #[cfg(windows)]
                 return;
             }
         }
