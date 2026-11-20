@@ -11,6 +11,7 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.txt text eol=lf
+*.patch text eol=lf
 
 # TypeScript/JavaScript files
 *.ts text eol=lf
