@@ -293,6 +293,7 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
                     )
                 });
             let fact = NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id: request_id.clone(),
                 native_key: native_key.clone(),
                 session_id: Some(sid.clone()),

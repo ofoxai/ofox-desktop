@@ -34,6 +34,18 @@ const MAX_MESSAGE_BYTES: usize = 128_000;
 /// The turn to show is not a user turn of the conversation's native history.
 const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
 
+fn local_task_paths(
+    mut paths: super::tools::context::LocalPaths,
+) -> Result<super::tools::context::LocalPaths, String> {
+    // Pin the same physical home that Host diagnostics report, including
+    // partial mutations that have no structured verificationFolder result.
+    paths.home = super::tools::scope::resolve(&paths.home)?;
+    if !paths.home.is_dir() {
+        return Err("assistant_local_unavailable".into());
+    }
+    Ok(paths)
+}
+
 fn apply_presentation_text_budget(
     policy: Option<&super::presentation::VisualPolicy>,
     local_config: &mut Option<Value>,
@@ -142,6 +154,7 @@ impl AssistantHost {
         .await
         .unwrap_or_default();
         // Documents only with the runtime that registers their tool.
+        self.prepare_document_engines().await;
         let runtime = match self.runtime() {
             Ok(r) => json!({"available":true,"reason":null,"version":r.version,
                 "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
@@ -697,6 +710,9 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
+        self.prepare_document_engines().await;
+        self.ensure_current(&identity, generation).await?;
+
         // The persisted capability is eligibility. Resolve an actual target
         // from the active user turn, before loading any model-only context.
         let task = super::tools::task::Task::from_user_text(
@@ -713,11 +729,8 @@ impl AssistantHost {
             None
         };
         let local = if let Some(task) = local_task {
-            match self.env.local_paths().await {
-                Ok(paths) => match super::tools::scope::resolve(&paths.home) {
-                    Ok(folder) => Some((task, folder, paths.skill)),
-                    Err(_) => None,
-                },
+            match self.env.local_paths().await.and_then(local_task_paths) {
+                Ok(paths) => Some((task, paths.home, paths.skill)),
                 Err(error) => {
                     log::warn!("[Assistant] local configuration is unavailable: {error}");
                     None
@@ -751,6 +764,7 @@ impl AssistantHost {
             && self.runtime().is_ok()
             && self.engines().formats().contains(&"pptx");
         control.ui_language = ui_language.clone();
+        control.local_home = local.as_ref().map(|(_, folder, _)| folder.clone());
         control.local_task = local.map(|(task, folder, _)| (task, folder));
         control.local_enabled = control.local_task.is_some();
         control.mcp = super::mcp::current(self.env.config_dir())
@@ -2200,6 +2214,29 @@ pub(super) fn publish_turn(
 mod tests {
     use super::*;
     use crate::services::assistant::host::Identity;
+
+    #[test]
+    #[cfg(unix)]
+    fn local_task_home_is_pinned_before_partial_mutation_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let paths = super::super::tools::context::LocalPaths {
+            home: alias.clone(),
+            config_roots: vec![],
+            shell_files: vec![],
+            skill: real.join("SKILL.md"),
+        };
+        let pinned = local_task_paths(paths).unwrap();
+        assert_eq!(pinned.home, real.canonicalize().unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert_ne!(pinned.home, alias.canonicalize().unwrap());
+    }
 
     #[test]
     #[serial_test::serial]

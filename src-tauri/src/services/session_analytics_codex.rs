@@ -110,6 +110,7 @@ pub(super) fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             buckets: event.buckets,
             complete: event.complete,
             cache_write_1h: 0,
+            cache_write_ttl_known: true,
         });
         let m = models
             .entry(event.model.clone())

@@ -292,6 +292,7 @@ test("real main signals and EOF confirm MCP cleanup before ordinary exit; failed
     assert.ok(alive(sentinel.pid), "unrelated sentinel survives");
     t.diagnostic(
       JSON.stringify({
+        descendant,
         signal,
         scenario,
         dropStop,

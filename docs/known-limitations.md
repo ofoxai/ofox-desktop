@@ -1,6 +1,138 @@
 # Known limitations and prior review dispositions
 
+## Desktop assistant capability acceptance (#1701)
+
+Verification snapshots remain memory-only; incomplete or legacy scopes stay
+unverified rather than guessing a tool identity. Preview persistence retry
+reuses files only within the current run, without durable cross-run recovery.
+The Windows LPAC adapter requires native verification against the delivery SHA;
+resource staging and compilation do not certify Python availability. Windows
+10/11 installed-client checks and the budgeted live-model campaign are separate
+gates. Missing credentials or client results remain pending. See the
+[implementation record](assistant-capability-1701.md).
+Extended-path handling covers runtime resources and document/backup reads and
+publication. Arbitrarily long process working directories are not certified;
+native launch failure keeps Python unavailable.
+
+Server 2022 build 20348 rejects the user-mode class-46 token query, including
+fixed-size buffers. The replacement LPAC check uses the actual suspended
+child token's authorization behavior with documented token duplication and
+AccessCheck APIs. This is a behavioral proof based on LPAC semantics, not a
+Microsoft-defined IsLPAC query contract. Its ordinary AppContainer controls
+and Windows 10/11 client validation remain required acceptance evidence.
+
+The Windows Node startup originally failed inside KernelBase DLL_PROCESS_ATTACH
+and reported STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
+debugger/manual-hold/Host-resume proof passed; the history below records how
+that was resolved. Native A-B-A run 44027445443 confirmed that adding registryRead alone
+still exits with the same status in all three verified, unassisted cases. This
+does not change production capabilities or grant Python admission. Fixed Nt
+entry/return observations now pair natively (runs 44058284863, 44062635550): the
+last completed operations create the ConDrv console Server/Reference handles,
+and no process creation follows before the failure. The exact failing operation
+is still unobserved. Unassisted A-B-A run 44068121826 shows that launching
+without a console (DETACHED_PROCESS) gets past KernelBase initialization while
+both CREATE_NO_WINDOW controls still fail, but Node then aborts with
+STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
+(WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Run 44076224990
+showed that the console-free launch plus the registryRead capability lets Node
+run normally under the same verified isolation. Run 44133006077 showed that
+registryRead also lets the token read HKCU\Environment, HKCU\Software and the
+HKCU root, while the runtime-only token cannot. A CI-only grant of the Winsock
+catalog subtree alone was insufficient (44142596063), and a debugger trace
+(44231498872) showed why: WSAStartup first opens the HKLM root key itself, which
+Windows grants an LPAC only through registryRead. Avoiding registryRead would
+require either an elevated, machine-wide ACL change on the HKLM root, which the
+per-user installer cannot make, or a custom Node/libuv build that tolerates the
+Winsock failure.
+
+Accepted residual risk (user decision, 2026-11-18): production launches detached
+with exactly {runtime, registryRead}. On default ACLs registryRead grants read
+on the HKLM root and, by inheritance, most of HKLM (not walked key by key), and
+on the current user's hive: native walks found 1802 of 3510 HKCU keys readable
+with it, against 4 (the container's own keys) without it, and it adds no write
+right. The sharpest consequence: HKCU\Environment often holds API keys (this
+app itself detects `ANTHROPIC_*`, `OPENAI_*` and `GEMINI_*` variables there), so a
+registry read bypasses the environment scrubbing applied to sandboxed children;
+HKCU\Software may hold other applications' credentials. A read needs native
+code: model-written Python runs in Pyodide/WASM inside Node, which has no
+registry API; only bundled native code (Node, OfficeCLI, the bundled Skia canvas
+addon) runs, newly written native modules and child processes are denied. The
+realistic path is therefore an exploit, most plausibly a malicious attachment
+parsed by OfficeCLI (file previews run it on user files). The network stays
+denied, but output files in the task directory and tool stdout/stderr (up to
+4 MiB for an SVG preview) are returned and can reach the remote model provider
+or the user. Every launch measures the HKLM root and the Winsock catalog (both
+must be readable) and the user's Environment and Software keys (measured, never
+decisive) on the actual suspended token, and refuses on any failed measurement;
+a profile without HKCU\Environment would therefore be refused. Only the trusted
+probe keeps these results as evidence. The native prerequisite test additionally
+checks that the runtime-only token reads none of the fixed keys and that
+registryRead adds no HKCU write right. Unassisted Server 2022 run
+[44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
+passed these controls (3504 keys visited, 1798 newly readable, zero added write
+rights and zero measurement errors). Node ran the fixed script through
+checkpoint 7 and timed out in the child-process denial check. In the subsequent
+[Server 2022 run](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733),
+the same request inherited stdio and returned `UNKNOWN` before the deadline.
+The functional gate rejected the result. A [follow-up kernel event check](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
+returned `no-match`. Its report combined an empty query with an event whose caller
+could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
+completed successfully and found no KernelMode event 4 during the fixed Node
+process's lifetime. Run
+[44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
+paired the fixed request's failed return with Win32 error 367
+(`ERROR_CHILD_PROCESS_BLOCKED`). The diagnostic's private-directory removal
+separately returned access denied (5), leaving its overall result inconclusive.
+The fixed-scope cleanup in `dbb96647` passed the Server 2022
+[follow-up diagnostic](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236).
+Its digest-verified artifact records `diagnosticRecorded: true` and
+`verdict: child-process-blocked`; this is diagnostic evidence, not release admission.
+The candidate adds a fixed Node-API probe to observe the native denial inside
+the same restricted Node process. Native Win11 regressions reproduce the CommonJS
+loader's denied ancestor realpath lookup for both the probe and Skia. The verified
+cached Node now preserves its main and dependency paths; both native modules load
+without granting ancestor access. The unassisted functional run passes the
+same-process child denial, filesystem, network and image controls, Skia, and
+Pyodide. A separate native comparison locates OfficeCLI's missing temporary
+directory under the scrubbed LOCALAPPDATA, rather than the real Windows profile:
+`home/Packages/<profile name>/AC/Temp`. The launcher prepares this private task
+subtree before resume, with existing task permissions and no extra ACL grant.
+Per-machine admission still requires the entire native functional gate.
+Same-SHA Server 2022 and installed Win11 acceptance are tracked on
+[card #1723](https://app.fizzy.do/6179973/cards/1723); Windows 10 client evidence
+remains a separate requirement of the parent capability campaign.
+
+One macOS full sidecar run observed a shutdown assertion reporting a descendant
+alive at ordinary exit. The original trace cannot distinguish running, zombie,
+or failed observation. Targeted repetitions and the subsequent full run passed;
+test-only process-state diagnostics were added without weakening the assertion
+or changing production cleanup. The original failure remains unexplained.
+
+The accepted structured Office/deck fallback remains available when native
+Python admission fails; that fallback is not claimed to have LPAC isolation.
+Python-derived files, source edits and uploaded-file previews must remain on
+the proven isolation path. Job termination, time/output limits and serialized
+Pyodide are implemented; Job memory/CPU or whole-workspace disk quotas are not.
+Graceful engine cancellation/crash cleanup is implemented, with native test
+results still pending; a forcibly killed Host
+does not yet have a durable profile/workspace recovery journal.
+
+Verification debt retention covers known tool mutations. A generic write/edit
+may commit before a later identity fence rejects its result; the encrypted
+change journal remains, but this slice does not add durable task recovery for
+that existing interruption window. External installers also keep their existing
+lifecycle limits: retaining unknown verification debt is not a promise that an
+opened Terminal installer or every platform-specific descendant has stopped.
+
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
+
+The local Mac/Windows assistant integration preserves task-scoped admission,
+plan progress and Host verification debt together. Its Mac checks do not certify
+the combined Windows installation or LPAC behavior. The native Windows gate and
+installed integration acceptance remain pending; no additional live model call
+or production installation is part of this merge. See the
+[integration contract](mac-windows-assistant-integration.md).
 
 ## Assistant task progress after a model rejection
 
@@ -1709,3 +1841,11 @@ fully previewable; it is not a quality certification. Every style stays
 - **Deck images: count, reuse and backgrounds (2026-11-12).** The image setting is none / auto (a ceiling the model fills as it sees fit) / a set number, up to eight generated images a deck (and a reply). Pictures the conversation already holds (generated earlier, or from the user) are listed to the model each presentation turn and placed free as `user-image` visuals, so changing a deck keeps its images; a deck places at most twelve pictures. With images off, a picture the user's message asks for is still generated as an ordinary image and then placed. These are instructions to the model, not Host guarantees: it may still drop a picture, plan fewer than a set number, or generate an asked-for picture it then fails to place. One picture per page, so a page cannot carry both a background and a side image. A background image gets the page colour laid over it at 60%; very busy pictures can still leave small text hard to read. The running-steps list shows a failed step that was done again as "Retried".
 - **A reply that runs out of output while reasoning (2026-11-13).** When the model spends its whole output limit on reasoning (no text, no tool call), the runtime asks it again without showing a user message, twice at most; a run that still has no answer ends as an error instead of "completed". A long answer cut off at the limit is kept as it is. Office round trips of sampled decks were checked only with headless LibreOffice (which drops embedded chart workbooks and native equations on save) and one read-only open in an unactivated PowerPoint; editing, saving and reopening in WPS or an activated PowerPoint, and Windows, remain unverified.
 - **Presentation styles in real runs (2026-11-13).** All 24 catalog styles and navy now have a real generated deck (kept outside the repository; covers in `assets/readme/presentation-styles.webp`). On `architectural-plan` pages (title in a side panel), content across the panel edge or over its title is now refused with the regions to use; a real rerun laid every page out inside them, so the refusal itself is covered only by a test. Text in a code-drawn figure that names a Latin-only font now gets a CJK font of the same kind first; only covered by a test, not seen again in a real run. Two real runs failed on the provider's temporary refusals (request burst, server overload) and passed when run again.
+
+## Recovered working-tree changes (2026-11-15)
+
+Claude cache-write duration is retained only when native identity, model, second and all four token buckets agree with the ledger row. Legacy/archived rows without that evidence remain partial or unknown; the change does not reconstruct their TTL or rewrite saved charges. Other native readers retain their prior interpretation and receive only compatible metadata defaults. Synthetic sandbox tests do not certify real provider billing or Windows GUI behavior.
+
+The abandoned Assistant Vault prototype had a durable, context-bound pending marker before API-key creation. The current `ofox_api_keys` service does not persist that unknown-mint barrier: a timeout can leave an unidentified remote key, and a later explicit Send may create another. The old Vault/reset-setup UI is preserved as design evidence rather than transplanted into the current credential service. A future recovery design needs durable owner/region/issuer binding and an explicit, identity-fenced confirmation before clearing an uncertain attempt. No live keys were created or revoked for this consolidation.
+
+Calendar rollover, routing readiness and message-count regressions are verified through simulated UI and temporary native logs. New installed-app acceptance remains separate from these source checks; the installed release is not silently replaced during workspace consolidation.

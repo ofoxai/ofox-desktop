@@ -45,7 +45,7 @@ it("renders nothing when every source read and every model is priced", () => {
   const { container } = render(
     <UsageSourceAlert
       sources={[source("claude", "ok"), source("opencode", "partial")]}
-      pricing={pricing({ stale: true, additionalUnitsUnsupported: true })}
+      pricing={pricing({ stale: true, additionalUnitsUnsupported: false })}
     />,
   );
   expect(container).toBeEmptyDOMElement();
@@ -105,4 +105,15 @@ it("identifies official fallback estimates alongside genuinely unpriced models",
   );
   expect(screen.getByRole("status")).toHaveTextContent("1 个模型未计价");
   expect(screen.queryByText("价格目录不可用，费用暂无法估算")).toBeNull();
+});
+
+it("explains a partial base subtotal when additional billing units are unsupported", () => {
+  render(
+    <UsageSourceAlert
+      pricing={pricing({ additionalUnitsUnsupported: true })}
+    />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "部分费用尚无法完整估算",
+  );
 });

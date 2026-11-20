@@ -1,6 +1,7 @@
 import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSettingsQuery } from "@/lib/query/queries";
 import { useTranslation } from "react-i18next";
 import {
   Download,
@@ -16,7 +17,6 @@ import {
   type LibraryOperation,
   type McpDefinition,
 } from "@/lib/api/library";
-import { settingsApi } from "@/lib/api/settings";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchInput } from "@/components/ui/search-input";
@@ -113,12 +113,10 @@ export function LibraryMcpTable({
 }) {
   const { t } = useTranslation();
   const active = useInteractionActive();
-  // Observe the existing settings cache; this does not read or write settings.
-  const routingSettings = useQuery({
-    queryKey: ["settings"],
-    queryFn: settingsApi.get,
-    enabled: false,
-  }).data;
+  const routingQuery = useSettingsQuery();
+  const routingSettings = routingQuery.data;
+  const routingReadError =
+    routingSettings === undefined && routingQuery.isError;
   const routingKey = JSON.stringify([
     routingSettings?.claudeConfigDir,
     routingSettings?.codexConfigDir,
@@ -131,6 +129,9 @@ export function LibraryMcpTable({
     queryKey: ["library", "mcp", routingKey],
     queryFn: () => libraryApi.list("mcp"),
     retry: false,
+    enabled: active && routingSettings !== undefined,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const data = query.data;
   const rows = data?.servers ?? [];
@@ -210,10 +211,20 @@ export function LibraryMcpTable({
   useEffect(
     () =>
       registerRefresh("mcp", async () => {
+        if (routingSettings === undefined) {
+          await routingQuery.refetch();
+          return;
+        }
         await query.refetch();
         native.rescan();
       }),
-    [registerRefresh, query.refetch, native.rescan],
+    [
+      registerRefresh,
+      query.refetch,
+      native.rescan,
+      routingSettings,
+      routingQuery.refetch,
+    ],
   );
   useEffect(
     () =>
@@ -421,9 +432,9 @@ export function LibraryMcpTable({
           {notice}
         </p>
       )}
-      {query.isError ? (
+      {query.isError || routingReadError ? (
         <p role="alert" className="text-ctl text-danger">
-          {libraryError(query.error, t)}
+          {libraryError(routingReadError ? routingQuery.error : query.error, t)}
         </p>
       ) : query.isPending ? (
         <FoxLoader label={t("pages.library.loading")} />

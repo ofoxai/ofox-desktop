@@ -18,13 +18,49 @@ fn write_skill(dir: &std::path::Path, name: &str) {
 }
 
 #[cfg(unix)]
-fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) {
+fn directory_link(src: &std::path::Path, dest: &std::path::Path) {
     std::os::unix::fs::symlink(src, dest).expect("create symlink");
 }
 
 #[cfg(windows)]
-fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) {
-    std::os::windows::fs::symlink_dir(src, dest).expect("create symlink");
+fn directory_link(src: &std::path::Path, dest: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+
+    match std::os::windows::fs::symlink_dir(src, dest) {
+        Ok(()) => {}
+        // Non-administrator accounts may lack SeCreateSymbolicLinkPrivilege.
+        // A junction still exercises preservation of a real directory link.
+        Err(error) if error.raw_os_error() == Some(1314) => {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(dest)
+                .arg(src)
+                .creation_flags(0x0800_0000)
+                .output()
+                .expect("create junction");
+            assert!(output.status.success(), "create junction: {output:?}");
+        }
+        Err(error) => panic!("create symlink: {error}"),
+    }
+}
+
+fn assert_directory_link(src: &std::path::Path, dest: &std::path::Path) {
+    let metadata = fs::symlink_metadata(dest).expect("directory link metadata");
+    #[cfg(unix)]
+    assert!(metadata.file_type().is_symlink(), "a real directory link");
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        assert_ne!(
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0,
+            0
+        );
+    }
+    assert_eq!(
+        fs::canonicalize(dest).expect("directory link target"),
+        fs::canonicalize(src).expect("source directory")
+    );
 }
 
 #[test]
@@ -96,8 +132,18 @@ fn sync_to_app_preserves_unowned_disabled_and_orphaned_links() {
 
     let opencode_skills_dir = home.join(".config").join("opencode").join("skills");
     fs::create_dir_all(&opencode_skills_dir).expect("create opencode skills dir");
-    symlink_dir(&disabled_skill, &opencode_skills_dir.join("disabled-skill"));
-    symlink_dir(&orphan_skill, &opencode_skills_dir.join("orphan-skill"));
+    let links = [
+        (&disabled_skill, opencode_skills_dir.join("disabled-skill")),
+        (&orphan_skill, opencode_skills_dir.join("orphan-skill")),
+    ];
+    let originals: Vec<_> = links
+        .iter()
+        .map(|(source, link)| {
+            directory_link(source, link);
+            assert_directory_link(source, link);
+            fs::read(source.join("SKILL.md")).expect("original skill bytes")
+        })
+        .collect();
 
     let state = create_test_state().expect("create test state");
     state
@@ -128,6 +174,11 @@ fn sync_to_app_preserves_unowned_disabled_and_orphaned_links() {
         opencode_skills_dir.join("orphan-skill").exists(),
         "unowned orphan links remain user files"
     );
+    for ((source, link), original) in links.iter().zip(originals) {
+        assert_directory_link(source, link);
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), original);
+        assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), original);
+    }
 }
 
 #[test]

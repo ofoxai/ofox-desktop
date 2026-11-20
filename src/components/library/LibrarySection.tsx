@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
+import { useSettingsQuery } from "@/lib/query/queries";
 import { useTranslation } from "react-i18next";
 import {
   libraryApi,
@@ -203,12 +204,11 @@ export function LibrarySection({
   ) => () => void;
 }) {
   const { t, i18n } = useTranslation();
-  // Observe the existing settings cache; this does not read or write settings.
-  const routingSettings = useQuery({
-    queryKey: ["settings"],
-    queryFn: settingsApi.get,
-    enabled: false,
-  }).data;
+  const active = useInteractionActive();
+  const routingQuery = useSettingsQuery();
+  const routingSettings = routingQuery.data;
+  const routingReadError =
+    routingSettings === undefined && routingQuery.isError;
   const routingKey = JSON.stringify([
     routingSettings?.claudeConfigDir,
     routingSettings?.codexConfigDir,
@@ -220,6 +220,9 @@ export function LibrarySection({
     queryKey: ["library", kind, routingKey],
     queryFn: () => libraryApi.list(kind),
     retry: false,
+    enabled: active && routingSettings !== undefined,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const [search, setSearch] = useState("");
   const [view, setView] = useState<OpenView | null>(null);
@@ -308,11 +311,21 @@ export function LibrarySection({
   useEffect(
     () =>
       registerRefresh(kind, async () => {
+        if (routingSettings === undefined) {
+          await routingQuery.refetch();
+          return;
+        }
         const result = await query.refetch();
         if (result.error) throw result.error;
         native.rescan();
       }),
-    [kind, query.refetch, registerRefresh],
+    [
+      kind,
+      query.refetch,
+      registerRefresh,
+      routingSettings,
+      routingQuery.refetch,
+    ],
   );
   async function run(action: () => Promise<unknown>, close = false) {
     if (running.current) return false;
@@ -415,7 +428,6 @@ export function LibrarySection({
     Number.isSafeInteger(data?.epoch) && (data?.epoch ?? -1) >= 0;
   const rows: Resource[] =
     data?.instructions ?? data?.servers ?? data?.skills ?? [];
-  const active = useInteractionActive();
   const inline = useLibraryInline(rows, data?.epoch, routingKey, active);
   useEffect(
     () => registerLeave?.(kind, inline.guard),
@@ -1313,11 +1325,20 @@ export function LibrarySection({
           {t("library.legacyReadOnly")}
         </p>
       )}
-      {query.isPending && <FoxLoader label={t("pages.library.loading")} />}
-      {query.isError && (
+      {query.isPending && !routingReadError && (
+        <FoxLoader label={t("pages.library.loading")} />
+      )}
+      {(query.isError || routingReadError) && (
         <div role="alert" className="space-y-2 text-ctl text-danger">
           <p>{t("library.loadFailed")}</p>
-          <Button variant="secondary" onClick={() => void query.refetch()}>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              void (routingSettings === undefined
+                ? routingQuery.refetch()
+                : query.refetch())
+            }
+          >
             {t("library.retry")}
           </Button>
         </div>

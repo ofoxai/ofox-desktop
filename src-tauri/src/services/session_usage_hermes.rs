@@ -241,6 +241,7 @@ fn fact(
 ) -> Option<NormalizedUsageFact> {
     let [input, output, read, write] = counts.map(|n| usage_source::checked_token(n).ok());
     Some(NormalizedUsageFact {
+        cache_write_ttl_known: false,
         request_id: format!("hermes_session:{}", json!([sid, id])),
         native_key: Some(usage_source::native_key("hermes", sid, id)),
         session_id: Some(sid.to_owned()),

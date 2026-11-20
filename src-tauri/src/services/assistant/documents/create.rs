@@ -319,6 +319,11 @@ pub struct EngineSandbox {
 }
 
 impl EngineSandbox {
+    #[cfg(windows)]
+    pub(in crate::services::assistant) fn record_windows_probe(&self, ready: bool) {
+        self.failed
+            .store(!ready, std::sync::atomic::Ordering::Relaxed);
+    }
     /// Whether the latest probe failed: until one passes, the engine has no
     /// sandbox. `false` before any probe.
     pub(in crate::services::assistant) fn failed(&self) -> bool {
@@ -2255,7 +2260,7 @@ struct Work<'a> {
     home: &'a Path,
     /// How the model knows the engine.
     name: &'static str,
-    /// `sandbox-exec`, to run the engine under `profile`.
+    /// macOS sandbox executable, or a proven Windows public runtime root.
     sandbox: Option<&'a Path>,
     /// [`OFFICE_SANDBOX`], [`TYPST_SANDBOX`] or [`PYTHON_SANDBOX`].
     profile: &'static str,
@@ -2427,6 +2432,19 @@ impl Work<'_> {
             ));
         }
         let output = match self.sandbox {
+            #[cfg(windows)]
+            Some(root) if self.profile != TYPST_SANDBOX => {
+                super::runner::run_windows_engine_limited(
+                    self.exe,
+                    args,
+                    self.dir,
+                    self.home,
+                    root,
+                    self.timeout,
+                    limit,
+                )
+                .await
+            }
             Some(sandbox) => {
                 let doc = format!("DOC={}", real(self.dir));
                 let real_exe = PathBuf::from(real(self.exe));
@@ -3691,15 +3709,22 @@ impl AssistantHost {
     /// as the document of the call that made it, within the reply's
     /// [`MAX_DOCUMENTS_PER_RUN`]. A stopped reply delivers none: like a
     /// generation's, its outcome is not kept (see `still_running`), and the
-    /// user never saw a preview. Best effort: a preview that cannot be
-    /// delivered is logged, and the run still ends.
-    pub(in crate::services::assistant) async fn deliver_previews(&self, run: &Arc<RunControl>) {
+    /// user never saw a preview. Try every remaining file, retaining any
+    /// successful attachments, and report a stable failure code when one
+    /// could not be kept. A reply cannot complete with an undelivered file.
+    pub(in crate::services::assistant) async fn deliver_previews(
+        &self,
+        run: &Arc<RunControl>,
+    ) -> Result<(), String> {
         let Some(media) = run.media.as_ref().filter(|_| !run.cancelled()) else {
-            return;
+            return Ok(());
         };
+        let mut failure = None;
         for preview in media.undelivered_previews() {
             if !media.reserve_document(MAX_DOCUMENTS_PER_RUN) {
                 log::warn!("[Assistant] a preview was not delivered: the reply made its documents");
+                failure.get_or_insert_with(|| LIMIT.to_string());
+                media.keep_preview(preview);
                 continue;
             }
             let delivered = self
@@ -3712,14 +3737,20 @@ impl AssistantHost {
                     &preview.made,
                 )
                 .await;
-            if let Err(error) = delivered {
-                media.release_document();
-                log::warn!(
-                    "[Assistant] could not deliver a preview: {}",
-                    scrub_secrets(&error, &run.secrets())
-                );
+            match delivered {
+                Ok(_) => media.record_delivery(&preview.name, preview.format),
+                Err(error) => {
+                    media.release_document();
+                    log::warn!(
+                        "[Assistant] could not deliver a preview: {}",
+                        scrub_secrets(&error, &run.secrets())
+                    );
+                    failure.get_or_insert_with(|| attachments::WRITE_FAILED.to_string());
+                    media.keep_preview(preview);
+                }
             }
         }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Remove the folders the run's documents were made in: their files are
@@ -3764,6 +3795,15 @@ impl AssistantHost {
         cell: &EngineSandbox,
         work: &Work<'_>,
     ) -> Result<PathBuf, String> {
+        #[cfg(windows)]
+        if work.profile != TYPST_SANDBOX {
+            let root = self.env.runtime_dir()?;
+            let result = super::runner::ensure_windows_document_engine_ready(&root)
+                .await
+                .map(|_| root);
+            cell.record_windows_probe(result.is_ok());
+            return result;
+        }
         let probed = cell
             .works
             .get_or_try_init(|| async {
@@ -9725,6 +9765,148 @@ esac
         assert!(f.outputs().is_empty());
     }
 
+    /// A conflicting private attachment target injects a real persistence
+    /// failure without making the session record itself unreadable/unwritable.
+    fn block_preview_delivery(f: &Fixture, preview: &Value) -> PathBuf {
+        let store = f.host.store(&identity().owner).unwrap();
+        let target = store
+            .attachment_dir(&f.sid)
+            .unwrap()
+            .join(preview["previewId"].as_str().unwrap());
+        std::fs::create_dir(&target).unwrap();
+        target
+    }
+
+    fn text_preview(name: &str, text: &str) -> Value {
+        json!({"name":name,"format":"md","content":text,"preview":true})
+    }
+
+    #[tokio::test]
+    async fn preview_delivery_failure_does_not_complete_or_erase_kept_results() {
+        let f = fixture(None, None);
+        f.call(
+            "kept-file",
+            json!({"name":"kept.md","format":"md","content":"# Kept attachment"}),
+        )
+        .await
+        .unwrap();
+        let kept = f.delivered();
+        let preview = f
+            .call("preview", text_preview("pending.md", "# Undelivered"))
+            .await
+            .unwrap();
+        let blocked = block_preview_delivery(&f, &preview);
+        f.host
+            .store(&identity().owner)
+            .unwrap()
+            .mutate(&f.sid, |record| {
+                record.messages[0].content = "The useful answer stays.".into();
+                Ok(())
+            })
+            .unwrap();
+
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+
+        let record = f.record();
+        assert_eq!(record.messages[0].status, "error");
+        assert_eq!(
+            record.messages[0].error_code.as_deref(),
+            Some(attachments::WRITE_FAILED)
+        );
+        assert_eq!(record.messages[0].content, "The useful answer stays.");
+        assert_eq!(f.delivered(), kept);
+        assert_eq!(f.events("generation").len(), 1);
+        assert_eq!(f.events("run_end")[0]["status"], "error");
+        assert_eq!(f.events("error")[0]["code"], attachments::WRITE_FAILED);
+        assert!(record.session.active_run.is_none());
+        assert!(f.outputs().is_empty());
+        assert!(
+            blocked.is_dir(),
+            "foreign conflicting targets are preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_delivery_failure_preserves_the_original_provider_failure() {
+        let f = fixture(None, None);
+        let preview = f
+            .call("preview", text_preview("pending.md", "# Undelivered"))
+            .await
+            .unwrap();
+        block_preview_delivery(&f, &preview);
+        let mut failure: crate::services::assistant::host::Failure =
+            "assistant_model_request_failed".into();
+        failure.detail = Some("The provider rejected this request.".into());
+
+        f.host.finish(&f.run, Err(failure)).await;
+
+        let record = f.record();
+        assert_eq!(record.messages[0].status, "error");
+        assert_eq!(
+            record.messages[0].error_code.as_deref(),
+            Some("assistant_model_request_failed")
+        );
+        assert_eq!(
+            f.events("error"),
+            [
+                json!({"code":"assistant_model_request_failed","message":"The provider rejected this request."})
+            ]
+        );
+        assert_eq!(f.events("run_end")[0]["status"], "error");
+        assert!(f.delivered().is_empty());
+        assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stopped_finish_never_delivers_preview_without_a_cancel_signal() {
+        let f = fixture(None, None);
+        f.call("preview", text_preview("pending.md", "# Undelivered"))
+            .await
+            .unwrap();
+
+        f.host.finish(&f.run, Ok(Finish::Stopped)).await;
+
+        assert_eq!(f.record().messages[0].status, "stopped");
+        assert!(f.delivered().is_empty());
+        assert!(f.events("generation").is_empty());
+        assert!(f.events("error").is_empty());
+        assert_eq!(f.events("run_end")[0]["status"], "stopped");
+        assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn from_preview_persistence_failure_can_retry_with_a_new_call_id() {
+        let f = fixture(None, None);
+        let preview = f
+            .call("preview", text_preview("pending.md", "# Identical bytes"))
+            .await
+            .unwrap();
+        let blocked = block_preview_delivery(&f, &preview);
+        let source = f
+            .output(preview["previewId"].as_str().unwrap())
+            .join("out.md");
+        let expected = std::fs::read(&source).unwrap();
+        let args = json!({"name":"pending.md","format":"md","fromPreview":preview["previewId"]});
+        assert_eq!(
+            f.call("failed-delivery", args.clone()).await.unwrap_err(),
+            attachments::WRITE_FAILED
+        );
+        assert!(f.delivered().is_empty());
+        assert!(f.events("generation").is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), expected);
+        std::fs::remove_dir(blocked).unwrap();
+
+        let delivered = f.call("retry-delivery", args).await.unwrap();
+
+        assert_eq!(delivered["status"], "completed");
+        assert_eq!(f.delivered().len(), 1);
+        assert_eq!(f.delivered()[0].2, expected);
+        assert_eq!(f.events("generation").len(), 1);
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert_eq!(f.delivered().len(), 1);
+        assert_eq!(f.events("run_end")[0]["status"], "completed");
+    }
+
     #[tokio::test]
     #[serial_test::serial(document_engines)]
     async fn previews_do_not_count_toward_the_document_limit() {
@@ -9796,6 +9978,49 @@ esac
         // Neither the runner nor officecli ran again.
         assert_eq!(sandbox_log(&f).len(), runs);
         assert_eq!(generated_bytes(&f), PYTHON_DECK);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn from_preview_persistence_failure_retries_without_running_python_again() {
+        let officecli = officecli_drawing(
+            r#"{"results":[]}"#,
+            NO_ISSUES,
+            r#"{"slides":2}"#,
+            r#"echo "<svg>$5</svg>""#,
+        );
+        let f = python_fixture(&officecli, &deck_runner(), |dir| stub_sandbox(dir, true));
+        let mut args = python_args("prs = new_deck()");
+        args["preview"] = json!(true);
+        let preview = f.call("preview", args).await.unwrap();
+        let blocked = block_preview_delivery(&f, &preview);
+        let engine_runs = sandbox_log(&f).len();
+        let bytes = std::fs::read(
+            f.output(preview["previewId"].as_str().unwrap())
+                .join("out.pptx"),
+        )
+        .unwrap();
+        let deliver = from_preview_args(&preview["previewId"]);
+        assert_eq!(
+            f.call("failed-delivery", deliver.clone())
+                .await
+                .unwrap_err(),
+            attachments::WRITE_FAILED
+        );
+        assert_eq!(sandbox_log(&f).len(), engine_runs);
+        assert!(f.delivered().is_empty());
+        std::fs::remove_dir(blocked).unwrap();
+
+        f.call("retry-delivery", deliver).await.unwrap();
+
+        assert_eq!(sandbox_log(&f).len(), engine_runs);
+        assert_eq!(f.delivered().len(), 1);
+        assert_eq!(f.delivered()[0].2, bytes);
+        assert_eq!(f.events("generation").len(), 1);
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert_eq!(f.delivered().len(), 1);
+        assert_eq!(sandbox_log(&f).len(), engine_runs);
     }
 
     #[tokio::test]

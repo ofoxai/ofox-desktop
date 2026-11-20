@@ -148,6 +148,9 @@ export function LibraryPage({
     queryKey: ["library", "summary"],
     queryFn: libraryApi.summary,
     retry: false,
+    enabled: active,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const register = useCallback(
     (kind: LibraryKind, fn: () => Promise<unknown>) => {
@@ -161,9 +164,6 @@ export function LibraryPage({
   useShellRefresh("library", async () => {
     await Promise.all([summary.refetch(), actions.current.get(tab)?.()]);
   });
-  useEffect(() => {
-    if (visited.size > 1) void summary.refetch();
-  }, [visited.size, summary.refetch]);
   // The sub-pages live in the sidebar; switching there passes the same
   // unsaved-changes guard the page's own tabs did.
   useShellSubnav("library", {

@@ -72,6 +72,7 @@ fork_join(s, ["分支甲", "分支乙", "分支丙", "分支丁"], **b, source="
           PATH: process.env.PATH,
           HOME: home,
           OFFICECLI_NO_AUTO_RESIDENT: "1",
+          OFFICECLI_SKIP_UPDATE: "1",
         },
         timeout: 60_000,
       },

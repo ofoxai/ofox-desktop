@@ -95,11 +95,11 @@ test("pending verification survives into the next run and clears once verified",
       false,
     );
 });
-test("a change with no diagnosed folder is verified in the authorized folder", () => {
+test("a known tool change with no diagnosed folder is verified in its home folder", () => {
   const home = "/Users/me";
   const task = new LocalTask(limits, Date.now, null, home);
-  task.observe("write", { path: "/config" }, { changed: true });
-  assert.match(task.continuation(), /authorized folder/);
+  task.observe("rebind_tool", { tool: "codex" }, { changed: true });
+  assert.match(task.continuation(), /original authorized folder/);
   task.observe(
     "verify_in_folder",
     { tool: "codex", folder: "/elsewhere" },
@@ -223,6 +223,317 @@ test("a known read-only command after tool inspection needs no verification", ()
   task.observe("bash", { command: "pwd" }, { requiresVerification: false });
   assert.equal(task.needsVerification, false);
   assert.equal(task.snapshot(), null);
+});
+
+test("a Codex change cannot be verified by Claude in the home folder", () => {
+  const home = "/sandbox/home";
+  const task = new LocalTask(limits, Date.now, null, home);
+  task.observe("rebind_tool", { tool: "codex" }, { changed: true });
+  task.observe(
+    "verify_in_folder",
+    { tool: "claude", folder: home },
+    {
+      folder: home,
+      verified: true,
+    },
+  );
+  assert.equal(task.needsVerification, true);
+  assert.deepEqual(task.snapshot().targets, [
+    { tool: "codex", folder: home, verified: false },
+  ]);
+  task.observe(
+    "verify_in_folder",
+    { tool: "codex", folder: home },
+    {
+      folder: home,
+      verified: true,
+    },
+  );
+  assert.equal(task.needsVerification, false);
+});
+
+test("each changed tool retains its own original folders or home across runs", () => {
+  const home = "/sandbox/home";
+  const task = new LocalTask(limits, Date.now, null, home);
+  task.observe(
+    "diagnose_in_folder",
+    { tool: "codex", folder: "/original" },
+    {
+      folder: "/canonical",
+      verified: false,
+    },
+  );
+  task.observe("rebind_tool", { tool: "codex" }, { changed: true });
+  task.observe("set_tool_model", { tool: "claude" }, { changed: true });
+  task.observe(
+    "verify_in_folder",
+    { tool: "codex", folder: "/canonical" },
+    {
+      folder: "/canonical",
+      verified: true,
+    },
+  );
+  const next = new LocalTask(limits, Date.now, task.snapshot(), home);
+  assert.equal(next.needsVerification, true);
+  next.observe(
+    "verify_in_folder",
+    { tool: "codex", folder: home },
+    {
+      folder: home,
+      verified: true,
+    },
+  );
+  assert.equal(next.needsVerification, true);
+  next.observe(
+    "verify_in_folder",
+    { tool: "claude", folder: home },
+    {
+      folder: home,
+      verified: true,
+    },
+  );
+  assert.equal(next.needsVerification, false);
+});
+
+test("the Host canonical home is the named mutation's verification target", () => {
+  const task = new LocalTask(limits, Date.now, null, "/alias/home");
+  task.observe(
+    "rebind_tool",
+    { tool: "codex" },
+    {
+      changed: true,
+      verificationFolder: "/canonical/home",
+    },
+  );
+  assert.deepEqual(task.snapshot().targets, [
+    { tool: "codex", folder: "/canonical/home", verified: false },
+  ]);
+  task.observe(
+    "verify_in_folder",
+    { tool: "codex", folder: "/alias/home" },
+    {
+      folder: "/canonical/home",
+      verified: true,
+    },
+  );
+  assert.equal(task.needsVerification, false);
+});
+
+test("all known mutations require their own tool after an earlier home check", () => {
+  const home = "/sandbox/home";
+  for (const operation of [
+    "repair_launcher",
+    "rebind_tool",
+    "install_tool",
+    "update_tool",
+    "uninstall_tool",
+    "set_tool_model",
+  ]) {
+    const task = new LocalTask(limits, Date.now, null, home);
+    task.observe(
+      "verify_in_folder",
+      { tool: "codex", folder: home },
+      {
+        folder: home,
+        verified: true,
+      },
+    );
+    task.observe(operation, { tool: "codex" }, { changed: true });
+    assert.equal(task.needsVerification, true, operation);
+    task.observe(
+      "verify_in_folder",
+      { tool: "claude", folder: home },
+      {
+        folder: home,
+        verified: true,
+      },
+    );
+    assert.equal(task.needsVerification, true, operation);
+    task.observe(
+      "verify_in_folder",
+      { tool: "codex", folder: home },
+      {
+        folder: home,
+        verified: true,
+      },
+    );
+    assert.equal(task.needsVerification, false, operation);
+  }
+});
+
+test("an unexpected Host scope overflow fails closed without growing the snapshot", () => {
+  const task = new LocalTask(limits, Date.now, null, "/sandbox/home");
+  for (let i = 0; i < 33; i++)
+    task.observe(
+      "diagnose_in_folder",
+      { tool: "codex", folder: `/p${i}` },
+      {
+        folder: `/p${i}`,
+        verified: false,
+      },
+    );
+  task.observe("rebind_tool", { tool: "codex" }, { changed: true });
+  for (let i = 0; i < 32; i++)
+    task.observe(
+      "verify_in_folder",
+      { tool: "codex", folder: `/p${i}` },
+      {
+        folder: `/p${i}`,
+        verified: true,
+      },
+    );
+  assert.equal(task.needsVerification, true);
+  assert.equal(task.snapshot().scopeIncomplete, true);
+  assert.equal(task.snapshot().targets.length, 32);
+});
+
+test("legacy unscoped and malformed pending repairs cannot be cleared by guessing", () => {
+  const home = "/sandbox/home";
+  for (const state of [
+    { changed: true },
+    { changed: true, targets: [] },
+    { changed: true, targets: "broken" },
+    { changed: true, targets: [{ tool: "codex", folder: home }, { tool: 7 }] },
+    {
+      changed: true,
+      scopeIncomplete: true,
+      targets: [{ tool: "codex", folder: home }],
+    },
+  ]) {
+    const task = new LocalTask(limits, Date.now, state, home);
+    task.observe(
+      "verify_in_folder",
+      { tool: "codex", folder: home },
+      {
+        folder: home,
+        verified: true,
+      },
+    );
+    assert.equal(task.needsVerification, true);
+    assert.equal(task.snapshot().scopeIncomplete, true);
+  }
+});
+
+test("a new thirty-third named mutation is refused before its host call", () => {
+  const home = "/sandbox/home";
+  const targets = Array.from({ length: 32 }, (_, i) => ({
+    tool: "codex",
+    folder: `/problem-${i}`,
+    verified: false,
+  }));
+  for (const [name, args] of [["rebind_tool", { tool: "claude" }]]) {
+    const task = new LocalTask(
+      limits,
+      Date.now,
+      { changed: true, targets },
+      home,
+    );
+    let hostCalls = 0;
+    assert.throws(() => {
+      task.beforeTool(name, args);
+      hostCalls++;
+    }, /assistant_verification_target_limit/);
+    assert.equal(hostCalls, 0);
+    assert.equal(task.snapshot().targets.length, 32);
+    // Capacity refuses only this new scope: verification of the original
+    // Codex folders remains possible on the very same task after refusal.
+    for (const { tool, folder } of targets) {
+      assert.doesNotThrow(() =>
+        task.beforeTool("verify_in_folder", { tool, folder }),
+      );
+      task.observe(
+        "verify_in_folder",
+        { tool, folder },
+        { folder, verified: true },
+      );
+    }
+    assert.equal(task.snapshot(), null);
+  }
+  const task = new LocalTask(
+    limits,
+    Date.now,
+    { changed: true, targets },
+    home,
+  );
+  assert.doesNotThrow(() =>
+    task.beforeTool("diagnose_in_folder", {
+      tool: "codex",
+      folder: "/problem-0",
+    }),
+  );
+  assert.doesNotThrow(() => task.beforeTool("rebind_tool", { tool: "codex" }));
+  assert.doesNotThrow(() =>
+    task.beforeTool("verify_in_folder", {
+      tool: "codex",
+      folder: "/problem-0",
+    }),
+  );
+});
+
+test("overflow snapshots retain an incomplete scope even after kept targets verify", () => {
+  const home = "/sandbox/home";
+  const targets = Array.from({ length: 33 }, (_, i) => ({
+    tool: "codex",
+    folder: `/problem-${i}`,
+    verified: true,
+  }));
+  const task = new LocalTask(
+    limits,
+    Date.now,
+    { changed: true, targets },
+    home,
+  );
+  assert.equal(task.needsVerification, true);
+  assert.equal(task.snapshot().scopeIncomplete, true);
+  assert.equal(task.snapshot().targets.length, 32);
+});
+
+test("Host-canonical tool aliases share original scopes and capacity", () => {
+  const home = "/sandbox/home";
+  for (const alias of ["chatgpt", " CODEX ", " CodEx "]) {
+    const task = new LocalTask(limits, Date.now, null, home);
+    task.observe(
+      "diagnose_in_folder",
+      { tool: alias, folder: "/problem" },
+      {
+        tool: "codex",
+        folder: "/problem",
+        verified: false,
+      },
+    );
+    task.observe(
+      "rebind_tool",
+      { tool: alias },
+      {
+        tool: "codex",
+        changed: true,
+        verificationFolder: home,
+      },
+    );
+    assert.deepEqual(task.snapshot().targets, [
+      { tool: "codex", folder: "/problem", verified: false },
+    ]);
+    for (let i = 1; i < 32; i++)
+      task.observe(
+        "diagnose_in_folder",
+        {
+          tool: "codex",
+          folder: `/problem-${i}`,
+        },
+        { tool: "codex", folder: `/problem-${i}`, verified: false },
+      );
+    assert.doesNotThrow(() => task.beforeTool("rebind_tool", { tool: alias }));
+    for (const target of task.snapshot().targets)
+      task.observe(
+        "verify_in_folder",
+        {
+          tool: "codex",
+          folder: target.folder,
+        },
+        { tool: "codex", folder: target.folder, verified: true },
+      );
+    assert.equal(task.snapshot(), null);
+  }
 });
 
 test("paid search contributes to the same budget and missing prices fail closed", () => {

@@ -540,6 +540,7 @@ fn to_call(
 
 fn call_to_fact(c: OcCall) -> usage_source::NormalizedUsageFact {
     usage_source::NormalizedUsageFact {
+        cache_write_ttl_known: false,
         request_id: format!("opencode:{}", c.msg_id),
         native_key: c
             .native_id

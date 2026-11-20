@@ -312,6 +312,93 @@ test("a repair completes after verification in the host-selected folder", async 
   );
   assert.equal(result.localTaskState, null);
 });
+test("a resumed incomplete repair cannot be cleared by guessing a home verification tool", async (t) => {
+  const f = await plannedFixture(
+    t,
+    [() => call("verify_in_folder", { tool: "codex" }), reply, reply, reply],
+    (_name, args) => ({ folder: args.folder, verified: true }),
+  );
+  f.params.localConfig.taskState = {
+    changed: true,
+    targets: [],
+    scopeIncomplete: true,
+  };
+  const result = await f.run();
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "assistant_verification_required");
+  assert.equal(result.localTaskState.changed, true);
+  assert.equal(result.localTaskState.scopeIncomplete, true);
+  assert.deepEqual(result.localTaskState.targets, []);
+  assert.equal(f.requests.length, 4);
+  for (const request of f.requests.slice(-2)) {
+    assert.ok(
+      request.messages.some((message) => {
+        const content = JSON.stringify(message.content);
+        return (
+          content.includes(
+            "original repair verification scope is incomplete",
+          ) && content.includes("Do not guess")
+        );
+      }),
+    );
+  }
+});
+test("an out-of-task mutation leaves a full pending snapshot available for authorized verification", async (t) => {
+  const f = await plannedFixture(
+    t,
+    [
+      () => call("rebind_tool", { tool: "claude" }),
+      () => call("verify_in_folder", { tool: "codex" }),
+      reply,
+    ],
+    (name, args) => {
+      assert.equal(
+        name,
+        "verify_in_folder",
+        "the rejected mutation never reaches the Host",
+      );
+      return { folder: args.folder, verified: true };
+    },
+  );
+  // A restored Host snapshot contains absolute paths. Root-relative
+  // POSIX strings become drive-absolute paths in the Windows SDK adapter.
+  const targets = Array.from({ length: 32 }, (_, i) => ({
+    tool: "codex",
+    folder: i
+      ? path.join(f.params.localConfig.cwd, `problem-${i}`)
+      : f.params.localConfig.cwd,
+    verified: i !== 0,
+  }));
+  f.params.localConfig.taskState = { changed: true, targets };
+  const result = await f.run();
+  assert.equal(result.status, "completed");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].args.folder, targets[0].folder);
+  assert.equal(f.requests.length, 3);
+  assert.equal(result.localTaskState, null);
+});
+test("normalized unknown managed repair outcomes cannot complete from later prose", async (t) => {
+  for (const operation of ["repair_launcher", "rebind_tool"]) {
+    const f = await plannedFixture(
+      t,
+      [() => call(operation, { tool: "codex" }), reply],
+      () => {
+        throw new Error("assistant_mutation_outcome_unknown");
+      },
+    );
+    const result = await f.run();
+    assert.equal(result.status, "error", operation);
+    assert.match(result.errorMessage, /assistant_mutation_outcome_unknown/);
+    assert.equal(f.calls.length, 1);
+    assert.ok(
+      !f.events.some(
+        (event) =>
+          event.type === "task_status" &&
+          event.data.warning === "verification_required",
+      ),
+    );
+  }
+});
 test("pending verification from an earlier run still has to be done", async (t) => {
   const f = await fixture(t, [reply, reply, reply, reply], () => ({}), {});
   f.params.localConfig.taskState = { changed: true, targets: [] };

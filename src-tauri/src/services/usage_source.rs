@@ -182,6 +182,9 @@ pub struct NormalizedUsageFact {
     pub model: String,
     pub usage: crate::proxy::usage::parser::TokenUsage,
     pub at_ms: Option<i64>,
+    /// Claude's cache-write duration is proven, including an explicit zero hour count.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_write_ttl_known: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

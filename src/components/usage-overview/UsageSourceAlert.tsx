@@ -28,7 +28,14 @@ export function UsageSourceAlert({
     ) && !pricing?.officialCatalogVersion;
   const unpriced = pricing?.unpricedModelIds.length ?? 0;
   const official = pricing?.officialModelIds?.length ?? 0;
-  if (!failed.length && !priceUnavailable && !unpriced && !official)
+  const additional = pricing?.additionalUnitsUnsupported;
+  if (
+    !failed.length &&
+    !priceUnavailable &&
+    !unpriced &&
+    !official &&
+    !additional
+  )
     return null;
   return (
     <div
@@ -50,6 +57,9 @@ export function UsageSourceAlert({
             {t("usageWorkbench.pricePartial", { count: unpriced })}
           </span>
         )
+      )}
+      {additional && (
+        <span className="text-warn">{t("usageWorkbench.priceIncomplete")}</span>
       )}
       {!!official && (
         <span

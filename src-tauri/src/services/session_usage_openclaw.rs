@@ -307,6 +307,7 @@ impl Reader {
                 ),
             };
             let fact = NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id: request_id.clone(),
                 native_key: native,
                 session_id: scope,

@@ -641,6 +641,7 @@ test(
           PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
           HOME: path.join(path.dirname(result.out), "home"),
           OFFICECLI_NO_AUTO_RESIDENT: "1",
+          OFFICECLI_SKIP_UPDATE: "1",
         },
         timeout: 30_000,
       },

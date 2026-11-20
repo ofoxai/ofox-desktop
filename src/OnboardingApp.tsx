@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import LoginPage from "@/components/onboarding/LoginPage";
 import ToolDiscoveryPage from "@/components/onboarding/ToolDiscoveryPage";
 import SetupCompletePage from "@/components/onboarding/SetupCompletePage";
@@ -26,8 +28,11 @@ export default function OnboardingApp({
   onComplete,
   onEnterLocal,
 }: OnboardingAppProps) {
+  const { t } = useTranslation();
   const [step, setStep] = useState<Step>(initialStep);
   const [boundTools, setBoundTools] = useState<string[]>([]);
+  const [binding, setBinding] = useState(false);
+  const bindingInFlight = useRef(false);
 
   // Even from local management, a sign-in goes on to binding.
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
@@ -35,11 +40,23 @@ export default function OnboardingApp({
   };
 
   const handleBind = async (selectedTools: string[]) => {
-    // bindTools 返回真实成功列表（失败的工具已 toast 警告并被剔除）。
-    // 用 succeeded.length 做完成页计数才不会在部分失败时谎报"绑了 N 个"。
-    const succeeded = await bindTools(selectedTools);
-    setBoundTools(succeeded);
-    setStep("setupComplete");
+    if (bindingInFlight.current || selectedTools.length === 0) return;
+    bindingInFlight.current = true;
+    setBinding(true);
+    try {
+      // The result includes previous bindings; only this selection can prove
+      // completion. Keep failed selections available for an explicit retry.
+      const succeeded = await bindTools(selectedTools);
+      setBoundTools(succeeded);
+      if (selectedTools.every((tool) => succeeded.includes(tool))) {
+        setStep("setupComplete");
+      }
+    } catch {
+      toast.error(t("uiCopy.bindFailed"));
+    } finally {
+      bindingInFlight.current = false;
+      setBinding(false);
+    }
   };
 
   switch (step) {
@@ -60,6 +77,7 @@ export default function OnboardingApp({
           onBack={initialStep === "login" ? () => setStep("login") : undefined}
           onBind={handleBind}
           onEnterLocal={onEnterLocal}
+          binding={binding}
         />
       );
     case "setupComplete":

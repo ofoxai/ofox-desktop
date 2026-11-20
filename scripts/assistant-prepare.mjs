@@ -27,6 +27,7 @@ import {
 } from "./assistant-install-stamp.mjs";
 import { pruneProduction } from "./assistant-prune.mjs";
 import { pyodideWheelUrl, pythonEngineOffered } from "./python-assets.mjs";
+import { prepareWindowsChildProbe } from "./assistant-windows-probe.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -587,6 +588,7 @@ if (process.argv.includes("--node-only")) {
   await prepareSearchServer();
   // Before signing, so the engines' Mach-O files are signed with the rest.
   const engines = await prepareEngines();
+  await prepareWindowsChildProbe({ root, resources, cache, node });
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));

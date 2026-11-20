@@ -681,6 +681,7 @@ pub(crate) fn normalized_facts(
             .into_iter()
             .filter(|c| !c.delta.is_zero())
             .map(|c| usage_source::NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id: c.ids.request_id,
                 native_key: None,
                 session_id: c.session_id,
