@@ -1,3 +1,4 @@
+import { markStage, traceRuntime } from "./runtime-diagnostics.mjs";
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -24,6 +25,7 @@ const write = (value) =>
   );
 const runtime = new AssistantRuntime({
   emit: (event) => write({ method: "event", params: event }),
+  markStage: traceRuntime ? markStage : undefined,
   hostCall: (params, signal) =>
     new Promise((resolve, reject) => {
       const id = `tool-${randomUUID()}`;
@@ -71,7 +73,11 @@ for (const method of ["log", "info", "debug", "warn", "error"])
             : JSON.stringify(redact(value, [...runtime.secrets])),
       )
       .join(" ");
-    process.stderr.write(`${safe.slice(0, 4000)}\n`);
+    const line = safe.slice(0, 4000);
+    const diagnostic = traceRuntime
+      ? `[runtime] ${line.replaceAll("\n", "\n[runtime] ")}`
+      : line;
+    process.stderr.write(`${diagnostic}\n`);
   };
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -107,6 +113,7 @@ function terminate() {
   })());
 }
 input.on("close", () => {
+  markStage("host_stdin_closed");
   void terminate();
 });
 process.on("SIGTERM", () => {
@@ -115,6 +122,7 @@ process.on("SIGTERM", () => {
 process.on("SIGINT", () => {
   void terminate();
 });
+markStage("ready");
 
 async function handle(line) {
   let request;
@@ -176,11 +184,14 @@ async function handle(line) {
       result = { protocolVersion: 1, sdkVersion };
     else if (request.method === "load")
       result = await runtime.load(request.params ?? {});
-    else if (request.method === "run")
-      result = await runtime.run(request.params ?? {});
-    else if (request.method === "compact")
-      result = await runtime.run(request.params ?? {}, true);
-    else if (request.method === "title")
+    else if (request.method === "run" || request.method === "compact") {
+      markStage("run_received");
+      result = await runtime.run(
+        request.params ?? {},
+        request.method === "compact",
+      );
+      markStage("run_finished");
+    } else if (request.method === "title")
       result = await runtime.title(request.params ?? {});
     else if (request.method === "navigate")
       result = await runtime.navigate(request.params ?? {});

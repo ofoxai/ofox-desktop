@@ -273,7 +273,10 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
     port = server.address().port;
   }
 
-  const spawnSidecar = (pathMode = "empty", { probeTool = false } = {}) => {
+  const spawnSidecar = (
+    pathMode = "empty",
+    { probeTool = false, diagnostics = false } = {},
+  ) => {
     const environment = {
       PATH: pathMode === "empty" ? "" : emptyPath,
       HOME: root,
@@ -284,6 +287,7 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
     };
     const args = probeTool ? ["--import", probeToolPreload.href, main] : [main];
+    if (diagnostics) args.push("--ofox-runtime-diagnostics");
     const child = spawn(sidecarNode, args, {
       cwd: root,
       env: environment,

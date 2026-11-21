@@ -458,7 +458,13 @@ function recordRequest(
 // origin, never redirected, with the key only in the Authorization header.
 // `outcome` learns that the request was made, then the HTTP status of a
 // refused one or why no answer came.
-function credentialFetch({ baseUrl, apiKey, providerFetch, signal }) {
+function credentialFetch({
+  baseUrl,
+  apiKey,
+  providerFetch,
+  signal,
+  markStage,
+}) {
   return async (input, options, outcome = {}) => {
     signal.throwIfAborted();
     const url = new URL(
@@ -483,6 +489,7 @@ function credentialFetch({ baseUrl, apiKey, providerFetch, signal }) {
     let response;
     const attempt = {};
     try {
+      markStage?.("provider_dispatch");
       response = await attempts.run(attempt, () =>
         providerFetch(input, { ...options, headers, redirect: "error" }),
       );
@@ -913,6 +920,7 @@ export class AssistantRuntime {
     hostCall,
     observeMcp,
     emit,
+    markStage,
     fetch: providerFetch,
     searchServer = SEARCH_SERVER,
     searchTimeoutMs = SEARCH_TIMEOUT_MS,
@@ -926,6 +934,7 @@ export class AssistantRuntime {
         throw new Error("Host tool bridge is unavailable");
       });
     this.emit = emit ?? (() => {});
+    this.markStage = markStage;
     this.providerFetch = providerFetch;
     this.searchServer = searchServer;
     this.searchTimeoutMs = searchTimeoutMs;
@@ -1183,6 +1192,7 @@ export class AssistantRuntime {
       context.params.operationId !== params.operationId
     )
       return { stopped: false };
+    this.markStage?.("cancel_requested");
     context.abort.abort();
     await context.session?.abort();
     return { stopped: true };
@@ -1638,14 +1648,15 @@ export class AssistantRuntime {
         SessionManager,
         SettingsManager,
       } = await import("@earendil-works/pi-coding-agent");
-      const { AssistantMessageEventStream } = await import(
-        "@earendil-works/pi-ai"
-      );
+      const { AssistantMessageEventStream } =
+        await import("@earendil-works/pi-ai");
+      this.markStage?.("sdk_loaded");
       const directory = path.dirname(params.sessionFile);
       const workspace = path.join(directory, "workspace");
       const agentDir = path.join(directory, "runtime-settings");
       await mkdir(workspace, { recursive: true, mode: 0o700 });
       await mkdir(agentDir, { recursive: true, mode: 0o700 });
+      this.markStage?.("workspace_ready");
       const manager = SessionManager.open(
         params.sessionFile,
         directory,
@@ -1743,6 +1754,7 @@ export class AssistantRuntime {
         apiKey,
         providerFetch,
         signal: context.abort.signal,
+        markStage: this.markStage,
       });
       modelRuntime.streamSimple = (target, transcript, options) => {
         context.localTask?.beforeRequest();

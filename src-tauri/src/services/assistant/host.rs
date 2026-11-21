@@ -17,6 +17,7 @@ use super::{
         add_usage, is_dangling, merge_native, record_attachment_outcome, save_projection,
         settle_interrupted, settle_run, AttachmentOutcome, ProjectionBuffer,
     },
+    runtime_diagnostics,
     store::AssistantStore,
     title,
     types::*,
@@ -57,6 +58,7 @@ const SEARCH_OUTCOME_UNKNOWN: &str = "assistant_search_outcome_unknown";
 pub(super) const STDIO: &str = "assistant_runtime_stdio";
 pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
+const RUNTIME_EXITED: &str = "assistant_runtime_exited";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
 /// How long a fetched model catalog is trusted.
 const MODELS_TTL: Duration = Duration::from_secs(600);
@@ -744,9 +746,36 @@ pub(super) fn runtime_at(base: &Path) -> Result<Runtime, String> {
 
 pub(super) fn runtime_command(runtime: &Runtime) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&runtime.node);
-    command.arg("--max-old-space-size=512").arg(&runtime.entry);
+    command.arg("--max-old-space-size=512");
+    #[cfg(windows)]
+    if matches!(
+        runtime.entry.components().next(),
+        Some(std::path::Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+    ) {
+        // Tauri already canonicalizes the installed executable directory.
+        // Node 22's main-script realpath fails on that verbatim Windows path.
+        command.arg("--preserve-symlinks-main");
+    }
+    command.arg(&runtime.entry);
     process::clean_environment(&mut command);
     command
+}
+
+async fn save_runtime_diagnostic(path: PathBuf, mut report: Value) {
+    report["recordedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    let result = blocking(move || {
+        let bytes = serde_json::to_vec_pretty(&report).map_err(|_| STATE.to_string())?;
+        crate::config::atomic_write_with(
+            &path,
+            &bytes,
+            crate::config::AtomicOpts { mode: Some(0o600) },
+        )
+        .map_err(|_| STATE.to_string())
+    })
+    .await;
+    if result.is_err() {
+        log::warn!("[Assistant] could not write runtime diagnostic");
+    }
 }
 
 /// How a run ended when it did not fail.
@@ -1843,19 +1872,47 @@ impl AssistantHost {
         let stdio = || Failure::unsent(STDIO.into());
         self.validate_run(control).map_err(Failure::unsent)?;
         let runtime = self.runtime().map_err(Failure::unsent)?;
-        let mut child =
-            process::Child::spawn(runtime_command(&runtime)).map_err(Failure::unsent)?;
+        let request_id = id();
+        let trace_path = (std::env::var_os(runtime_diagnostics::SWITCH).as_deref()
+            == Some(std::ffi::OsStr::new("1")))
+        .then(|| {
+            self.env
+                .config_dir()
+                .join("assistant-runtime-diagnostics")
+                .join(format!("{request_id}.json"))
+        });
+        let diagnostic = trace_path.is_some();
+        let mut command = runtime_command(&runtime);
+        if diagnostic {
+            command.arg(runtime_diagnostics::NODE_FLAG);
+        }
+        let mut child = match process::Child::spawn_io(command) {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = trace_path {
+                    save_runtime_diagnostic(
+                        path,
+                        json!({"outcome":"spawn_failed","osError":error.raw_os_error()}),
+                    )
+                    .await;
+                }
+                return Err(Failure::unsent("assistant_process_start_failed".into()));
+            }
+        };
         let mut input = child.take_stdin().ok_or_else(stdio)?;
         let output = child.take_stdout().ok_or_else(stdio)?;
         let stderr = child.take_stderr().ok_or_else(stdio)?;
         // Drain, never publish: dependencies may print request headers.
-        let drain = tokio::spawn(async move {
+        let mut drain = tokio::spawn(async move {
+            if diagnostic {
+                return Some(runtime_diagnostics::collect(stderr).await);
+            }
             let _ = process::bounded_output(stderr, 64 * 1024).await;
+            None
         });
         let mut output = BufReader::new(output);
         let mut buffer = Vec::new();
         let mut attempt = Attempt::default();
-        let request_id = id();
         let (sender, mut commands) = mpsc::channel(8);
         if !control.compact_only {
             *control
@@ -1895,7 +1952,53 @@ impl AssistantHost {
             self.stop_runtime(control, &request_id, &mut input, &mut output, &mut buffer)
                 .await;
         }
-        child.stop().await;
+        if let Some(path) = trace_path {
+            let outcome = match &result {
+                Ok(Finish::Completed) => "completed",
+                Ok(Finish::Stopped) => "stopped",
+                Err(error) => match error.code.as_str() {
+                    CANCELLED => "cancelled",
+                    RUNTIME_EXITED => "stdout_eof",
+                    STDIO => "stdio_failed",
+                    PROTOCOL => "protocol_failed",
+                    "assistant_run_timeout" => "timed_out",
+                    _ if attempt.answered => "runtime_replied_with_error",
+                    _ => "run_failed",
+                },
+            };
+            // Try to read the genuine status before stop() kills the job. An
+            // EOF may precede process termination by a few scheduler ticks.
+            let exit = child
+                .exit_before_cleanup(matches!(outcome, "stdout_eof" | "stdio_failed"))
+                .await;
+            let exit = match exit {
+                Ok(Some(status)) => json!({
+                    "state":"exited",
+                    "code":status.code(),
+                    "hex":status.code().map(|code| format!("0x{:08X}",code as u32))
+                }),
+                Ok(None) => json!({"state":"alive_before_cleanup"}),
+                Err(error) => json!({"state":"wait_failed","osError":error.raw_os_error()}),
+            };
+            child.stop().await;
+            let trace = match tokio::time::timeout(Duration::from_millis(400), &mut drain).await {
+                Ok(Ok(trace)) => trace,
+                _ => None,
+            };
+            save_runtime_diagnostic(
+                path,
+                json!({
+                    "outcome":outcome,
+                    "exit":exit,
+                    "requestWritten":attempt.sent,
+                    "responseReceived":attempt.answered,
+                    "trace":trace
+                }),
+            )
+            .await;
+        } else {
+            child.stop().await;
+        }
         drain.abort();
         result
     }
@@ -1970,7 +2073,7 @@ impl AssistantHost {
                 result = read_frame(output, buffer) => result?,
             };
             if length == 0 {
-                return Err("assistant_runtime_exited".into());
+                return Err(RUNTIME_EXITED.into());
             }
             let value: Value = serde_json::from_slice(buffer).map_err(|_| PROTOCOL)?;
             buffer.clear();

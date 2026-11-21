@@ -560,6 +560,7 @@ export function documentTools(runtime, context, { vision }) {
           isError: true,
         };
       let result;
+      runtime.markStage?.("document_tool_started");
       try {
         result = await runtime.hostTool(
           context,
@@ -570,6 +571,8 @@ export function documentTools(runtime, context, { vision }) {
         );
       } catch (error) {
         throw rendered ? refusedRender(error) : error;
+      } finally {
+        runtime.markStage?.("document_tool_finished");
       }
       // The deck helper's built-page receipt never reaches the model as an
       // issue; pages that differ from the frozen plan are reported instead.

@@ -113,6 +113,68 @@ test("sidecar accepts private JSON-RPC without logging credentials or loading us
   await fixture.assertClean(["opaque-test-credential-not-json"]);
 });
 
+test("opt-in sidecar diagnostics trace a PPTX turn on private stderr", async (t) => {
+  const token = "synthetic-private-diagnostics-credential";
+  const document = {
+    name: "synthetic.pptx",
+    format: "pptx",
+    content: { kind: "python", code: "# synthetic deck source" },
+  };
+  const fixture = await createStdioAcceptance(
+    t,
+    (_request, response, number) =>
+      number === 1
+        ? writeModelToolCall(response, "create_document", document)
+        : writeModelStream(response, "Synthetic deck created"),
+  );
+  const wire = fixture.spawnSidecar("empty", { diagnostics: true });
+  const running = wire.start(
+    "run",
+    fixture.params("diagnostics", token, {
+      documents: { formats: ["pptx"], python: true },
+    }),
+  );
+  const needsTool = await Promise.race([
+    wire.waitFor((message) => message.method === "tool"),
+    running.then((turn) =>
+      assert.fail(
+        `The PPTX turn ended before asking the Host to create the deck (${turn.status})`,
+      ),
+    ),
+  ]);
+  assert.equal(needsTool.params.name, "create_document");
+  assert.deepEqual(needsTool.params.args, document);
+  wire.write({
+    id: needsTool.id,
+    result: {
+      status: "completed",
+      file: { id: "synthetic-file", name: document.name, slides: 8, bytes: 24 },
+    },
+  });
+  assert.equal((await running).status, "completed");
+  await wire.close();
+  assert.equal((await wire.exit).code, 0);
+  assert.equal(fixture.requests.length, 2);
+  assert.doesNotMatch(wire.stdout, /OFOX_RUNTIME_STAGE:/);
+  assert.deepEqual(
+    wire.stderr.trimEnd().split("\n"),
+    [
+      "entry",
+      "ready",
+      "run_received",
+      "sdk_loaded",
+      "workspace_ready",
+      "provider_dispatch",
+      "document_tool_started",
+      "document_tool_finished",
+      "provider_dispatch",
+      "run_finished",
+      "host_stdin_closed",
+    ].map((stage) => `OFOX_RUNTIME_STAGE:${stage}`),
+  );
+  await fixture.assertClean([token]);
+});
+
 test(
   "private stdio streams, reloads and continues native history without PATH or ambient context",
   { timeout: 30000 },
@@ -235,7 +297,7 @@ test(
         false,
       ),
     );
-    const wire = fixture.spawnSidecar();
+    const wire = fixture.spawnSidecar("empty", { diagnostics: true });
     const params = fixture.params("stop", token);
     const running = wire.start("run", params);
     await wire.waitFor(
@@ -264,6 +326,13 @@ test(
       stopped.entries,
     );
     await wire.close();
+    assert.equal(
+      wire.stderr
+        .split("\n")
+        .filter((line) => line === "OFOX_RUNTIME_STAGE:cancel_requested")
+        .length,
+      1,
+    );
     await fixture.assertClean([token]);
   },
 );

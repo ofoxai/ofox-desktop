@@ -26,6 +26,7 @@ pub mod process;
 mod projection;
 mod provenance;
 mod requests;
+mod runtime_diagnostics;
 pub mod skill_tools;
 pub mod store;
 pub mod thinking;

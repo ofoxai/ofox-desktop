@@ -837,6 +837,11 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
     };
+    // Tauri uses the canonical executable directory for installed resources.
+    #[cfg(windows)]
+    let runtime_dir = runtime_dir
+        .canonicalize()
+        .expect("canonical installed-style runtime path");
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
     let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
