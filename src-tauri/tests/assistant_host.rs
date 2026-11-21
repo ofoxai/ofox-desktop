@@ -1299,20 +1299,27 @@ fn system_preamble(request: &Request) -> String {
 
 #[test]
 fn saved_settings_shape_the_next_message_and_can_turn_titles_off() {
-    let Some(runtime_dir) = runtime_dir() else {
+    let Some(bundle) = runtime_dir() else {
         return;
     };
+    let runtime_dir = title_runtime(&bundle);
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
-    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let env = TestEnv::new(config.path(), runtime_dir.path(), &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     runtime().block_on(async {
         // The defaults: no instructions, and the first answer asks for a title.
         let sid = create(&host).await;
         gateway.reply(Reply::Stream("Plain answer.".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "Hello", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Hello", json!({"uiLanguage":"en"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
         let plain = system_preamble(&gateway.requests()[0]);
+        assert!(plain.contains("App language: en."), "{plain}");
         assert!(!plain.contains("standing instructions"), "{plain}");
         title_requests(&gateway, 1).await;
 
@@ -1323,24 +1330,35 @@ fn saved_settings_shape_the_next_message_and_can_turn_titles_off() {
         }))
         .unwrap();
         host.set_preferences(settings).await.unwrap();
-        // From the next message on, in this conversation and a new one.
+        // The standing instruction applies even when the UI language changes.
         gateway.reply(Reply::Stream("Five, seven, five.".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "Again", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Again", json!({"uiLanguage":"ja"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
         let other = create(&host).await;
         gateway.reply(Reply::Stream("Autumn moonlight.".into()));
-        let (_, end) = turn(&host, &env, request(&other, "Hi", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&other, "Hi", json!({"uiLanguage":"ja"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
-        for sent in &gateway.requests()[1..] {
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 3);
+        for sent in &requests[1..] {
             let instructed = system_preamble(sent);
+            let (preamble, instructions) = instructed.rsplit_once('\n').unwrap();
+            assert!(preamble.contains("App language: ja."), "{preamble}");
             assert!(
-                instructed.starts_with(&format!("{plain}\n")),
-                "{instructed}"
+                preamble.contains("The user's standing instructions"),
+                "{preamble}"
             );
-            assert!(
-                instructed.ends_with("\nAlways answer in haiku."),
-                "{instructed}"
-            );
+            assert_eq!(instructions, "Always answer in haiku.");
         }
         // Titles are off: the new conversation's first answer asks for none.
         no_more_title_requests(&gateway, 1).await;
