@@ -126,6 +126,13 @@ Graceful engine cancellation/crash cleanup is implemented, with native test
 results still pending; a forcibly killed Host
 does not yet have a durable profile/workspace recovery journal.
 
+Document work checks the assistant turn deadline before starting an engine or
+admitting an attachment commit. The deadline handler signals an active Windows
+LPAC worker and waits for cleanup. A cache verification or atomic file commit
+already in progress can finish before the UI receives the timeout. The turn can
+retain attachments already committed and previews prepared before expiry. Record
+the turn outcome and the retained file checks separately during acceptance.
+
 Verification debt retention covers known tool mutations. A generic write/edit
 may commit before a later identity fence rejects its result; the encrypted
 change journal remains, but this slice does not add durable task recovery for

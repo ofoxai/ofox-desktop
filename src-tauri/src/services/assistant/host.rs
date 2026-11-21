@@ -10,6 +10,7 @@ use super::{
     documents::{
         create::EngineSandbox,
         engines::{engines_at, Engines},
+        runner::RUN_TIMEOUT,
     },
     drops::DropSlot,
     process,
@@ -1961,7 +1962,7 @@ impl AssistantHost {
                     RUNTIME_EXITED => "stdout_eof",
                     STDIO => "stdio_failed",
                     PROTOCOL => "protocol_failed",
-                    "assistant_run_timeout" => "timed_out",
+                    RUN_TIMEOUT => "timed_out",
                     _ if attempt.answered => "runtime_replied_with_error",
                     _ => "run_failed",
                 },
@@ -2065,8 +2066,8 @@ impl AssistantHost {
                         return Err(IDENTITY_CHANGED.into());
                     }
                     self.validate_run(control)?;
-                    if tokio::time::Instant::now() > control.deadline {
-                        return Err("assistant_run_timeout".into());
+                    if tokio::time::Instant::now() >= control.deadline {
+                        return Err(RUN_TIMEOUT.into());
                     }
                     continue;
                 }
@@ -2102,7 +2103,19 @@ impl AssistantHost {
                     .as_str()
                     .is_some_and(super::documents::is_document_tool)
                 {
-                    self.dispatch_document_tool(control, &value["params"]).await
+                    let result = self.dispatch_document_tool(control, &value["params"]).await;
+                    // Tool execution owns its workers through cleanup. A
+                    // document deadline ends the run, not just the callback.
+                    if tokio::time::Instant::now() >= control.deadline
+                        || result.as_ref().is_err_and(|error| error == RUN_TIMEOUT)
+                    {
+                        if self.identity().await? != control.identity {
+                            return Err(IDENTITY_CHANGED.into());
+                        }
+                        self.validate_run(control)?;
+                        return Err(RUN_TIMEOUT.into());
+                    }
+                    result
                 } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)
@@ -4267,6 +4280,136 @@ mod tests {
         peer.await.unwrap();
         confirmer.await.unwrap();
         host.release_run(&run);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_document_waiting_to_publish_cannot_reply_or_attach_after_the_run_deadline() {
+        use super::super::media_tools::host::MediaRun;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let (_tmp, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        let state = Arc::get_mut(&mut run).unwrap();
+        state.media = Some(MediaRun::new(Default::default()));
+        state.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        host.register_run(run.clone(), host.generation(), || {
+            store.mutate(&sid, |record| {
+                record.session.active_run = Some(RunRef {
+                    run_id: run.run_id.clone(),
+                    operation_id: run.operation_id.clone(),
+                });
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id":run.message_id,"role":"assistant","content":"",
+                        "createdAt":now(),"status":"streaming","runId":run.run_id,
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+        })
+        .unwrap();
+        let document = |call_id: &str, name: &str, format: &str, content: &str| {
+            json!({
+                "sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+                "toolCallId":call_id,"name":"create_document",
+                "args":{"name":name,"format":format,"content":content},
+            })
+        };
+        let first = host
+            .dispatch_document_tool(&run, &document("first", "keep.txt", "txt", "already saved"))
+            .await
+            .unwrap();
+        let kept = store
+            .attachment_dir(&sid)
+            .unwrap()
+            .join(first["file"]["id"].as_str().unwrap());
+
+        // Hold the real attachment lock while the next tool makes its file.
+        // Release it only after the Host's overall deadline has passed.
+        let (ready, locked) = oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let lock = tokio::task::spawn_blocking({
+            let (store, sid) = (store.clone(), sid.clone());
+            move || {
+                store.with_attachment_lock(&sid, || {
+                    ready.send(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                })
+            }
+        });
+        locked.await.unwrap();
+
+        let (host_pipe, runtime_pipe) = tokio::io::duplex(8192);
+        let turn = tokio::spawn({
+            let (host, run) = (host.clone(), run.clone());
+            async move {
+                let (output, mut input) = tokio::io::split(host_pipe);
+                let (_sender, mut commands) = mpsc::channel(1);
+                host.converse(
+                    &run,
+                    &json!({}),
+                    false,
+                    "run",
+                    (&mut input, &mut BufReader::new(output), &mut Vec::new()),
+                    (&mut Attempt::default(), &mut commands),
+                )
+                .await
+            }
+        });
+        let mut runtime = BufReader::new(runtime_pipe);
+        let mut line = String::new();
+        runtime.read_line(&mut line).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["id"], "run");
+        runtime
+            .write_all(
+                &frame(&json!({
+                    "id":"late-tool","method":"tool",
+                    "params":document("late", "late.md", "md", "should not be published"),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let outputs = store
+            .native_history_path(&sid)
+            .unwrap()
+            .with_file_name("outputs");
+        let wait_started = std::time::Instant::now();
+        while !std::fs::read_dir(&outputs)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.path().join("out.md").is_file())
+        {
+            assert!(
+                wait_started.elapsed() < Duration::from_secs(5),
+                "the late document did not reach its output folder before expiry"
+            );
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(11)).await;
+        release.send(()).unwrap();
+        lock.await.unwrap().unwrap();
+
+        let result = turn.await.unwrap();
+        assert_eq!(result.as_ref().unwrap_err().code, "assistant_run_timeout");
+        host.finish(&run, result).await;
+        let mut replies = String::new();
+        runtime.read_to_string(&mut replies).await.unwrap();
+        assert!(replies.is_empty(), "run returned a tool reply after expiry");
+        let saved = store.load_record(&sid).unwrap();
+        assert_eq!(saved.attachments.len(), 1);
+        assert_eq!(saved.attachments[0].name, "keep.txt");
+        assert_eq!(std::fs::read(kept).unwrap(), b"already saved");
+        assert!(saved.session.active_run.is_none());
+        assert_eq!(saved.messages[0].status, "error");
+        assert_eq!(
+            saved.messages[0].error_code.as_deref(),
+            Some("assistant_run_timeout")
+        );
     }
 
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model

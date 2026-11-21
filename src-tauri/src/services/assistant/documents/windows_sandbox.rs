@@ -3,7 +3,7 @@
 //!
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
-use super::runner::{EngineOutput, DEAD_PROXY};
+use super::runner::{check_deadline, EngineOutput, DEAD_PROXY, RUN_TIMEOUT};
 mod capability_set;
 #[cfg(test)]
 mod cdb;
@@ -2655,11 +2655,11 @@ pub async fn run_windows_engine_limited(
     timeout: Duration,
     limit: usize,
 ) -> Result<EngineOutput, String> {
-    run_candidate(exe, args, cwd, home, read_root, timeout, limit, false).await
+    run_windows_engine_limited_until(exe, args, cwd, home, read_root, timeout, limit, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_candidate(
+pub async fn run_windows_engine_limited_until(
     exe: &Path,
     args: &[&str],
     cwd: &Path,
@@ -2667,9 +2667,9 @@ async fn run_candidate(
     read_root: &Path,
     timeout: Duration,
     limit: usize,
-    trusted_probe: bool,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<EngineOutput, String> {
-    run_candidate_observed(
+    run_candidate_observed_until(
         exe,
         args,
         cwd,
@@ -2677,11 +2677,13 @@ async fn run_candidate(
         read_root,
         timeout,
         limit,
-        trusted_probe,
+        false,
         Observer::default(),
+        deadline,
     )
     .await
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_candidate_observed(
     exe: &Path,
@@ -2694,6 +2696,35 @@ async fn run_candidate_observed(
     trusted_probe: bool,
     observation: Observer,
 ) -> Result<EngineOutput, String> {
+    run_candidate_observed_until(
+        exe,
+        args,
+        cwd,
+        home,
+        read_root,
+        timeout,
+        limit,
+        trusted_probe,
+        observation,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_candidate_observed_until(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    limit: usize,
+    trusted_probe: bool,
+    observation: Observer,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<EngineOutput, String> {
+    check_deadline(deadline)?;
     let observation = if trusted_probe {
         observation
     } else {
@@ -2703,13 +2734,16 @@ async fn run_candidate_observed(
         .first()
         .is_some_and(|arg| Path::new(arg).ends_with("python/runner.mjs"));
     let python_turn = if python {
-        Some(
-            PYTHON_TURN
-                .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-                .lock_owned()
-                .await,
-        )
+        let turn = PYTHON_TURN
+            .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned();
+        Some(match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, turn)
+                .await
+                .map_err(|_| RUN_TIMEOUT.to_owned())?,
+            None => turn.await,
+        })
     } else {
         None
     };
@@ -2720,10 +2754,12 @@ async fn run_candidate_observed(
         home.to_path_buf(),
         read_root.to_path_buf(),
     );
+    check_deadline(deadline)?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelOnDrop(cancelled.clone());
+    let worker_cancelled = cancelled.clone();
     let worker_observation = observation.clone();
-    let answer = tokio::task::spawn_blocking(move || {
+    let mut worker = tokio::task::spawn_blocking(move || {
         // Keep this owned guard in the worker: cancelling the awaiting future
         // must not admit another Pyodide before its Job/disposal is complete.
         let _python_turn = python_turn;
@@ -2735,7 +2771,7 @@ async fn run_candidate_observed(
             &root,
             timeout,
             limit,
-            &cancelled,
+            &worker_cancelled,
             trusted_probe,
             &worker_observation,
         );
@@ -2743,8 +2779,20 @@ async fn run_candidate_observed(
             worker_observation.failed();
         }
         result
-    })
-    .await
+    });
+    let answer = match deadline {
+        Some(deadline) => tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => {
+                // Stop the job/copyback cooperatively. The worker still owns
+                // the temporary AppContainer and must dispose of it first.
+                cancelled.store(true, Ordering::Release);
+                worker.await
+            }
+            result = &mut worker => result,
+        },
+        None => worker.await,
+    }
     .map_err(|error| {
         observation.evidence(|evidence| {
             evidence.worker_join_panicked = Some(error.is_panic());
@@ -2754,6 +2802,7 @@ async fn run_candidate_observed(
         UNAVAILABLE.to_owned()
     })?;
     drop(guard);
+    check_deadline(deadline)?;
     answer
 }
 #[allow(clippy::too_many_arguments)]
@@ -2769,6 +2818,9 @@ fn run_blocking(
     trusted_probe: bool,
     observation: &Observer,
 ) -> Result<EngineOutput, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(CANCELLED.into());
+    }
     observation.enter(Phase::OsVersion);
     os_version_observed(observation)?;
     observation.enter(Phase::CurrentUser);
@@ -2776,6 +2828,9 @@ fn run_blocking(
     observation.enter(Phase::RuntimeCapability);
     let capability = RuntimeCapability::new_observed(observation)?;
     let runtime = cache_runtime_observed(read_root, &capability, &user, observation)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(CANCELLED.into());
+    }
     if !trusted_probe {
         observation.enter(Phase::Admission);
         let admitted = ADMITTED
@@ -3558,8 +3613,15 @@ pub async fn probe_windows_document_engines(
 /// Call before bootstrap/send. The returned digest identifies the exact public
 /// bytes whose positive and negative native probes passed.
 pub async fn ensure_windows_document_engine_ready(runtime_root: &Path) -> Result<String, String> {
-    let result = ensure_ready(runtime_root).await;
-    if result.is_err() {
+    ensure_windows_document_engine_ready_until(runtime_root, None).await
+}
+
+pub async fn ensure_windows_document_engine_ready_until(
+    runtime_root: &Path,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<String, String> {
+    let result = ensure_ready(runtime_root, deadline).await;
+    if result.as_ref().is_err_and(|error| error != RUN_TIMEOUT) {
         invalidate_admission();
     }
     result
@@ -3582,7 +3644,11 @@ fn dispose_profile(profile: &mut Profile) -> Result<(), String> {
     profile.dispose().map_err(|_| cleanup_failed())
 }
 
-async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
+async fn ensure_ready(
+    runtime_root: &Path,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<String, String> {
+    check_deadline(deadline)?;
     let root = runtime_root.to_path_buf();
     let runtime = tokio::task::spawn_blocking(move || {
         os_version()?;
@@ -3590,6 +3656,7 @@ async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
     })
     .await
     .map_err(|_| UNAVAILABLE.to_owned())??;
+    check_deadline(deadline)?;
     let ready = ADMITTED
         .get_or_init(Default::default)
         .lock()
@@ -3599,7 +3666,14 @@ async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
     if ready {
         return Ok(runtime.digest);
     }
-    let _turn = PROBE_TURN.lock().await;
+    let turn = PROBE_TURN.lock();
+    let _turn = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, turn)
+            .await
+            .map_err(|_| RUN_TIMEOUT.to_owned())?,
+        None => turn.await,
+    };
+    check_deadline(deadline)?;
     // Another bootstrap/send may have completed all probes while we waited.
     let root = runtime_root.to_path_buf();
     let runtime = tokio::task::spawn_blocking(move || {
@@ -3607,6 +3681,7 @@ async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
     })
     .await
     .map_err(|_| UNAVAILABLE.to_owned())??;
+    check_deadline(deadline)?;
     if ADMITTED
         .get_or_init(Default::default)
         .lock()
@@ -3620,6 +3695,7 @@ async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
         runtime_root,
         &runtime_root.join("engines/officecli/officecli.exe"),
         &mut Vec::new(),
+        deadline,
     )
     .await
 }
@@ -3654,28 +3730,32 @@ async fn prove_runtime(
     checks: &mut Vec<&'static str>,
 ) -> Result<String, String> {
     let _turn = PROBE_TURN.lock().await;
-    prove_runtime_locked(runtime_root, officecli, checks).await
+    prove_runtime_locked(runtime_root, officecli, checks, None).await
 }
 
 async fn prove_runtime_locked(
     runtime_root: &Path,
     officecli: &Path,
     checks: &mut Vec<&'static str>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<String, String> {
     let mut trace = ProbeTrace::new();
     let result: Result<String, String> = async {
+        check_deadline(deadline)?;
         let root = runtime_root.to_path_buf();
         let before = tokio::task::spawn_blocking(move || {
             cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
         })
         .await
         .map_err(|_| UNAVAILABLE.to_owned())??;
+        check_deadline(deadline)?;
         ADMITTED
             .get_or_init(Default::default)
             .lock()
             .map_err(|_| UNAVAILABLE)?
             .remove(&before.source);
-        probe_inner(runtime_root, officecli, checks, &mut trace).await?;
+        probe_inner(runtime_root, officecli, checks, &mut trace, deadline).await?;
+        check_deadline(deadline)?;
         trace.engine(ProbeStage::RuntimeAfter);
         let root = runtime_root.to_path_buf();
         let after = tokio::task::spawn_blocking(move || {
@@ -3686,6 +3766,7 @@ async fn prove_runtime_locked(
         if before.digest != after.digest {
             return Err(RUNTIME_CHANGED.into());
         }
+        check_deadline(deadline)?;
         ADMITTED
             .get_or_init(Default::default)
             .lock()
@@ -3694,7 +3775,13 @@ async fn prove_runtime_locked(
         Ok(after.digest)
     }
     .await;
-    result.map_err(|error| trace.failure(&error, checks))
+    result.map_err(|error| {
+        if error == RUN_TIMEOUT {
+            error
+        } else {
+            trace.failure(&error, checks)
+        }
+    })
 }
 
 async fn probe_inner(
@@ -3702,7 +3789,9 @@ async fn probe_inner(
     officecli: &Path,
     checks: &mut Vec<&'static str>,
     trace: &mut ProbeTrace,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<(), String> {
+    check_deadline(deadline)?;
     trace.enter(ProbeStage::Setup);
     os_version()?;
     checks.push("windowsBuild");
@@ -3773,7 +3862,7 @@ async fn probe_inner(
     #[cfg(not(test))]
     let node_timeout = Duration::from_secs(30);
     let observation = trace.observation.clone();
-    let node_output = run_candidate_observed(
+    let node_output = run_candidate_observed_until(
         &node,
         &[
             "-e",
@@ -3789,6 +3878,7 @@ async fn probe_inner(
         16 * 1024,
         true,
         observation,
+        deadline,
     )
     .await?;
     #[cfg(test)]
@@ -3836,7 +3926,7 @@ async fn probe_inner(
     trace.engine(ProbeStage::PythonCreate);
     let observation = trace.observation.clone();
     trace.success(
-        run_candidate_observed(
+        run_candidate_observed_until(
             &node,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -3846,6 +3936,7 @@ async fn probe_inner(
             16 * 1024,
             true,
             observation,
+            deadline,
         )
         .await?,
     )?;
@@ -3868,7 +3959,7 @@ async fn probe_inner(
         });
         let observation = trace.observation.clone();
         let output = trace.success(
-            run_candidate_observed(
+            run_candidate_observed_until(
                 officecli,
                 &args,
                 &cwd,
@@ -3878,6 +3969,7 @@ async fn probe_inner(
                 4 * 1024 * 1024,
                 true,
                 observation,
+                deadline,
             )
             .await?,
         )?;
@@ -3916,7 +4008,7 @@ async fn probe_inner(
     trace.engine(ProbeStage::PythonSourceEdit);
     let observation = trace.observation.clone();
     trace.success(
-        run_candidate_observed(
+        run_candidate_observed_until(
             &node,
             &edit_args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -3926,6 +4018,7 @@ async fn probe_inner(
             16 * 1024,
             true,
             observation,
+            deadline,
         )
         .await?,
     )?;

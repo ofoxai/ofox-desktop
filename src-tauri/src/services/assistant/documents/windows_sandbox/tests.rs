@@ -35,7 +35,8 @@ async fn document_observe_fixed_child_call() {
         &root,
         &root.join("engines/officecli/officecli.exe"),
         &mut Vec::new(),
-        &mut trace
+        &mut trace,
+        None,
     )
     .await
     .is_err());

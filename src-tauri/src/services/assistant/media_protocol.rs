@@ -549,6 +549,7 @@ mod tests {
             &input,
             &[source],
             Some(Path::new("/usr/bin/sandbox-exec")),
+            None,
         )
         .await
         .unwrap();

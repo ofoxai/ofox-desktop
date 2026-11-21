@@ -13,8 +13,8 @@ use super::{
     engines::{Engines, PythonEngine},
     fix,
     runner::{
-        run_engine_limited, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT, SVG_OUTPUT_LIMIT,
-        TYPST_PACKAGES,
+        check_deadline, run_engine_limited_until, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT,
+        RUN_TIMEOUT, SVG_OUTPUT_LIMIT, TYPST_PACKAGES,
     },
 };
 use crate::services::assistant::{
@@ -312,7 +312,7 @@ fn python_code(content: &Value, format: DocumentFormat) -> Result<Option<String>
 /// document tries.
 #[derive(Default)]
 pub struct EngineSandbox {
-    works: tokio::sync::OnceCell<PathBuf>,
+    works: tokio::sync::Mutex<Option<PathBuf>>,
     warned: std::sync::atomic::AtomicBool,
     /// Whether the latest probe failed.
     failed: std::sync::atomic::AtomicBool,
@@ -2272,6 +2272,7 @@ struct Work<'a> {
     read_root: Option<&'a Path>,
     /// How long one run may take: [`ENGINE_TIMEOUT`], or [`PYTHON_TIMEOUT`].
     timeout: Duration,
+    deadline: Option<tokio::time::Instant>,
 }
 
 /// How long one Python run may take: matplotlib builds its font cache on
@@ -2421,6 +2422,7 @@ impl Work<'_> {
 
     /// [`Self::run`], keeping at most `limit` bytes of each output stream.
     async fn run_limited(&self, args: &[&str], limit: usize) -> Result<EngineOutput, String> {
+        check_deadline(self.deadline)?;
         if self.sandbox.is_none() && self.needs_sandbox() {
             log::warn!(
                 "[Assistant] {} was asked to run without its sandbox",
@@ -2434,7 +2436,7 @@ impl Work<'_> {
         let output = match self.sandbox {
             #[cfg(windows)]
             Some(root) if self.profile != TYPST_SANDBOX => {
-                super::runner::run_windows_engine_limited(
+                super::runner::run_windows_engine_limited_until(
                     self.exe,
                     args,
                     self.dir,
@@ -2442,6 +2444,7 @@ impl Work<'_> {
                     root,
                     self.timeout,
                     limit,
+                    self.deadline,
                 )
                 .await
             }
@@ -2474,14 +2477,34 @@ impl Work<'_> {
                     args,
                 ]
                 .concat();
-                run_engine_limited(sandbox, &wrapped, self.dir, self.home, self.timeout, limit)
-                    .await
+                run_engine_limited_until(
+                    sandbox,
+                    &wrapped,
+                    self.dir,
+                    self.home,
+                    self.timeout,
+                    limit,
+                    self.deadline,
+                )
+                .await
             }
             None => {
-                run_engine_limited(self.exe, args, self.dir, self.home, self.timeout, limit).await
+                run_engine_limited_until(
+                    self.exe,
+                    args,
+                    self.dir,
+                    self.home,
+                    self.timeout,
+                    limit,
+                    self.deadline,
+                )
+                .await
             }
         };
         let output = output.map_err(|error| {
+            if error == RUN_TIMEOUT {
+                return error;
+            }
             log::warn!("[Assistant] {} could not run: {error}", self.name);
             refuse(
                 FAILED,
@@ -2623,6 +2646,7 @@ async fn check_office(
             .and_then(|report| data(&report)[key].as_u64()),
         None => None,
     };
+    check_deadline(work.deadline)?;
     let mut preview_uses_math_fallback = false;
     let (preview, pages) = if format == DocumentFormat::Pptx {
         let source = work.dir.join(file);
@@ -3513,6 +3537,7 @@ impl AssistantHost {
         params: &Value,
     ) -> Result<Value, String> {
         let call = self.tool_call(run, params).await?;
+        check_deadline(Some(run.deadline))?;
         let media = run
             .media
             .as_ref()
@@ -3528,6 +3553,11 @@ impl AssistantHost {
             biased;
             _ = cancel.wait_for(|cancelled| *cancelled) => Err(UNKNOWN.to_string()),
             result = work => result,
+        };
+        let result = if run.cancelled() {
+            result
+        } else {
+            check_deadline(Some(run.deadline)).and(result)
         };
         let result = result.map_err(|error| scrub_secrets(&error, &run.secrets()));
         media.end_call(call.tool_call_id, fingerprint, &result)?;
@@ -3569,7 +3599,10 @@ impl AssistantHost {
         // Refused before the document counts; a sandbox probe that fails
         // later (see `python_deck`) is refused the same way.
         if matches!(document.content, Content::Python(_)) {
-            self.wait_document_preparation().await;
+            tokio::time::timeout_at(run.deadline, self.wait_document_preparation())
+                .await
+                .map_err(|_| RUN_TIMEOUT.to_owned())?;
+            check_deadline(Some(run.deadline))?;
             if !self.python_offered() {
                 return Err(refuse(FAILED, NO_PYTHON));
             }
@@ -3592,6 +3625,7 @@ impl AssistantHost {
                 &document.name,
                 document.format,
                 &made,
+                Some(run.deadline),
             )
             .await
         }
@@ -3624,6 +3658,7 @@ impl AssistantHost {
             if let Some(source) = Self::source_snapshot(run)? {
                 result["targetPageNumbers"] = json!(source.page_numbers);
             }
+            check_deadline(Some(run.deadline))?;
             Ok((made, result))
         }
         .await;
@@ -3695,6 +3730,7 @@ impl AssistantHost {
                 &name,
                 preview.format,
                 &preview.made,
+                Some(run.deadline),
             )
             .await;
         if delivered.is_ok() {
@@ -3738,6 +3774,7 @@ impl AssistantHost {
                     &preview.name,
                     preview.format,
                     &preview.made,
+                    None,
                 )
                 .await;
             match delivered {
@@ -3798,33 +3835,49 @@ impl AssistantHost {
         cell: &EngineSandbox,
         work: &Work<'_>,
     ) -> Result<PathBuf, String> {
+        check_deadline(work.deadline)?;
         #[cfg(windows)]
         if work.profile != TYPST_SANDBOX {
             let root = self.env.runtime_dir()?;
-            let result = super::runner::ensure_windows_document_engine_ready(&root)
-                .await
-                .map(|_| root);
-            cell.record_windows_probe(result.is_ok());
+            let result =
+                super::runner::ensure_windows_document_engine_ready_until(&root, work.deadline)
+                    .await
+                    .map(|_| root);
+            if !result.as_ref().is_err_and(|error| error == RUN_TIMEOUT) {
+                cell.record_windows_probe(result.is_ok());
+            }
             return result;
         }
-        let probed = cell
-            .works
-            .get_or_try_init(|| async {
-                let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
-                let Some(sandbox) = sandbox else {
-                    return Err("sandbox-exec is unavailable".to_owned());
-                };
+        // Waiting for another probe's serialization is cancellable. Once
+        // running a version probe, the engine runner owns its cleanup.
+        let lock = cell.works.lock();
+        let mut works = match work.deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, lock)
+                .await
+                .map_err(|_| RUN_TIMEOUT.to_owned())?,
+            None => lock.await,
+        };
+        check_deadline(work.deadline)?;
+        if let Some(sandbox) = works.as_ref() {
+            return Ok(sandbox.clone());
+        }
+        let probed = match self.env.sandbox_exec().filter(|path| path.is_file()) {
+            Some(sandbox) => {
                 let probe = Work {
                     sandbox: Some(&sandbox),
                     ..*work
                 };
                 match probe.run(&["--version"]).await {
                     Ok(output) if output.status == Some(0) => Ok(sandbox),
+                    Err(error) if error == RUN_TIMEOUT => return Err(error),
                     _ => Err(format!("{} does not run under sandbox-exec", work.name)),
                 }
-            })
-            .await
-            .cloned();
+            }
+            None => Err("sandbox-exec is unavailable".to_owned()),
+        };
+        if let Ok(sandbox) = &probed {
+            *works = Some(sandbox.clone());
+        }
         cell.failed
             .store(probed.is_err(), std::sync::atomic::Ordering::Relaxed);
         probed
@@ -3837,6 +3890,7 @@ impl AssistantHost {
     async fn engine_sandbox(&self, cell: &EngineSandbox, work: &Work<'_>) -> Option<PathBuf> {
         match self.probe_sandbox(cell, work).await {
             Ok(sandbox) => Some(sandbox),
+            Err(why) if why == RUN_TIMEOUT => None,
             Err(why) => {
                 cell.warn_once(&format!("{why}; {} runs without it", work.name));
                 None
@@ -3852,6 +3906,7 @@ impl AssistantHost {
     async fn python_engine(&self, work: &Work<'_>) -> Option<PathBuf> {
         match self.probe_sandbox(&self.python_sandbox, work).await {
             Ok(sandbox) => Some(sandbox),
+            Err(why) if why == RUN_TIMEOUT => None,
             Err(why) => {
                 self.python_sandbox
                     .warn_once(&format!("{why}; the Python engine is off"));
@@ -3887,8 +3942,11 @@ impl AssistantHost {
             scratch: None,
             read_root: Some(&runtime),
             timeout: PYTHON_TIMEOUT,
+            deadline: Some(run.deadline),
         };
-        let sandbox = self.python_engine(&python).await.ok_or_else(no_python)?;
+        let sandbox = self.python_engine(&python).await;
+        check_deadline(Some(run.deadline))?;
+        let sandbox = sandbox.ok_or_else(no_python)?;
         python.sandbox = Some(&sandbox);
         let frozen = run
             .presentation
@@ -3948,7 +4006,9 @@ impl AssistantHost {
                 &serde_json::to_vec(&source.meta()).map_err(|_| PROTOCOL)?,
             )?;
         }
-        let _turn = self.python_turn.lock().await;
+        let _turn = tokio::time::timeout_at(run.deadline, self.python_turn.lock())
+            .await
+            .map_err(|_| RUN_TIMEOUT.to_owned())?;
         make_python(
             &python,
             office,
@@ -3970,7 +4030,9 @@ impl AssistantHost {
         document: &Document,
         engine: Option<PathBuf>,
     ) -> Result<Made, String> {
+        check_deadline(Some(run.deadline))?;
         attachments::tool_room(&self.load(run).await?, 1, 0)?;
+        check_deadline(Some(run.deadline))?;
         let store = self.store(&run.identity.owner)?;
         // The folder outlives this call: the runtime reads the preview from
         // it once the call has answered, and a preview is delivered from it.
@@ -3984,6 +4046,7 @@ impl AssistantHost {
             move || prepare(&store, &sid, &doc_id, &document, &language)
         })
         .await?;
+        check_deadline(Some(run.deadline))?;
         let format = document.format;
         let made = match (format.engine(), engine.as_deref(), &document.content) {
             (Engine::Office, Some(exe), content) => {
@@ -4001,8 +4064,10 @@ impl AssistantHost {
                     scratch: scratch.as_deref(),
                     read_root: None,
                     timeout: ENGINE_TIMEOUT,
+                    deadline: Some(run.deadline),
                 };
                 let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
+                check_deadline(Some(run.deadline))?;
                 work.sandbox = sandbox.as_deref();
                 match content {
                     Content::Python(_) => {
@@ -4029,8 +4094,10 @@ impl AssistantHost {
                     scratch: None,
                     read_root: None,
                     timeout: ENGINE_TIMEOUT,
+                    deadline: Some(run.deadline),
                 };
                 let sandbox = self.engine_sandbox(&self.typst_sandbox, &work).await;
+                check_deadline(Some(run.deadline))?;
                 work.sandbox = sandbox.as_deref();
                 make_pdf(&work, body).await?
             }
@@ -4045,6 +4112,7 @@ impl AssistantHost {
             },
             _ => return Err(DISABLED.into()),
         };
+        check_deadline(Some(run.deadline))?;
         if format == DocumentFormat::Pptx && run.presentation_enabled {
             let slides = run
                 .presentation
@@ -4077,6 +4145,7 @@ impl AssistantHost {
     /// folder's id, a deck's slide pictures kept beside it, and its
     /// generation published. The result names the file's path and its
     /// first page's preview for the runtime.
+    #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &self,
         run: &Arc<RunControl>,
@@ -4085,17 +4154,27 @@ impl AssistantHost {
         name: &str,
         format: DocumentFormat,
         made: &Made,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Value, String> {
         let mid = run.reply_id();
+        check_deadline(deadline)?;
         // Only a current owned run may start a raster worker or read pages.
         self.load(run).await?;
-        let rasters = if format == DocumentFormat::Pptx && !made.pages.is_empty() {
+        check_deadline(deadline)?;
+        // Finalization can still retain a previously accepted preview. Skip
+        // a new raster pass after expiry while keeping its existing pages.
+        let raster_deadline = Some(run.deadline);
+        let rasters = if format == DocumentFormat::Pptx
+            && !made.pages.is_empty()
+            && check_deadline(raster_deadline).is_ok()
+        {
             match self.env.runtime_dir() {
                 Ok(runtime) => super::preview::raster(
                     &runtime,
                     made.file.parent().ok_or(PROTOCOL)?,
                     &made.pages,
                     self.env.sandbox_exec().as_deref(),
+                    raster_deadline,
                 )
                 .await
                 .unwrap_or_default(),
@@ -4104,6 +4183,7 @@ impl AssistantHost {
         } else {
             vec![]
         };
+        check_deadline(deadline)?;
         let store = self.store(&run.identity.owner)?;
         let issues = serde_json::to_value(&made.issues).map_err(|_| PROTOCOL)?;
         let mut params = json!({"name": name, "format": format.extension(), "issues": issues});
@@ -4161,7 +4241,7 @@ impl AssistantHost {
                     &mut file,
                     &name,
                     record.clone(),
-                    |saved| still_running(saved, &run),
+                    |saved| still_running(saved, &run).and_then(|_| check_deadline(deadline)),
                 )
                 .map_err(|error| {
                     if error == attachments::UNSUPPORTED {
@@ -4214,7 +4294,7 @@ impl AssistantHost {
                         &attachment.id,
                         &rasters,
                         &preview_record,
-                        |saved| still_running(saved, &run),
+                        |saved| still_running(saved, &run).and_then(|_| check_deadline(deadline)),
                     )
                     .is_ok()
                     {
@@ -4281,6 +4361,7 @@ mod tests {
             scratch: None,
             read_root: None,
             timeout: std::time::Duration::from_secs(1),
+            deadline: None,
         };
         let payload = "aW1hZ2UgbWFya2VyIHByaXZhdGUgNDI=";
         let shown = work.shown(&format!(
@@ -8052,7 +8133,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             log.iter().all(|line| line.ends_with("--version")),
             "{log:?}"
         );
-        assert!(f.host.office_sandbox.works.get().is_none());
+        assert!(f.host.office_sandbox.works.lock().await.is_none());
 
         // No sandbox-exec at all: the same.
         let f = fixture_in(Some(&script), None, |dir| Some(dir.join("missing")));
@@ -8101,7 +8182,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             2,
             "{log:?}"
         );
-        assert!(f.host.office_sandbox.works.get().is_some());
+        assert!(f.host.office_sandbox.works.lock().await.is_some());
     }
 
     /// A stand-in Python engine in a fixture's runtime folder, whose `node`
@@ -8152,6 +8233,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
                 scratch: None,
                 read_root: Some(&self.runtime),
                 timeout: PYTHON_TIMEOUT,
+                deadline: None,
             }
         }
 
@@ -8241,7 +8323,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
         assert_eq!(PYTHON_SANDBOX.matches("(allow file-write*").count(), 1);
         assert_eq!(PYTHON_SANDBOX.matches("(allow mach-lookup").count(), 1);
         assert_eq!(PYTHON_SANDBOX.matches("(allow process-exec").count(), 1);
-        assert!(f.host.python_sandbox.works.get().is_some());
+        assert!(f.host.python_sandbox.works.lock().await.is_some());
     }
 
     /// The runtime `pnpm assistant:prepare` stages, which macOS CI prepares
@@ -8280,6 +8362,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             scratch: None,
             read_root: Some(root),
             timeout: Duration::from_secs(60),
+            deadline: None,
         }
     }
 
@@ -8544,7 +8627,7 @@ connect(port).then((connected) => console.log(JSON.stringify({
         let log = sandbox_log(&f);
         assert_eq!(log.len(), 2, "{log:?}");
         assert!(log.iter().all(|line| line.ends_with(" --version")));
-        assert!(f.host.python_sandbox.works.get().is_none());
+        assert!(f.host.python_sandbox.works.lock().await.is_none());
         // And its work refuses to start without the sandbox.
         let error = python
             .work()
@@ -8580,6 +8663,7 @@ connect(port).then((connected) => console.log(JSON.stringify({
             scratch: None,
             read_root: None,
             timeout: Duration::from_secs(1),
+            deadline: None,
         };
         let started = std::time::Instant::now();
         let error = work.run(&[]).await.unwrap_err();
@@ -8610,6 +8694,7 @@ connect(port).then((connected) => console.log(JSON.stringify({
             scratch: None,
             read_root: Some(root.path()),
             timeout: Duration::from_secs(1),
+            deadline: None,
         };
         let started = std::time::Instant::now();
         let error = work.run(&["runner.mjs"]).await.unwrap_err();
@@ -9292,8 +9377,8 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
                 .any(|line| line.ends_with("/node/node --version")),
             "{log:?}"
         );
-        assert!(f.host.office_sandbox.works.get().is_some());
-        assert!(f.host.python_sandbox.works.get().is_none());
+        assert!(f.host.office_sandbox.works.lock().await.is_some());
+        assert!(f.host.python_sandbox.works.lock().await.is_none());
         // The runner never ran, and the document did not count.
         assert!(log.iter().all(|line| !line.contains(" --code ")));
         for call in ["call-2", "call-3", "call-4"] {
@@ -10324,7 +10409,7 @@ exit 1"#
         );
         if cfg!(target_os = "macos") {
             assert_eq!(
-                f.host.office_sandbox.works.get(),
+                f.host.office_sandbox.works.lock().await.as_ref(),
                 Some(&PathBuf::from("/usr/bin/sandbox-exec"))
             );
         }
@@ -10386,6 +10471,7 @@ exit 1"#
                 scratch: None,
                 read_root: Some(runtime),
                 timeout: PYTHON_TIMEOUT,
+                deadline: None,
             }
         }
 
@@ -10407,6 +10493,7 @@ exit 1"#
                 scratch: Some(scratch),
                 read_root: Some(runtime),
                 timeout: ENGINE_TIMEOUT,
+                deadline: None,
             }
         }
 
