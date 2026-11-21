@@ -2,6 +2,12 @@
 // generated document's first page or slide, or a contact sheet of a deck's
 // slides. The native canvas addon loads on first use, not with the runtime.
 import { drawSlideText, slideText } from "./slide-text.mjs";
+import { SaxesParser } from "saxes";
+import {
+  CJK_FONT_FAMILIES,
+  cjkFontFamilies,
+  hasCjkText,
+} from "./text-fonts.mjs";
 
 const THUMBNAIL_EDGE = 768;
 const MAX_THUMBNAIL_BYTES = 200 * 1024;
@@ -59,19 +65,122 @@ export async function thumbnailFromPng(bytes, options) {
 // canvas's SVG reader then uses one default font and no per-glyph fallback,
 // so Chinese or Japanese labels drew as missing-glyph boxes. It takes the
 // first installed family of a list, so name CJK-capable system fonts first.
-export const SVG_TEXT_FONTS =
-  "'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Yu Gothic', 'Noto Sans CJK SC', sans-serif";
-// One pass, bounded by the next angle bracket. A tag whose attributes hold an
-// unbalanced quote (a ">" inside a value) is left as it is.
-const SVG_TEXT_TAG = /<text(\s[^<>]*)?>/g;
-const withTextFonts = (source) =>
-  source.replace(SVG_TEXT_TAG, (tag, attributes = "") =>
-    /\sfont-family\s*=/.test(attributes) ||
-    (attributes.match(/"/g) || []).length % 2 ||
-    (attributes.match(/'/g) || []).length % 2
-      ? tag
-      : `<text font-family="${SVG_TEXT_FONTS}"${attributes}>`,
+export const SVG_TEXT_FONTS = `${CJK_FONT_FAMILIES}, sans-serif`;
+const FONT_DECLARATION = /(^|;)(\s*font-family\s*:\s*)[^;]*/i;
+const xmlAttribute = (value) =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+
+// The XML parser has already validated this opening tag. Skip whole quoted
+// values so metadata containing "font-family='...'" cannot become an attribute.
+function setAttribute(tag, wanted, value) {
+  let index = 1;
+  while (index < tag.length && !/[\s/>]/.test(tag[index])) index++;
+  while (index < tag.length) {
+    while (/\s/.test(tag[index] ?? "")) index++;
+    if (index >= tag.length || tag[index] === "/" || tag[index] === ">") break;
+    const start = index;
+    while (index < tag.length && !/[\s=]/.test(tag[index])) index++;
+    const name = tag.slice(start, index);
+    while (/\s/.test(tag[index] ?? "")) index++;
+    if (tag[index++] !== "=") throw new Error("Invalid SVG attribute");
+    while (/\s/.test(tag[index] ?? "")) index++;
+    const quote = tag[index++];
+    if (quote !== '"' && quote !== "'")
+      throw new Error("Invalid SVG attribute");
+    const end = tag.indexOf(quote, index) + 1;
+    if (end === 0) throw new Error("Invalid SVG attribute");
+    if (name === wanted)
+      return (
+        tag.slice(0, start) +
+        `${wanted}="${xmlAttribute(value)}"` +
+        tag.slice(end)
+      );
+    index = end;
+  }
+  return tag.replace(
+    /\/?>$/,
+    (ending) => ` ${wanted}="${xmlAttribute(value)}"${ending}`,
   );
+}
+
+export function withTextFonts(source) {
+  const records = [],
+    stack = [];
+  const parser = new SaxesParser();
+  parser.on("opentag", ({ name, attributes }) => {
+    const local = name.split(":").at(-1),
+      style = attributes.style ?? "";
+    const declaration = [
+      ...style.matchAll(new RegExp(FONT_DECLARATION.source, "gi")),
+    ].at(-1);
+    const ownFamily = declaration
+      ? declaration[0].replace(/^;?\s*font-family\s*:\s*/i, "")
+      : attributes["font-family"];
+    const parent = stack.at(-1);
+    const family =
+      ownFamily === undefined || /^(?:inherit|unset)$/i.test(ownFamily.trim())
+        ? parent?.family
+        : ownFamily;
+    const inText = local === "text" || !!parent?.inText;
+    let record;
+    if (inText) {
+      const end = parser.position;
+      record = {
+        start: source.lastIndexOf("<", end - 1),
+        end,
+        style,
+        declaration: !!declaration,
+        family,
+        local,
+        cjk: false,
+      };
+      records.push(record);
+    }
+    stack.push({ record, cjk: false, family, inText });
+  });
+  const text = (value) => {
+    if (stack.length && hasCjkText(value)) stack.at(-1).cjk = true;
+  };
+  parser.on("text", text);
+  parser.on("cdata", text);
+  parser.on("closetag", () => {
+    const node = stack.pop();
+    if (node.record) node.record.cjk = node.cjk;
+    // A nested text run handles its own CJK face; it must not replace a Latin
+    // parent's face or an independently authored CJK serif face.
+    else if (node.cjk && stack.length) stack.at(-1).cjk = true;
+  });
+  parser.write(source).close();
+  // Opening-tag offsets and decoded text come from the XML parser, so comments,
+  // numeric entities and quoted '>' cannot select or relabel another element.
+  const parts = [];
+  let cursor = 0;
+  for (const record of records) {
+    if (!record.cjk && (record.family !== undefined || record.local !== "text"))
+      continue;
+    const families = record.cjk
+      ? cjkFontFamilies(record.family)
+      : SVG_TEXT_FONTS;
+    let tag = source.slice(record.start, record.end);
+    if (record.declaration) {
+      const style = record.style.replace(
+        new RegExp(FONT_DECLARATION.source, "gi"),
+        (_all, separator, key) => separator + key + families,
+      );
+      tag = setAttribute(tag, "style", style);
+    } else {
+      tag = setAttribute(tag, "font-family", families);
+    }
+    parts.push(source.slice(cursor, record.start), tag);
+    cursor = record.end;
+  }
+  parts.push(source.slice(cursor));
+  return parts.join("");
+}
 
 async function loadSlide(bytes) {
   const { loadImage } = await import("@napi-rs/canvas");

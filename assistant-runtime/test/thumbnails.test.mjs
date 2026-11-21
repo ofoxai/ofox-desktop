@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SaxesParser } from "saxes";
 import {
   createCanvas,
   GlobalFonts,
@@ -11,6 +12,7 @@ import {
   encodeThumbnail,
   thumbnailFromPng,
   thumbnailFromSvg,
+  withTextFonts,
 } from "../src/thumbnails.mjs";
 
 // CI uses a pinned OFL test font; no font is shipped with the application.
@@ -24,6 +26,11 @@ if (process.env.OFOX_TEST_CJK_FONT)
       "Ofox Test CJK",
     ),
     "CJK test font must load",
+  );
+if (process.env.OFOX_TEST_CJK_FONT)
+  assert.ok(
+    GlobalFonts.registerFromPath(process.env.OFOX_TEST_CJK_FONT),
+    "the pinned CJK font must also be available by its native family name",
   );
 
 /** A page-like canvas: a gradient with text and shapes over it. */
@@ -354,6 +361,126 @@ test("native SVG text without a font family still draws CJK glyphs, not identica
     ),
   );
   assert.notEqual(first.data, second.data);
+});
+
+test("foreignObject text with an explicit Latin font draws distinct CJK glyphs", async () => {
+  const [first, second] = await Promise.all(
+    ["季", "度"].map((label) =>
+      thumbnailFromSvg(navySlide(label, "'Arial'"), {
+        maxEdge: 640,
+        maxBytes: 128 * 1024,
+      }),
+    ),
+  );
+  assert.ok(
+    first.data !== second.data,
+    "different CJK letters cannot share the same missing-glyph box",
+  );
+});
+
+test("native SVG text with an explicit Latin font draws distinct CJK glyphs", async () => {
+  for (const font of [
+    'font-family="Arial"',
+    'style="font-family:Arial;fill:#000"',
+    'style="font-family:Noto Sans SC;font-family:Arial;fill:#000"',
+    'font-family="Arial" style="font-family:Arial"',
+  ]) {
+    const page = (label) =>
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#fff"/><text x="120" y="80" font-size="64" text-anchor="middle" ${font}><tspan>${label}</tspan></text></svg>`,
+      );
+    const [first, second] = await Promise.all(
+      ["季", "度"].map((label) =>
+        thumbnailFromSvg(page(label), { maxEdge: 240, maxBytes: 64 * 1024 }),
+      ),
+    );
+    assert.ok(
+      first.data !== second.data,
+      `${font}: missing-glyph boxes are not Chinese text`,
+    );
+  }
+});
+
+test("CJK font selection follows real XML text through comments and numeric entities", async () => {
+  const page = (label, prefix = "", extra = "") =>
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#fff"/>${prefix}<text x="120" y="80" font-size="64" text-anchor="middle" font-family="Arial" ${extra}>${label}</text></svg>`,
+    );
+  const images = await Promise.all(
+    [
+      page("季"),
+      page(
+        "&#x5b63;",
+        '<!-- 🦊 <text font-family="Arial">度</text> -->',
+        'data-x="a>b"',
+      ),
+      page("度"),
+    ].map((svg) =>
+      thumbnailFromSvg(svg, { maxEdge: 240, maxBytes: 64 * 1024 }),
+    ),
+  );
+  assert.ok(
+    images[0].data === images[1].data,
+    "comments and XML spelling do not change the glyph",
+  );
+  assert.ok(
+    images[0].data !== images[2].data,
+    "distinct decoded CJK letters remain distinct",
+  );
+});
+
+test("font fallback preserves quoted metadata and replaces only real XML attributes", () => {
+  for (const [metadata, actual] of [
+    [" font-family='fake'", 'font-family="Arial"'],
+    [" style='font-family:fake'", 'style="font-family:Arial;fill:#123"'],
+  ]) {
+    const result = withTextFonts(
+      `<svg><text data-note="${metadata}" ${actual}>中</text></svg>`,
+    );
+    const parser = new SaxesParser();
+    let text;
+    parser.on("opentag", (tag) => {
+      if (tag.name === "text") text = tag;
+    });
+    parser.write(result).close();
+    assert.equal(text.attributes["data-note"], metadata);
+  }
+});
+
+test("native font fallback preserves independent Latin runs and inherited CJK faces", () => {
+  const input =
+    '<svg><text font-family="Arial">ABC<tspan font-family="Noto Serif CJK SC">中</tspan>DEF</text><g font-family="Noto Serif CJK SC"><text>中</text></g><text style="font-family:Arial;font-family:Noto Serif CJK SC">中</text></svg>';
+  const tags = [],
+    parser = new SaxesParser();
+  parser.on("opentag", (tag) => {
+    if (["text", "tspan"].includes(tag.name)) tags.push(tag);
+  });
+  parser.write(withTextFonts(input)).close();
+  assert.equal(
+    tags[0].attributes["font-family"],
+    "Arial",
+    "a child CJK face does not replace its Latin parent's face",
+  );
+  assert.match(tags[1].attributes["font-family"], /^Noto Serif CJK SC(?:,|$)/);
+  assert.match(
+    tags[2].attributes["font-family"],
+    /^Noto Serif CJK SC(?:,|$)/,
+    "a text node keeps its inherited CJK serif face",
+  );
+  assert.match(
+    tags[3].attributes.style,
+    /^font-family:Noto Serif CJK SC,/,
+    "the last CSS font-family takes precedence",
+  );
+});
+
+test("inherited oversized font metadata does not multiply into every CJK run", () => {
+  const source = `<svg><g font-family="${"A".repeat(30000)}">${"<text>中</text>".repeat(30)}</g></svg>`;
+  const result = withTextFonts(source);
+  assert.ok(
+    result.length < 128 * 1024,
+    "font selection must not amplify one invalid family into every descendant",
+  );
 });
 
 test("font families are added to bare SVG text only, in time linear in the input", async () => {

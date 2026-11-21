@@ -167,12 +167,22 @@ can retain the same stamp. Such rewrites can keep serving cached values until
 a distinguishable filesystem revision is observed. The conflict and stale-source
 fixtures change size explicitly so they exercise an observable source mutation.
 
-## Presentation thumbnail fonts (2026-11-14)
+## Presentation thumbnail fonts (2026-11-21)
 
 CJK thumbnail rendering depends on an available font with the required glyphs.
-The English Windows CI image uses a pinned, explicitly selected Noto test font;
-its pixel checks do not establish system-font fallback on installations without
-CJK fonts. No additional font is bundled with the application.
+Skia does not provide per-glyph fallback when a source selects a Latin face such
+as Arial. The renderer now selects a CJK face for CJK text, using that same face
+for measurement and drawing while retaining requested Latin faces for Latin
+tokens. Native SVG text uses the same CJK selection; explicitly requested CJK
+faces keep priority. This is font substitution, not a guarantee of source-font
+metrics or identical PowerPoint layout. A native SVG text element that directly
+mixes scripts uses one selected face, so its Latin metrics can change. Separate
+Latin text runs retain their requested or inherited face.
+
+The English Windows CI image uses a pinned Noto test font. The glyph-difference
+regressions cover fallback with an available CJK face, not font availability on
+clients without CJK fonts. No additional font is bundled with the application.
+Installed Windows LPAC rendering and the final client acceptance remain pending.
 
 ## Assistant catalog cache (2026-10-30)
 

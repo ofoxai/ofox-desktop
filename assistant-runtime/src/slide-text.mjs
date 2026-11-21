@@ -7,6 +7,7 @@
 // a system font for CJK. Text is drawn over every shape, not in the SVG's
 // paint order: a thumbnail is for reading the slide.
 import { SaxesParser } from "saxes";
+import { fontFamiliesForText } from "./text-fonts.mjs";
 
 // officecli draws 1 pt as 2 px (56.69 px to the cm) whatever the slide's
 // size; lengths it gives in px are already in the SVG's units.
@@ -339,16 +340,15 @@ function finish(line, paragraph, measure) {
 }
 
 /** The canvas font for a run. */
-export function fontOf({ size, family, bold, italic }) {
-  const families =
-    family === undefined ? "sans-serif" : `${family}, sans-serif`;
+export function fontOf({ size, family, bold, italic }, text = "") {
+  const families = fontFamiliesForText(family, text);
   return `${italic ? "italic " : ""}${bold ? "bold " : ""}${size}px ${families}`;
 }
 
 /** Draws `boxes` (slideText's) on a 2D context set to SVG units. */
 export function drawSlideText(context, boxes) {
   const measure = (text, style) => {
-    context.font = fontOf(style);
+    context.font = fontOf(style, text);
     const metrics = context.measureText(text);
     return {
       width: metrics.width,
@@ -366,7 +366,7 @@ export function drawSlideText(context, boxes) {
     context.clip();
     for (const line of layoutBox(box, measure))
       for (const item of line.items) {
-        context.font = fontOf(item.run);
+        context.font = fontOf(item.run, item.text);
         context.fillStyle = item.run.color;
         context.fillText(item.text, item.x, line.y);
       }
