@@ -154,12 +154,19 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      # Exercise the release upload/download pair and its separate artifact directories.
-      - name: Download probes with release artifact action
+      # Resolve each expected artifact by name: a just-finalized artifact can be
+      # absent from the bulk listing, and v8 flattens a one-artifact download.
+      - name: Download ChatGPT probe with release artifact action
         uses: actions/download-artifact@v8
         with:
-          pattern: verify_*-${{ github.sha }}
-          path: ${{ runner.temp }}/probe-artifact-roundtrip
+          name: verify_chatgpt_install-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-artifact-roundtrip/verify_chatgpt_install-${{ github.sha }}
+
+      - name: Download lifecycle probe with release artifact action
+        uses: actions/download-artifact@v8
+        with:
+          name: verify_tool_lifecycle-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-artifact-roundtrip/verify_tool_lifecycle-${{ github.sha }}
 
       - name: Verify downloaded probe artifacts
         shell: pwsh
