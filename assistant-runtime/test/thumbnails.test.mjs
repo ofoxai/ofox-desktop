@@ -7,6 +7,7 @@ import {
   ImageData,
   loadImage,
 } from "@napi-rs/canvas";
+import { renderFilePage } from "../src/file-preview-page.mjs";
 import {
   contactSheet,
   encodeThumbnail,
@@ -375,6 +376,22 @@ test("foreignObject text with an explicit Latin font draws distinct CJK glyphs",
   assert.ok(
     first.data !== second.data,
     "different CJK letters cannot share the same missing-glyph box",
+  );
+});
+
+test("file preview draws distinct circled digits in Arial foreignObject text", async () => {
+  const [first, second] = await Promise.all(
+    ["①打分", "②打分"].map((text) =>
+      renderFilePage({
+        page: 4,
+        scale: 1,
+        svg: navySlide(text).toString("utf8"),
+      }),
+    ),
+  );
+  assert.ok(
+    !first.bytes.equals(second.bytes),
+    "the two circled digits must not become the same missing-glyph box",
   );
 });
 
