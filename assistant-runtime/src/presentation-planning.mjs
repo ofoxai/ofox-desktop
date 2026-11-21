@@ -185,13 +185,14 @@ export const PRESENTATION_SLIDE_SCHEMA = object({
       Type.String({
         enum: ["left", "right", "top", "bottom", "center", "none"],
         description:
-          "Where the page's title and text sit; the image keeps that part of the page clear (or visually quiet for a background).",
+          "Image visuals only. Where the page's title and text sit; the image keeps that part of the page clear (or visually quiet for a background).",
       }),
     ),
     aspect: Type.Optional(
       Type.String({
         enum: ["16:9", "4:3", "1:1", "3:4", "9:16"],
-        description: "Aspect ratio of the region the image fills on the page.",
+        description:
+          "Image visuals only. Aspect ratio of the region the image fills on the page.",
       }),
     ),
   }),
@@ -840,7 +841,7 @@ export function createPresentationPlanning(runtime, context) {
     runtime.wrapTool(
       context,
       "freeze_presentation_plan",
-      "Submit a structured PPTX page plan and a style from nonempty eligible candidates for authoritative Host freezing. User manual choice has priority. Native editing is independent of prior target-application round-trip certification. If no candidate is eligible, explain the constraint conflict instead of repeating an unchanged rejected freeze or skipping this tool. A plan grants no image budget: the returned visualBudget is the Host-approved freeze-time snapshot. If canAttempt is true, do not request the same authorization again; every image call still needs Host price/budget checks. Unavailable images follow each page's fallback.",
+      "Submit a structured PPTX page plan and a style from nonempty eligible candidates for authoritative Host freezing. User manual choice has priority. For non-image visuals, omit placement, textZone and aspect. Native editing is independent of prior target-application round-trip certification. If no candidate is eligible, explain the constraint conflict instead of repeating an unchanged rejected freeze or skipping this tool. A plan grants no image budget: the returned visualBudget is the Host-approved freeze-time snapshot. If canAttempt is true, do not request the same authorization again; every image call still needs Host price/budget checks. Unavailable images follow each page's fallback.",
       FREEZE_PRESENTATION_SCHEMA,
       async (given, signal, toolCallId) => {
         const args = clone(given);

@@ -182,7 +182,11 @@ Latin text runs retain their requested or inherited face.
 The English Windows CI image uses a pinned Noto test font. The glyph-difference
 regressions cover fallback with an available CJK face, not font availability on
 clients without CJK fonts. No additional font is bundled with the application.
-Installed Windows LPAC rendering and the final client acceptance remain pending.
+Source edits confined to the authorized slide XML preserve the other package
+members when the slide part paths and relationships remain stable. Structural
+edits still use the normal serializer and must pass the Host's source-preservation
+checks. Installed Windows LPAC rendering and the final client acceptance remain
+pending.
 
 ## Assistant catalog cache (2026-10-30)
 

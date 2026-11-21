@@ -45,6 +45,7 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `new_deck(title="", footer="", style="navy", language="zh")`: returns `prs`; rejects unknown/disabled styles. Footer appears on content pages.
 - `source_deck()`: Host-authorized original snapshot; source mode rejects `new_deck`.
 - `target_slides(prs)`: authorized actual source pages in plan order. Edit these; preserve the remaining pages.
+- To replace existing text, match the old text in the target slide's text shapes and edit the existing paragraphs/runs in place to preserve formatting. Imported titles may be ordinary text boxes even when `slide.shapes.title` is empty. Check that the old text is gone before previewing the replacement.
 - `bring_title_to_front(slide)`: raise the same title; retain ID/rich text/fonts and extension order. Source edits need this, not `.text=` merely to raise it.
 - `cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None)`: cover; optional right SVG art, legacy 4.6×5.5, adaptations 4.2×4.5.
 - `section_slide(prs, title, number="", subtitle="", notes="")`: section break.

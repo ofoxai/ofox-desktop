@@ -98,7 +98,7 @@ deck._validate_panel_regions(prs)
 deck._validate_density(prs)
 deck._validate_title_cover(prs)
 deck._plan_receipt(prs)
-prs.save("/tmp/out.pptx")
+deck._save(prs, "/tmp/out.pptx")
 json.dumps(list(deck.LINT))
 `;
 

@@ -76,6 +76,8 @@ except FileNotFoundError:
     _SOURCE_META = None
 _SOURCE_PRS = None
 _SOURCE_SLIDE_IDS = None
+_SOURCE_BASELINE = None
+_SOURCE_TARGET_PARTS = set()
 
 def _set_theme(theme, language):
     for key, value in _LEGACY_THEME.items(): setattr(T, key, value)
@@ -292,7 +294,7 @@ def new_deck(title="", footer="", style="navy", language="zh"):
     return prs
 
 def _prepare_source():
-    global _SOURCE_PRS, _SOURCE_SLIDE_IDS
+    global _SOURCE_PRS, _SOURCE_SLIDE_IDS, _SOURCE_BASELINE, _SOURCE_TARGET_PARTS
     if _SOURCE_META is None or _SOURCE_PRS is not None: return
     with zipfile.ZipFile("/source.pptx") as archive:
         entries = archive.infolist()
@@ -306,7 +308,15 @@ def _prepare_source():
                 data = archive.read(entry).upper()
                 if b"<!DOCTYPE" in data or b"<!ENTITY" in data: raise ValueError("source DTD is unsupported")
     prs = Presentation("/source.pptx")
+    # The first access to prs.slides can rename slide parts. A byte-preserving
+    # edit needs the same part paths before and after that normalization.
+    original_parts = [str(prs.part.related_part(ref.rId).partname)[1:]
+                      for ref in prs._element.get_or_add_sldIdLst()]
     if len(prs.slides) != _SOURCE_META["totalPages"]: raise ValueError("source page count mismatch")
+    if original_parts == [str(slide.part.partname)[1:] for slide in prs.slides]:
+        _SOURCE_BASELINE = io.BytesIO()
+        prs.save(_SOURCE_BASELINE)
+        _SOURCE_TARGET_PARTS = {original_parts[page - 1] for page in _SOURCE_META["pageNumbers"]}
     style = _SELECTED_STYLE or "navy"
     prs._ofox_context = {"style": style, "theme": _STYLES.get(style), "language": "zh", "footer": "", "page": len(prs.slides)}
     _SOURCE_PRS = prs
@@ -328,6 +338,57 @@ def _validate_source(prs):
     if _SOURCE_META is None: return
     if prs is not _SOURCE_PRS or [slide.slide_id for slide in prs.slides] != _SOURCE_SLIDE_IDS:
         raise RuntimeError("source edit must preserve the original presentation, page count and slide IDs")
+
+
+def _slide_relationships(archive, slide_part):
+    folder, name = slide_part.rsplit("/", 1)
+    try:
+        root = etree.fromstring(archive.read(f"{folder}/_rels/{name}.rels"),
+                                parser=etree.XMLParser(resolve_entities=False, no_network=True))
+    except KeyError:
+        return set()
+    return {(rel.get("Id"), rel.get("Type"), rel.get("Target"), rel.get("TargetMode", "Internal"))
+            for rel in root if isinstance(rel.tag, str)}
+
+
+def _copy_slide_edits(original, baseline, revised, output):
+    names = set(baseline.namelist())
+    if names != set(revised.namelist()) or not _SOURCE_TARGET_PARTS.issubset(original.namelist()):
+        return False
+    if any(_slide_relationships(original, name) != _slide_relationships(baseline, name)
+           for name in _SOURCE_TARGET_PARTS):
+        return False
+    # Compare two serializations by the same library. Reusing the original
+    # members then avoids rewriting untouched notes, styles and slide XML.
+    for name in names - _SOURCE_TARGET_PARTS:
+        if baseline.read(name) != revised.read(name):
+            return False
+    changed = {}
+    for name in _SOURCE_TARGET_PARTS:
+        content = revised.read(name)
+        if baseline.read(name) != content:
+            changed[name] = content
+    with zipfile.ZipFile(output, "w") as archive:
+        for entry in original.infolist():
+            data = changed.get(entry.filename)
+            archive.writestr(entry, original.read(entry) if data is None else data)
+    return True
+
+
+def _save(prs, output):
+    if _SOURCE_BASELINE is None:
+        prs.save(output)
+        return
+    revised = io.BytesIO()
+    prs.save(revised)
+    with zipfile.ZipFile("/source.pptx") as original, zipfile.ZipFile(_SOURCE_BASELINE) as baseline, zipfile.ZipFile(revised) as candidate:
+        if _copy_slide_edits(original, baseline, candidate, output):
+            return
+    # A structural change still goes through the normal writer and the Host's
+    # source-preservation validation for dependent parts.
+    with open(output, "wb") as file:
+        file.write(revised.getbuffer())
+
 
 def _source_charts(prs):
     if _SOURCE_META is None: return None

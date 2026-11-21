@@ -29,6 +29,56 @@ test("makes a pptx from code", options, async (t) => {
   assert.ok(Array.isArray(lint));
 });
 
+test(
+  "editing page 3 retains the other package members of an uploaded deck",
+  {
+    ...options,
+    skip: process.env.OFOX_PYTHON_TEST_NODE ? false : options.skip,
+  },
+  async (t) => {
+    const { default: PptxGenJS } = await import("pptxgenjs");
+    const folder = await scratch(t);
+    const source = path.join(folder, "source.pptx");
+    const deck = new PptxGenJS();
+    for (let page = 1; page <= 8; page++) {
+      const slide = deck.addSlide();
+      slide.addText(`Original title ${page}`, { x: 1, y: 1, w: 8, h: 1 });
+      slide.addText(`Original body ${page}`, { x: 1, y: 3, w: 8, h: 2 });
+      slide.addNotes(`Keep note ${page}`);
+    }
+    await deck.writeFile({ fileName: source });
+    const original = await readFile(source);
+    const edit = await run(
+      t,
+      `prs = source_deck()
+slide = target_slides(prs)[0]
+slide.shapes[0].text_frame.paragraphs[0].runs[0].text = "第三季度经营复盘"
+slide.shapes[1].text_frame.paragraphs[0].runs[0].text = "Updated body"
+`,
+      { source: { path: source, totalPages: 8, pageNumbers: [3] } },
+    );
+    assert.equal(edit.status, 0, edit.stderr);
+    assert.deepEqual(await readFile(source), original);
+    const before = await zipEntries(source);
+    const after = await zipEntries(edit.out);
+    const target = "ppt/slides/slide3.xml";
+    const changed = [...new Set([...before.keys(), ...after.keys()])].filter(
+      (name) => {
+        const previous = before.get(name);
+        const current = after.get(name);
+        return (
+          !name.endsWith("/") &&
+          !(previous && current && previous.equals(current))
+        );
+      },
+    );
+    assert.deepEqual(changed, [target]);
+    assert.match(after.get(target).toString(), /第三季度经营复盘/);
+    assert.match(after.get(target).toString(), /Updated body/);
+    assert.doesNotMatch(after.get(target).toString(), /Original title 3/);
+  },
+);
+
 test("reports a Python error", options, async (t) => {
   const result = await run(t, "prs = new_deck()\nprint(undefined_name)\n");
   assert.equal(result.status, 1);

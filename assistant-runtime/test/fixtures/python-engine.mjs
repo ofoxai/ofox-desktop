@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { lstatSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buffer } from "node:stream/consumers";
@@ -58,7 +59,7 @@ export async function scratch(t) {
 }
 
 /** Runs `code` in the runner and returns its exit status, stderr and files. */
-export async function run(t, code, { assetsDir = assets } = {}) {
+export async function run(t, code, { assetsDir = assets, source } = {}) {
   await requireEngine();
   const directory = await scratch(t);
   const files = {
@@ -67,6 +68,22 @@ export async function run(t, code, { assetsDir = assets } = {}) {
     lint: path.join(directory, "lint.json"),
   };
   await writeFile(files.code, code);
+  const sourceArgs = [];
+  if (source) {
+    const sourceMeta = path.join(directory, "source-meta.json");
+    const version = createHash("sha256")
+      .update(await readFile(source.path))
+      .digest("hex");
+    await writeFile(
+      sourceMeta,
+      JSON.stringify({
+        version,
+        totalPages: source.totalPages,
+        pageNumbers: source.pageNumbers,
+      }),
+    );
+    sourceArgs.push("--source-deck", source.path, "--source-meta", sourceMeta);
+  }
   const child = spawn(
     staged,
     [
@@ -79,6 +96,7 @@ export async function run(t, code, { assetsDir = assets } = {}) {
       files.out,
       "--lint",
       files.lint,
+      ...sourceArgs,
     ],
     {
       env: { PATH: process.env.PATH },
