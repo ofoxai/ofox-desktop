@@ -99,6 +99,14 @@ directory under the scrubbed LOCALAPPDATA, rather than the real Windows profile:
 `home/Packages/<profile name>/AC/Temp`. The launcher prepares this private task
 subtree before resume, with existing task permissions and no extra ACL grant.
 Per-machine admission still requires the entire native functional gate.
+
+The first FCE release parity attempt stopped before any model request with
+`Host-resolved model gateway is not allowed`: the release Host correctly refused
+the harness's localhost transport under its application default policy. The
+failed attempt and zero-request ledger remain audit evidence. Driver packaging
+now requires a separate keyless, fixed-localhost release preflight; only the
+temporary TestEnv grants its registered strict localhost gateway. This check
+does not establish paid-model, document or installed-UI acceptance.
 Same-SHA Server 2022 and installed Win11 acceptance are tracked on
 [card #1723](https://app.fizzy.do/6179973/cards/1723); Windows 10 client evidence
 remains a separate requirement of the parent capability campaign.
@@ -721,6 +729,15 @@ What the files and previews are:
   passed 3,344 with one skipped, and runtime and search passed 805 and 102.
   The #1733 Host fixture passed in a separate opt-in run. Windows native
   verification is pending.
+- The 2026-11-21 local Mac integration retains the large-page preview fix and
+  metadata-first Skills discovery while incorporating background document
+  preparation. Portable barrier regressions cover plain Full Auto questions
+  after a generated deck, explicit document waiting and recovery of an
+  invalidated proof. They do not establish Windows LPAC recovery behavior;
+  native Windows acceptance is being continued separately. Failed preparation
+  may be retried in the background on a later ordinary turn, whose reply does
+  not wait for it; broken Python runners remain disabled for the process.
+  See [the incremental Mac receipt](mac-windows-assistant-integration.md#incremental-mac-integration-2026-11-21).
 - OfficeCLI does not faithfully render native OMML. Math preview uses a temporary
   copy selecting the equation's existing compatibility fallback; the delivered
   PPTX retains native OMML. A preview of a fallback cannot establish editable
@@ -1847,6 +1864,8 @@ fully previewable; it is not a quality certification. Every style stays
 Claude cache-write duration is retained only when native identity, model, second and all four token buckets agree with the ledger row. Legacy/archived rows without that evidence remain partial or unknown; the change does not reconstruct their TTL or rewrite saved charges. Other native readers retain their prior interpretation and receive only compatible metadata defaults. Synthetic sandbox tests do not certify real provider billing or Windows GUI behavior.
 
 The abandoned Assistant Vault prototype had a durable, context-bound pending marker before API-key creation. The current `ofox_api_keys` service does not persist that unknown-mint barrier: a timeout can leave an unidentified remote key, and a later explicit Send may create another. The old Vault/reset-setup UI is preserved as design evidence rather than transplanted into the current credential service. A future recovery design needs durable owner/region/issuer binding and an explicit, identity-fenced confirmation before clearing an uncertain attempt. No live keys were created or revoked for this consolidation.
+
+Assistant cached startup and ordinary text turns do not wait for the optional Windows document-isolation preparation. Until that shared preparation proves the current runtime, Python remains unavailable; a text turn admitted during preparation can therefore begin without Python in its tool schema. Explicit deck workflows and Python document calls still wait for the shared proof, and the launcher rechecks execution admission. Preparation failures can be retried by a later operation. Source-level regression checks do not certify that a newly built desktop package has been installed and exercised on the user's machine.
 
 Calendar rollover, routing readiness and message-count regressions are verified through simulated UI and temporary native logs. New installed-app acceptance remains separate from these source checks; the installed release is not silently replaced during workspace consolidation.
 

@@ -174,6 +174,11 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
     /// The LLM gateway base of `apex`.
     fn gateway_base(&self, apex: &str) -> Result<String, String>;
+    /// A trusted host may grant its own loopback test transport. Application
+    /// environments retain the debug-only policy; no runtime input grants it.
+    fn allows_local_gateway(&self, base_url: &str) -> bool {
+        local_gateway_allowed(base_url)
+    }
     /// Keyless, model-specific provider pricing for a media quote.
     fn provider_prices<'a>(
         &'a self,
@@ -409,6 +414,13 @@ pub struct AssistantHost {
     /// The bundled document engines; found once, as they never change while
     /// the app runs.
     engines: OnceLock<Engines>,
+    /// Optional document isolation is warmed outside opening chat and ordinary
+    /// text turns: 0 = idle/retryable, 1 = pending, 2 = successfully prepared.
+    document_preparation: AtomicU64,
+    document_preparation_finished: tokio::sync::Notify,
+    #[cfg(test)]
+    document_preparation_barrier:
+        Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// The `sandbox-exec` officecli runs under, once a probe showed it works
     /// there (see `documents::create`).
     pub(super) office_sandbox: EngineSandbox,
@@ -548,7 +560,7 @@ pub fn scrub_detail(text: &str, secrets: &[String]) -> String {
 
 /// The runtime may talk to a plain `http://localhost:<port>` gateway (the
 /// `OFOX_USE_LOCAL` dev gateway, a test's mock) only in debug builds. A
-/// release build always sends `allowLocalGateway: false`.
+/// release application's default environment sends `allowLocalGateway: false`.
 pub(super) fn local_gateway_allowed(base_url: &str) -> bool {
     cfg!(debug_assertions) && is_local_gateway(base_url)
 }
@@ -835,6 +847,10 @@ impl AssistantHost {
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
+            document_preparation: AtomicU64::new(0),
+            document_preparation_finished: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            document_preparation_barrier: Mutex::default(),
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
             python_sandbox: EngineSandbox::default(),
@@ -1063,10 +1079,84 @@ impl AssistantHost {
             && !self.python_broken.load(Ordering::Relaxed)
     }
 
+    pub(super) fn start_document_preparation(self: &Arc<Self>) {
+        if self.ensure_accepting_runs().is_err()
+            || self.document_preparation.load(Ordering::SeqCst) != 0
+        {
+            return;
+        }
+        let engines = self.engines();
+        let needed = cfg!(windows) && engines.python.is_some() && engines.officecli.is_some();
+        #[cfg(test)]
+        let needed = needed || self.document_preparation_barrier.lock().unwrap().is_some();
+        if !needed
+            || self
+                .document_preparation
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let host = self.clone();
+        self.track(
+            format!("document-preparation-{}", super::types::id()),
+            async move {
+                host.prepare_document_engines().await;
+                // The runtime is machine-local. Publish only for the authority
+                // current when preparation ends, never the account that began it.
+                if let Ok(identity) = host.identity().await {
+                    let generation = host.generation();
+                    let _ = host.publish_runtime(&identity, generation).await;
+                }
+                let state = if host.office_sandbox.failed() || host.python_sandbox.failed() {
+                    0
+                } else {
+                    2
+                };
+                host.document_preparation.store(state, Ordering::SeqCst);
+                host.document_preparation_finished.notify_waiters();
+            },
+        );
+    }
+
+    /// Explicit document work shares the background proof; ordinary chat does
+    /// not wait. A failed proof is retried by a later operation, never a loop.
+    pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+        // A completed preparation can lose its native proof during a later
+        // cleanup/recheck. Explicit document work may reprove it, while an
+        // actual runner failure remains disabled for this process.
+        if !self.python_broken.load(Ordering::Relaxed) && !self.python_offered() {
+            let _ = self.document_preparation.compare_exchange(
+                2,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        self.start_document_preparation();
+        loop {
+            let finished = self.document_preparation_finished.notified();
+            if self.document_preparation.load(Ordering::SeqCst) != 1 {
+                return;
+            }
+            finished.await;
+        }
+    }
+
     /// Windows advertises model-code execution only after real functional and
     /// negative probes on the current complete runtime digest. The launcher
     /// independently rechecks that proof before each process creation.
     pub(super) async fn prepare_document_engines(&self) {
+        #[cfg(test)]
+        {
+            let barrier = self.document_preparation_barrier.lock().unwrap().clone();
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                release.notified().await;
+                #[cfg(windows)]
+                return;
+            }
+        }
         #[cfg(windows)]
         {
             let engines = self.engines();
@@ -4387,6 +4477,7 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        text_send_enabled: AtomicBool,
         local_home: Mutex<Option<PathBuf>>,
         local_mutation_fixture: Mutex<Option<Arc<LocalMutationFixture>>>,
         local_key_barrier: Mutex<Option<Arc<LocalKeyBarrier>>>,
@@ -4562,7 +4653,13 @@ mod tests {
             _: Option<&'a str>,
             _: &'a Admit<'a>,
         ) -> BoxFuture<'a, Result<String, String>> {
-            Box::pin(async { Err("assistant_key_unavailable".to_string()) })
+            Box::pin(async {
+                if self.text_send_enabled.load(Ordering::SeqCst) {
+                    Ok("synthetic-inert-runtime-key".into())
+                } else {
+                    Err("assistant_key_unavailable".to_string())
+                }
+            })
         }
         fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
             Box::pin(async { false })
@@ -4594,7 +4691,11 @@ mod tests {
             })
         }
         fn gateway_base(&self, _: &str) -> Result<String, String> {
-            Err("assistant_unknown_apex".into())
+            if self.text_send_enabled.load(Ordering::SeqCst) {
+                Ok("https://api.ofox.ai/v1".into())
+            } else {
+                Err("assistant_unknown_apex".into())
+            }
         }
         fn config_dir(&self) -> PathBuf {
             self.config.clone()
@@ -4634,6 +4735,7 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            text_send_enabled: AtomicBool::new(false),
             local_home: Mutex::new(None),
             local_mutation_fixture: Mutex::new(None),
             local_key_barrier: Mutex::new(None),
@@ -5160,8 +5262,13 @@ mod tests {
 
     #[test]
     fn the_runtime_may_use_a_local_gateway_only_in_debug_builds() {
+        let (_config, env, _host) = fixture_with_env();
         assert_eq!(
             local_gateway_allowed("http://localhost:8088"),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(
+            env.allows_local_gateway("http://localhost:8088"),
             cfg!(debug_assertions)
         );
         for refused in [
@@ -5176,6 +5283,7 @@ mod tests {
             "http://127.0.0.1:8088",
         ] {
             assert!(!local_gateway_allowed(refused), "{refused}");
+            assert!(!env.allows_local_gateway(refused), "{refused}");
         }
     }
 
@@ -7421,6 +7529,247 @@ while read line; do :; done"#,
         assert!(formats.contains(&json!("pdf")));
         assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
+    }
+    #[tokio::test]
+    async fn cache_first_bootstrap_returns_while_document_preparation_is_pending() {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let opening = tokio::spawn({
+            let host = host.clone();
+            async move { host.bootstrap_cached(false).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let boot = tokio::time::timeout(Duration::from_secs(1), opening)
+            .await
+            .expect("opening chat must not wait for document preparation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(boot["models"][0]["id"], "test/model");
+        assert!(!host.python_offered(), "unproven Python stays unavailable");
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.r#type != "runtime_state"));
+        let again = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .expect("a second bootstrap shares the pending probe")
+            .unwrap();
+        assert_eq!(again["models"][0]["id"], "test/model");
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let send = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic text only","presentationWorkflowVersion":1})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), host.send(send))
+            .await
+            .expect("ordinary text must not wait for document isolation")
+            .unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("tool/model", false)
+            .unwrap()
+            .session
+            .id;
+        let deck = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck","presentationWorkflowVersion":1,"presentationStyleId":"auto"})).unwrap();
+        let mut deck_send = tokio::spawn({
+            let host = host.clone();
+            async move { host.send(deck).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut deck_send)
+                .await
+                .is_err(),
+            "explicit document work waits for the shared proof"
+        );
+        host.generation.fetch_add(1, Ordering::SeqCst);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if env
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.r#type == "runtime_state")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion updates runtime capabilities without reopening chat");
+        let event = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.r#type == "runtime_state")
+            .cloned()
+            .unwrap();
+        assert_eq!(event.data["owner"], identity().owner);
+        assert_eq!(event.data["generation"], host.generation());
+        assert_eq!(deck_send.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "the probe is single flight"
+        );
+    }
+    #[tokio::test]
+    async fn legacy_full_auto_question_with_a_generated_deck_does_not_wait_for_document_preparation(
+    ) {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store
+            .create_with_capabilities(
+                "tool/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(
+                    serde_json::from_value(json!({
+                        "id": id(),
+                        "name": "earlier-deck.pptx",
+                        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "sizeBytes": 0,
+                        "status": "ready",
+                        "origin": "generated"
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        host.set_permission(super::local::PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        host.start_document_preparation();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let send = serde_json::from_value(json!({
+            "sessionId": sid,
+            "runId": id(),
+            "operationId": id(),
+            "text": "Are you using the hosted or self-hosted version?\n1. Hosted (app.fizzy.do)\n2. Self-hosted\n哪个是global？",
+            "presentationWorkflowVersion": 1
+        }))
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), host.send(send)).await;
+        let pending = host.document_preparation.load(Ordering::SeqCst) == 1;
+        release.notify_one();
+        assert!(
+            pending,
+            "the optional proof was not released by the question"
+        );
+        result
+            .expect("a historical generated deck must not make a plain Full Auto question wait")
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn explicit_document_preparation_retries_a_revoked_proof_but_not_a_broken_runner() {
+        let (_config, _env, host) = fixture_with_env();
+        // A completed preparation is not a permanent capability grant. This
+        // inert runtime has no current Python proof, as after invalidation.
+        host.document_preparation.store(2, Ordering::SeqCst);
+        assert!(!host.python_offered());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let mut preparing = tokio::spawn({
+            let host = host.clone();
+            async move { host.wait_document_preparation().await }
+        });
+        let started = tokio::time::timeout(Duration::from_secs(1), entered.notified()).await;
+        if started.is_err() {
+            release.notify_one();
+        }
+        started.expect("explicit document work must reprove a revoked capability");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut preparing)
+                .await
+                .is_err(),
+            "the retry waits for the same single-flight proof"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), preparing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !host.python_offered(),
+            "a wait cannot grant unproven Python"
+        );
+
+        host.python_broken.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(1), host.wait_document_preparation())
+            .await
+            .expect("a broken runner stays disabled without another probe");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "a permanently broken runner must not repeat the native proof"
+        );
     }
     #[cfg(windows)]
     #[tokio::test]

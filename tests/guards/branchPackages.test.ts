@@ -18,6 +18,45 @@ const probe = {
 };
 
 describe("branch installer packages", () => {
+  it("prepares an independent keyless early driver without bypassing installer gates", () => {
+    const workflow = readFileSync(
+      ".github/workflows/branch-packages.yml",
+      "utf8",
+    );
+    const early = workflow
+      .split("\n  early-parity-driver:\n")[1]
+      ?.split("\n  build:\n")[0];
+    const build = workflow.split("\n  build:\n")[1];
+    expect(early).toBeDefined();
+    expect(early).toContain("runs-on: windows-2022");
+    expect(early).not.toMatch(/\n\s+needs:/);
+    expect(early).toContain("uses: actions/cache/restore@v4");
+    expect(early).not.toContain("uses: actions/cache@v4");
+    expect(early).toContain("key: branch-packages-windows-x86_64-cargo-");
+    expect(early).toContain("pnpm install --frozen-lockfile");
+    expect(early).toContain("pnpm assistant:prepare");
+    expect(early).toContain("pnpm assistant:smoke");
+    expect(early).toContain(
+      "scripts/package-parity-driver.mjs --sha $env:GITHUB_SHA",
+    );
+    expect(early).toContain(
+      "$env:RUNNER_TEMP/assistant-parity-driver-early-windows-x86_64-",
+    );
+    expect(early).toContain(
+      "name: assistant-parity-driver-early-windows-x86_64-${{ github.sha }}",
+    );
+    expect(early).not.toMatch(
+      /--live|--root-authorize-host|OFOX_API_KEY|tauri build|branch-packages-\$\{\{/,
+    );
+    expect(build).toContain("needs: [verify, windows-probe]");
+    expect(build).toContain(
+      "name: assistant-parity-driver-windows-x86_64-${{ github.sha }}",
+    );
+    expect(build).toContain(
+      "name: branch-packages-${{ matrix.platform }}-${{ github.sha }}",
+    );
+  });
+
   it("builds only branch artifacts after CI and an independent exact-SHA Windows probe", () => {
     const workflow = readFileSync(
       ".github/workflows/branch-packages.yml",
@@ -59,9 +98,8 @@ describe("branch installer packages", () => {
   });
 
   it("waits for this commit's own completed Windows result", async () => {
-    const { waitForWindowsProbe } = await import(
-      "../../scripts/check-windows-probe.mjs"
-    );
+    const { waitForWindowsProbe } =
+      await import("../../scripts/check-windows-probe.mjs");
     const listRuns = vi
       .fn()
       .mockReturnValueOnce([])
@@ -84,9 +122,8 @@ describe("branch installer packages", () => {
   });
 
   it("fails promptly on the newest matching failed probe", async () => {
-    const { waitForWindowsProbe } = await import(
-      "../../scripts/check-windows-probe.mjs"
-    );
+    const { waitForWindowsProbe } =
+      await import("../../scripts/check-windows-probe.mjs");
     const sleep = vi.fn();
     await expect(
       waitForWindowsProbe(identity, {
@@ -99,9 +136,8 @@ describe("branch installer packages", () => {
   });
 
   it("allows a newer matching retry to finish before deciding failure", async () => {
-    const { waitForWindowsProbe } = await import(
-      "../../scripts/check-windows-probe.mjs"
-    );
+    const { waitForWindowsProbe } =
+      await import("../../scripts/check-windows-probe.mjs");
     const listRuns = vi
       .fn()
       .mockReturnValueOnce([
@@ -119,9 +155,8 @@ describe("branch installer packages", () => {
   });
 
   it("bounds waiting and never accepts missing evidence or API errors", async () => {
-    const { waitForWindowsProbe } = await import(
-      "../../scripts/check-windows-probe.mjs"
-    );
+    const { waitForWindowsProbe } =
+      await import("../../scripts/check-windows-probe.mjs");
     const listRuns = vi.fn(() => []);
     const sleep = vi.fn();
     await expect(

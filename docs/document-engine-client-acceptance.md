@@ -50,6 +50,19 @@ US$10，费用未知或预算不足即停止；不在这个离线脚本中调用
 临时 TestEnv 和应用的 LPAC 引擎；它不运行已安装的桌面窗口，不能代替上述 UI
 检查。此入口有开发环境前置，不属于一键离线探针。
 
+打包前必须用实际 release driver 执行 `parity_eval::release_gateway_preflight`：
+只访问固定本地假网关，使用合成凭据，验证两个区域的 Host→真实运行时接线，
+不读取专用 Key、不请求付费模型。`driver-provenance.json` 的
+`gatewayPreflight.status` 必须为 `passed`。只有临时 TestEnv 显式登记的严格
+`http://localhost:<port>` 获得本地网关权限；正式安装版仍沿用原 HTTPS 策略。
+这个前置检查不替代 LPAC、真实模型或安装版验收。
+
+同一次 Branch Packages 还会并行生成
+`assistant-parity-driver-early-windows-x86_64-<完整SHA>`，内容和 keyless
+前置门禁相同，供开发验收与完整 CI/Windows Probe 并行。它不是安装包，也不代表
+完整门禁已通过。正式桌面安装包仍等待 CI 和该 SHA 的独立 Windows Probe 成功；
+最终验收必须保留这些结果，不能凭 early driver 关闭任务。
+
 客户端需要 Git、pnpm 10.12.3 和现有 npm CLI。先 checkout 完整提交 SHA，
 保持 tracked 和 untracked 都干净。要在客户端免装 Rust、MSVC 和系统 Python，
 从该 SHA 的 Windows Probe 下载 `document-engine-acceptance-<完整SHA>`，

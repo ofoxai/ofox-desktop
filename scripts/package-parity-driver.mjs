@@ -1,14 +1,25 @@
-// CI-only developer acceptance artifact. Never executes a model task.
+// CI-only developer acceptance artifact. Fixed keyless gateway preflight only;
+// compilation and packaging never contact a paid model.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const binaryName = "assistant_host-parity.exe";
 const entryPoint = "parity_eval::one_guarded_task";
+const preflightEntryPoint = "parity_eval::release_gateway_preflight";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 // Git's environment overrides can redirect both status and build.rs to another
 // worktree/index even when cwd is correct. Use the actual checkout for both.
@@ -115,6 +126,72 @@ export function selectCargoDriver(output, expectedSha) {
   };
 }
 
+/** Exercise the actual release Host/runtime using fixed fake localhost replies. */
+export async function runGatewayPreflight({
+  executable,
+  checkout,
+  execute = execFileSync,
+  environment = process.env,
+}) {
+  const temporary = await realpath(os.tmpdir());
+  const home = await mkdtemp(path.join(temporary, "ofox-parity-preflight-"));
+  try {
+    const env = Object.fromEntries(
+      Object.entries(environment).filter(([name]) =>
+        ["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC"].includes(
+          name.toUpperCase(),
+        ),
+      ),
+    );
+    for (const name of [
+      "HOME",
+      "USERPROFILE",
+      "TEMP",
+      "TMP",
+      "TMPDIR",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "CC_SWITCH_TEST_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+    ])
+      env[name] = home;
+    const output = execute(
+      executable,
+      [
+        preflightEntryPoint,
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+      ],
+      {
+        cwd: checkout,
+        env,
+        encoding: "utf8",
+        timeout: 120_000,
+        maxBuffer: 1024 * 1024,
+        stdio: ["ignore", "pipe", "inherit"],
+      },
+    );
+    assert.match(
+      output,
+      /test result: ok\. 1 passed; 0 failed;/,
+      "keyless release gateway preflight did not run exactly one passing test",
+    );
+    return {
+      entryPoint: preflightEntryPoint,
+      status: "passed",
+      paidModelCalls: 0,
+    };
+  } finally {
+    assert.equal(path.dirname(await realpath(home)), temporary);
+    assert.ok(path.basename(home).startsWith("ofox-parity-preflight-"));
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
 const instructions = (
   sha,
 ) => `# Windows parity Host driver — developer acceptance only
@@ -124,6 +201,12 @@ This unsigned executable was compiled with Cargo's release profile. It does not
 include an installer, checkout or controller dependencies. No paid task ran while
 building this artifact. It uses the real AssistantHost with a temporary TestEnv
 and a guarded loopback gateway; it does not certify the installed desktop UI.
+
+The packager first ran the keyless release_gateway_preflight with fixed fake
+localhost replies for both Ofox regions. driver-provenance.json records that
+gate separately from paid model and native document acceptance. Only TestEnv's
+registered strict localhost gateways receive this grant; the installed release
+keeps its default HTTPS gateway policy.
 
 Prerequisites: Git, pnpm 10.12.3 and an existing npm CLI for dependency preparation.
 Rust/MSVC are not required on the acceptance client. Checkout this exact full SHA
@@ -158,7 +241,17 @@ export async function packageDriver({
   selected,
   expectedSha,
   toolchain,
+  gatewayPreflight,
 }) {
+  assert.deepEqual(
+    gatewayPreflight,
+    {
+      entryPoint: preflightEntryPoint,
+      status: "passed",
+      paidModelCalls: 0,
+    },
+    "a passing keyless release gateway preflight is required",
+  );
   const deps = await realpath(
     path.join(checkout, "src-tauri/target/release/deps"),
   );
@@ -203,6 +296,7 @@ export async function packageDriver({
     entryPoint,
     paidModelCalls: 0,
     installedUiAcceptance: "pending",
+    gatewayPreflight,
     rustc: toolchain.trim(),
     artifact: { file: binaryName, bytes: bytes.length, sha256: hash(bytes) },
   };
@@ -271,12 +365,17 @@ export async function main(argv = process.argv.slice(2)) {
     },
   );
   const selected = selectCargoDriver(output, expectedSha);
+  const gatewayPreflight = await runGatewayPreflight({
+    executable: selected.executable,
+    checkout: root,
+  });
   await packageDriver({
     checkout: root,
     output: options["--out"],
     selected,
     expectedSha,
     toolchain,
+    gatewayPreflight,
   });
 }
 

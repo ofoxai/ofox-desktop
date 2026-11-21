@@ -1,10 +1,7 @@
 //! Context estimates and explicitly requested, billed native compaction.
 use super::{
     catalog,
-    host::{
-        blocking, local_gateway_allowed, session_key, AssistantHost, RunControl, IDENTITY_CHANGED,
-        STATE,
-    },
+    host::{blocking, session_key, AssistantHost, RunControl, IDENTITY_CHANGED, STATE},
     requests::run_thinking_level,
     store,
     types::*,
@@ -145,7 +142,7 @@ impl AssistantHost {
         .await?;
         let thinking = run_thinking_level(&record.session, &model);
         let mut params = json!({"sessionId":sid,"runId":request.run_id,"operationId":request.operation_id,"sessionFile":native,
-            "model":model.for_runtime(thinking.is_some()),"apiKey":key,"apex":identity.apex,"baseUrl":base,"allowLocalGateway":local_gateway_allowed(&base),"proxy":proxy,"prompt":""});
+            "model":model.for_runtime(thinking.is_some()),"apiKey":key,"apex":identity.apex,"baseUrl":base,"allowLocalGateway":self.env.allows_local_gateway(&base),"proxy":proxy,"prompt":""});
         let object = params.as_object_mut().ok_or(STATE)?;
         if let Some(level) = thinking {
             object.insert("thinkingLevel".into(), json!(level));

@@ -3535,7 +3535,7 @@ impl AssistantHost {
     }
 
     async fn create_document(
-        &self,
+        self: &Arc<Self>,
         run: &Arc<RunControl>,
         media: &MediaRun,
         call_id: &str,
@@ -3568,8 +3568,11 @@ impl AssistantHost {
         let document = Document::new(args)?;
         // Refused before the document counts; a sandbox probe that fails
         // later (see `python_deck`) is refused the same way.
-        if matches!(document.content, Content::Python(_)) && !self.python_offered() {
-            return Err(refuse(FAILED, NO_PYTHON));
+        if matches!(document.content, Content::Python(_)) {
+            self.wait_document_preparation().await;
+            if !self.python_offered() {
+                return Err(refuse(FAILED, NO_PYTHON));
+            }
         }
         let doc_id = id();
         if preview {

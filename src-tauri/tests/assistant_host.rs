@@ -696,6 +696,21 @@ impl Environment for TestEnv {
             .ok_or_else(|| "assistant_unknown_apex".into())
     }
 
+    fn allows_local_gateway(&self, base_url: &str) -> bool {
+        let Some(port) = base_url.strip_prefix("http://localhost:") else {
+            return false;
+        };
+        port.parse::<u16>()
+            .is_ok_and(|number| number != 0 && number.to_string() == port)
+            && self
+                .state
+                .lock()
+                .unwrap()
+                .gateways
+                .values()
+                .any(|registered| registered == base_url)
+    }
+
     fn provider_prices<'a>(
         &'a self,
         _apex: &'a str,
