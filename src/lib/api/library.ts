@@ -257,6 +257,9 @@ export interface LibraryInventory {
     serviceHost?: string | null;
     sources: { sourceId: string; toolId: string; disabled?: boolean }[];
     matchedResourceIds: string[];
+    /** False when discovery has read only SKILL.md, without comparing payloads. */
+    contentVerified?: boolean;
+    manifestHash?: string;
     conflict: boolean;
     variant?: string | null;
     directory?: string | null;

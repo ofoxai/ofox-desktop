@@ -4,6 +4,135 @@ use super::*;
 use crate::services::library::skill_resource;
 use std::{fs, path::Path};
 
+pub(super) const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// Discovery reads only a bounded, regular SKILL.md, never the payload tree.
+pub(super) fn read_manifest(root: &Path) -> Result<String, AppError> {
+    use std::io::Read;
+    let path = root.join("SKILL.md");
+    let metadata = fs::symlink_metadata(&path).map_err(|_| error("skillUnreadable"))?;
+    if !metadata.is_file() {
+        return Err(error("skillUnreadable"));
+    }
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(error("inventoryLimit"));
+    }
+    let mut bytes = Vec::new();
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&path).map_err(|_| error("skillUnreadable"))?;
+    let opened = file.metadata().map_err(|_| error("skillUnreadable"))?;
+    if !same_manifest_file(&metadata, &opened) {
+        return Err(error("inventoryChanged"));
+    }
+    (&file)
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| error("skillUnreadable"))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(error("inventoryLimit"));
+    }
+    if bytes.len() as u64 != metadata.len()
+        || !same_manifest_file(
+            &metadata,
+            &file.metadata().map_err(|_| error("skillUnreadable"))?,
+        )
+        || !same_manifest_file(
+            &metadata,
+            &fs::symlink_metadata(&path).map_err(|_| error("skillUnreadable"))?,
+        )
+    {
+        return Err(error("inventoryChanged"));
+    }
+    String::from_utf8(bytes).map_err(|_| error("skillUnreadable"))
+}
+
+fn same_manifest_file(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return false;
+        }
+    }
+    after.is_file()
+        && before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+}
+
+pub(super) fn manifest_hash(candidate: &Candidate) -> Option<&str> {
+    candidate.proofs.iter().find_map(|proof| match proof {
+        Proof::SkillManifest { hash, .. } => Some(hash.as_str()),
+        _ => None,
+    })
+}
+
+/// Freeze and validate the full selected payload at the action boundary.
+/// Publication still compares this hash, so a concurrent payload edit is refused.
+pub(super) fn prepare(db: &Database, candidate: &Candidate) -> Result<Candidate, AppError> {
+    let mut prepared = candidate.clone();
+    let Definition::Skill { path, hash, .. } = &mut prepared.definition else {
+        return Ok(prepared);
+    };
+    let physical = path.canonicalize().map_err(|_| error("inventoryChanged"))?;
+    let content_hash = super::super::skill_artifact::tree_hash(&physical)?;
+    verify(db, candidate)?;
+    *hash = Some(content_hash.clone());
+    prepared.hash = content_hash.clone();
+    prepared.view.content_verified = Some(true);
+    prepared.proofs = candidate
+        .proofs
+        .iter()
+        .map(|proof| match proof {
+            Proof::SkillManifest { path, physical, .. } => Proof::Tree {
+                path: path.clone(),
+                physical: physical.clone(),
+                hash: content_hash.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect();
+    Ok(prepared)
+}
+
+/// Explicit comparisons may verify content, after a cheap manifest match.
+/// A manifest match alone never establishes that attached resources are equal.
+pub(super) fn matched_ids(db: &Database, candidate: &Candidate) -> Result<Vec<String>, AppError> {
+    let rows = db.get_all_installed_skills()?;
+    let Some(manifest) = manifest_hash(candidate) else {
+        return Ok(vec![]);
+    };
+    let possible: Vec<_> = rows
+        .values()
+        .filter(|row| {
+            row.content_hash
+                .as_deref()
+                .and_then(|hash| super::super::skill_artifact::path(hash).ok())
+                .and_then(|root| read_manifest(&root).ok())
+                .is_some_and(|content| io::fingerprint(Some(content.as_bytes())) == manifest)
+        })
+        .collect();
+    if possible.is_empty() {
+        return Ok(vec![]);
+    }
+    let Ok(prepared) = prepare(db, candidate) else {
+        return Ok(vec![]);
+    };
+    Ok(possible
+        .into_iter()
+        .filter(|row| {
+            row.content_hash.as_ref() == Some(&prepared.hash)
+                && skill_resource::artifact_for(db, &row.id).is_ok()
+        })
+        .map(|row| row.id.clone())
+        .collect())
+}
+
 /// One place a found skill was seen.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +176,7 @@ fn tree_paths(candidate: &Candidate) -> Vec<PathBuf> {
         .proofs
         .iter()
         .filter_map(|proof| match proof {
-            Proof::Tree { path, .. } => Some(path.clone()),
+            Proof::Tree { path, .. } | Proof::SkillManifest { path, .. } => Some(path.clone()),
             _ => None,
         })
         .collect();
@@ -242,6 +371,7 @@ pub fn remove_found(
         return Err(error("inventorySelectionInvalid"));
     }
     verify(db, &candidate).map_err(|_| error("inventoryChanged"))?;
+    let candidate = prepare(db, &candidate)?;
     let directory = candidate.view.directory.clone().unwrap_or_default();
     let snapshot = db.library_snapshot()?;
     let mut chosen: Vec<(SkillLocation, PathBuf)> = locations(&candidate, &directory, &snapshot)

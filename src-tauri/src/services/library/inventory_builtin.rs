@@ -200,10 +200,17 @@ pub fn match_builtin_recipes(
     let _io = crate::config_io::lock();
     super::super::catalog::verify_epoch(db, expected_epoch)?;
     validate(&kind, recipes)?;
-    let native = inventory_ticket_id
+    let mut native = inventory_ticket_id
         .map(|id| native_candidates(db, &kind, id, expected_epoch))
         .transpose()?
         .unwrap_or_default();
+    // Discovery deliberately leaves full content equality unknown. Only this
+    // explicit comparison verifies plausible matches against managed artifacts.
+    if kind == ResourceKind::Skills {
+        for candidate in &mut native {
+            candidate.view.matched_resource_ids = skills::matched_ids(db, candidate)?;
+        }
+    }
     let snapshot = db.library_snapshot()?;
     let skills = if kind == ResourceKind::Skills {
         db.get_all_installed_skills()?

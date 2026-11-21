@@ -152,7 +152,11 @@ fn source_path(candidate: &Candidate, source: &InventorySource) -> Option<PathBu
     match source.location.as_ref()? {
         SourceLocation::File(path) => Some(path.clone()),
         SourceLocation::Directory(root) => candidate.proofs.iter().find_map(|proof| match proof {
-            Proof::Tree { path, .. } if path.starts_with(root) => Some(path.clone()),
+            Proof::Tree { path, .. } | Proof::SkillManifest { path, .. }
+                if path.starts_with(root) =>
+            {
+                Some(path.clone())
+            }
             _ => None,
         }),
         SourceLocation::Inline | SourceLocation::Legacy => None,
@@ -235,12 +239,7 @@ fn matched_ids(db: &Database, candidate: &Candidate) -> Result<Vec<String>, AppE
                 .map(|row| row.id.clone())
                 .collect()
         }
-        Definition::Skill { hash, .. } => db
-            .get_all_installed_skills()?
-            .values()
-            .filter(|row| row.content_hash.as_ref() == Some(hash))
-            .map(|row| row.id.clone())
-            .collect(),
+        Definition::Skill { .. } => skills::matched_ids(db, candidate)?,
     })
 }
 /// Explicit detail is the only inventory response which includes complete filesystem locations.

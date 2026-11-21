@@ -57,9 +57,10 @@ All settings, mutations and credentials used by these tests are sandboxed.
 
 Checks for this integration run on macOS. Earlier installed Mac 1.5.2 and real
 DeepSeek acceptance established the input snapshot's behavior; they do not
-certify this new combined source. This integration is not installed and makes
-no additional paid model requests. Native Windows verification and the
-exact-commit Windows gate remain pending.
+certify this new combined source. The original merge checks did not install
+that tree or make paid model requests. The later local Mac installation below
+records its own source and preservation boundary. Native Windows verification
+and the exact-commit Windows gate remain pending.
 
 ## Mac verification (2026-11-20)
 
@@ -98,3 +99,79 @@ The local evidence includes `ofox-integration-rust-all.log`,
 working-tree files, staging and branch heads were checked against their backups;
 only completed build/dependency caches and superseded acceptance packages were
 removed to meet the build-space requirement.
+
+## Later local Mac installation (2026-11-20)
+
+The local integration worktree based on `8f585139`, including the subsequent
+shared-skill discovery fix, was packaged and installed as version 1.5.2. Its
+compiled source identity remains that base SHA with `OFOX_BUILD_SOURCE_CLEAN=false`;
+the private package receipt records the patch and production-file hashes. This
+is local installed-app evidence, not a clean-commit Windows receipt. No push,
+main update, tag or release was made.
+
+The original Developer ID, designated requirement and entitlements were
+retained. All four fresh arm64 executables passed signature checks, and the
+signed package's Node 22.23.4 / Pi 1.5.0, native canvas, PDF, search, OfficeCLI
+1.0.160 and Typst 0.15.1 smoke checks passed without paid model requests. The
+search smoke fixture was updated to acknowledge `beginSingleStep` before its
+single search; production plan admission was unchanged.
+
+The real resource library showed `academic-humanizer` and `bestpaper-writing`
+under existing Agent skills with their shared user paths. The oversized native
+skill remained rejected with a visible scan-limit warning. Neither writing
+skill was imported, enabled or modified during this check. A cold full-profile
+snapshot and one previous App were retained. The Assistant file tree, 62
+sessions, 57 native histories, 561 messages and 78 attachments were preserved
+exactly; user settings and resource definitions were unchanged apart from the
+explicitly verified automatic price, balance and usage-health cache refreshes.
+Duplicate package output was removed after acceptance.
+
+## Metadata-first Skills installation (2026-11-20)
+
+The later local 1.5.2 package supersedes that rejected-payload isolation build.
+Native discovery now reads bounded `SKILL.md` metadata and stops at each skill
+directory, following the discovery/action boundary used by CC Switch. It does
+not hash attached icons or scripts before displaying a skill. Import and
+explicit content comparison retain full payload and managed-artifact checks;
+listing a large skill does not establish that it fits the artifact import limit.
+
+The installed macOS arm64 App's main executable SHA-256 begins `19b95751`.
+Its four executable hashes match the package receipt, and strict signature
+verification, the original Developer ID, designated requirement and
+entitlements were retained. Production packaging used optimized release
+settings with debug assertions disabled. The signed bundle passed the Node
+22.23.4 / Pi 1.5.0, canvas, PDF, mocked search, OfficeCLI 1.0.160 and Typst
+0.15.1 smoke checks without paid model requests.
+
+Native computer-use inspection of the installed resource library confirmed
+`academic-humanizer`, `bestpaper-writing` and the formerly rejected
+`ppt-master` under existing Agent skills, with their correct native/shared
+sources. The old Claude Code and OpenCode scan-limit warnings were absent.
+No skill was imported, enabled, deleted or executed during acceptance. A
+separate read-only native discovery probe returned 100 entries in 106 ms using
+the real Claude and shared Agents skill roots with temporary application
+settings and database. This measures that probe, not full GUI startup or every
+agent's real configuration.
+
+Post-restart verification preserved the Assistant tree's 1,104 entries exactly,
+including 62 sessions, 57 native histories, 561 messages and 78 attachments.
+User settings, resource definitions and application paths were preserved;
+only explicitly checked account-balance and usage-health cache fields
+refreshed. Pricing settings were unchanged. All existing files in the three
+skill source trees were unchanged.
+The writing-skill tree gained only a Python bytecode cache file and its parent
+directory, with a header matching the unchanged source; the creating process
+was not attributed, and the cache was left in place. A fresh cold profile
+snapshot and the preceding signed App remain available for rollback.
+
+The final source checks passed TypeScript, frontend formatting, 3,406 frontend
+tests (1 skipped), Rust formatting, standard all-target Clippy with warnings
+denied, and 4,586 Rust tests across 23 targets (30 ignored). Rust tests reused
+the shared release target with package-only test profile overrides and a
+sandbox credential store; the installed production build did not use those
+overrides. Independent review findings were fixed and re-reviewed.
+
+The private receipt retains the source patch and production-file hashes for
+this uncommitted worktree based on `8f585139`. No push, main merge, tag or
+release was made. Windows native acceptance and the exact-commit Windows gate
+remain pending.

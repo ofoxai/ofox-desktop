@@ -83,6 +83,11 @@ pub struct InventoryEntry {
     pub service_host: Option<String>,
     pub sources: Vec<EntrySource>,
     pub matched_resource_ids: Vec<String>,
+    /// A metadata-only skill listing does not establish full content equality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_hash: Option<String>,
     pub conflict: bool,
     pub variant: Option<String>,
     pub directory: Option<String>,
@@ -130,7 +135,7 @@ enum Definition {
     },
     Skill {
         path: PathBuf,
-        hash: String,
+        hash: Option<String>,
         directory: String,
         description: Option<String>,
     },
@@ -148,6 +153,11 @@ enum Proof {
         hash: String,
     },
     Tree {
+        path: PathBuf,
+        physical: String,
+        hash: String,
+    },
+    SkillManifest {
         path: PathBuf,
         physical: String,
         hash: String,
@@ -212,12 +222,15 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
                         != super::mcp_resource::match_hash(spec).ok()
             }),
             Definition::Skill {
-                hash, directory, ..
+                hash: Some(hash),
+                directory,
+                ..
             } => skills.values().any(|row| {
                 (row.directory.eq_ignore_ascii_case(directory)
                     || row.name.eq_ignore_ascii_case(&candidate.view.name))
                     && row.content_hash.as_ref() != Some(hash)
             }),
+            Definition::Skill { hash: None, .. } => false,
         };
         if library_conflict {
             candidate.view.conflict = true;
@@ -240,11 +253,14 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
                 })
                 .map(|row| row.id.clone())
                 .collect(),
-            Definition::Skill { hash, .. } => skills
+            Definition::Skill {
+                hash: Some(hash), ..
+            } => skills
                 .values()
                 .filter(|row| row.content_hash.as_ref() == Some(hash))
                 .map(|row| row.id.clone())
                 .collect(),
+            Definition::Skill { hash: None, .. } => vec![],
         };
     }
     for candidate in &mut data.candidates {
@@ -263,7 +279,12 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
                     .view
                     .name
                     .eq_ignore_ascii_case(&data.candidates[index].view.name)
-                && row.hash != data.candidates[index].hash
+                && match (&row.definition, &data.candidates[index].definition) {
+                    (Definition::Skill { .. }, Definition::Skill { .. }) => {
+                        skills::manifest_hash(row) != skills::manifest_hash(&data.candidates[index])
+                    }
+                    _ => row.hash != data.candidates[index].hash,
+                }
         });
         if conflict {
             data.candidates[index].view.conflict = true;
@@ -277,7 +298,14 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
         .map(|entry| match &entry.definition {
             Definition::Instructions { content } => content.len(),
             Definition::Mcp { spec } => spec.to_string().len(),
-            Definition::Skill { path, .. } => path.as_os_str().len() + 256,
+            Definition::Skill {
+                path, description, ..
+            } => {
+                path.as_os_str().len()
+                    + description.as_ref().map_or(0, String::len)
+                    + entry.view.name.len()
+                    + 256
+            }
         })
         .sum::<usize>();
     if bytes > MAX_BYTES || data.candidates.len() > MAX_ENTRIES {
@@ -377,6 +405,18 @@ fn verify_proof(db: &Database, proof: &Proof) -> Result<(), AppError> {
                 return Err(error("inventoryChanged"));
             }
         }
+        Proof::SkillManifest {
+            path,
+            physical,
+            hash,
+        } => {
+            let canonical = path.canonicalize().map_err(|_| error("inventoryChanged"))?;
+            if canonical.to_string_lossy() != physical.as_str()
+                || io::fingerprint(Some(skills::read_manifest(&canonical)?.as_bytes())) != *hash
+            {
+                return Err(error("inventoryChanged"));
+            }
+        }
     }
     Ok(())
 }
@@ -435,7 +475,7 @@ fn import_one(db: &Database, candidate: &Candidate) -> Result<(String, bool), Ap
         }
         Definition::Skill {
             path,
-            hash,
+            hash: Some(hash),
             directory,
             description,
         } => {
@@ -485,6 +525,7 @@ fn import_one(db: &Database, candidate: &Candidate) -> Result<(String, bool), Ap
             )?;
             Ok((id, true))
         }
+        Definition::Skill { hash: None, .. } => Err(error("inventoryImportFailed")),
     }
 }
 fn variant_name(base: &str, hash: &str, max_bytes: usize) -> String {
@@ -549,9 +590,13 @@ pub fn import(
         } else {
             verify(db, candidate)
         };
+        let mut prepared = None;
         let (resource_id, status, reason) = match outcome {
             Err(_) => (None, "stale", Some("library.inventoryChanged".into())),
-            Ok(()) => match import_one(db, candidate) {
+            Ok(()) => match skills::prepare(db, candidate).and_then(|ready| {
+                prepared = Some(ready);
+                import_one(db, prepared.as_ref().unwrap())
+            }) {
                 Ok((id, created)) => {
                     if created {
                         result.imported += 1;
@@ -562,12 +607,15 @@ pub fn import(
                         None,
                     )
                 }
+                Err(AppError::Config(key)) if key == "library.skillTooLarge" => {
+                    (None, "failed", Some(key))
+                }
                 Err(_) => (None, "failed", Some("library.inventoryImportFailed".into())),
             },
         };
         let (adopted, not_adopted) = match (&resource_id, &candidate.definition) {
             (Some(resource), Definition::Skill { .. }) => {
-                skills::adopt_found(db, resource, candidate)
+                skills::adopt_found(db, resource, prepared.as_ref().unwrap_or(candidate))
             }
             _ => (vec![], vec![]),
         };

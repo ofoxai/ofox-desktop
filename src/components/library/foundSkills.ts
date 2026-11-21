@@ -47,7 +47,16 @@ export function foundSkills(
       const [entry, ...other] = [...group].sort(
         (a, b) => rank(a) - rank(b) || a.entryId.localeCompare(b.entryId),
       );
-      return [{ entry, others: [...new Set(other.flatMap(foundSkillAgents))] }];
+      const different = other.filter((row) =>
+        entry.contentVerified === false || row.contentVerified === false
+          ? entry.manifestHash &&
+            row.manifestHash &&
+            entry.manifestHash !== row.manifestHash
+          : true,
+      );
+      return [
+        { entry, others: [...new Set(different.flatMap(foundSkillAgents))] },
+      ];
     })
     .sort((a, b) => a.entry.name.localeCompare(b.entry.name));
 }
@@ -73,6 +82,7 @@ export function nativeSkillDifferences(
       entries
         .filter(
           (entry) =>
+            entry.contentVerified !== false &&
             (entry.directory ?? entry.name).toLowerCase() ===
               row.directory.toLowerCase() &&
             !entry.matchedResourceIds.includes(row.id),

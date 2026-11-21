@@ -130,8 +130,8 @@ This ledger preserves the accepted non-blocking findings from the implementation
 The local Mac/Windows assistant integration preserves task-scoped admission,
 plan progress and Host verification debt together. Its Mac checks do not certify
 the combined Windows installation or LPAC behavior. The native Windows gate and
-installed integration acceptance remain pending; no additional live model call
-or production installation is part of this merge. See the
+installed Windows acceptance remain pending. Subsequent local Mac installation
+acceptance is recorded below; it makes no additional live model call. See the
 [integration contract](mac-windows-assistant-integration.md).
 
 ## Assistant task progress after a model rejection
@@ -1849,3 +1849,54 @@ Claude cache-write duration is retained only when native identity, model, second
 The abandoned Assistant Vault prototype had a durable, context-bound pending marker before API-key creation. The current `ofox_api_keys` service does not persist that unknown-mint barrier: a timeout can leave an unidentified remote key, and a later explicit Send may create another. The old Vault/reset-setup UI is preserved as design evidence rather than transplanted into the current credential service. A future recovery design needs durable owner/region/issuer binding and an explicit, identity-fenced confirmation before clearing an uncertain attempt. No live keys were created or revoked for this consolidation.
 
 Calendar rollover, routing readiness and message-count regressions are verified through simulated UI and temporary native logs. New installed-app acceptance remains separate from these source checks; the installed release is not silently replaced during workspace consolidation.
+
+## Native skill discovery reads metadata before payload validation
+
+Native discovery now reads a bounded regular `SKILL.md` (at most 1 MiB) and stops
+descending once it finds a skill. Attached icons, scripts and other resources do
+not consume the discovery entry budget. Physical reader aliases reuse metadata;
+independent copies stay separate until full comparison on import. Metadata-only
+entries do not claim full content matches or payload differences. Different
+manifest bytes can establish a difference without reading attached resources.
+
+Discovery retains its 2,000-candidate, 10,000-discovery-entry and depth limits,
+with a 32 MiB aggregate metadata allowance. These are accounting limits, not a
+promise to bound every filesystem operation. Truncated/unreadable roots remain
+explicitly partial; oversized or unreadable manifests do not become empty roots.
+The former eight-failed-payload allowance is no longer relevant because payloads
+are not read during discovery. Existing managed-resource and receipt status
+checks may still inspect their payloads separately from native discovery.
+
+Import verifies manifest bytes, the canonical root target, routing, ticket and epoch, then
+freezes the selected current payload and retains the immutable artifact's full
+validation and checked publication. Resource edits after discovery are captured
+at import; manifest edits or canonical link-target changes invalidate the old selection. Replacing
+a directory at the same canonical path with the same manifest is captured as
+the current payload at import; discovery does not bind root inode identity. Large
+skills can therefore appear in discovery while still exceeding the separate
+artifact import limits. Removal validates the current selected payload before
+moving folders into backups; it does not promise an atomic hash CAS over all
+locations. No dependency or script is executed by discovery or import.
+
+Earlier installed macOS acceptance on 2026-11-20 verified both shared writing skills in
+the real resource library after replacing the local 1.5.2 App with the preceding
+rejected-payload isolation fix. It did not test this metadata-only change. The
+original signing identity and entitlements were retained. All 62 Assistant
+sessions, native history, attachments and user configuration were preserved;
+only the normal pricing, account-balance and usage-health caches refreshed. A
+full data snapshot and one rollback App were retained, and the duplicate build
+package was removed. No skill was imported or enabled during acceptance. Native
+Windows behavior and the exact-commit Windows gate remain unverified.
+
+The subsequent metadata-first 1.5.2 build (main executable digest prefix
+`19b95751`) was also installed locally. Native computer-use inspection confirmed
+both writing skills and the formerly rejected `ppt-master`, with neither old
+Claude Code nor OpenCode scan-limit warning. Discovery was verified; importing
+or executing these live skills was not attempted. In particular, listing
+`ppt-master` does not bypass the artifact's 10,000-entry/64 MiB import limits.
+The 106 ms / 100-entry native probe covered the real Claude and shared Agents
+roots under temporary application state, not full GUI startup. Session bytes
+and user settings were preserved, with only checked derived-cache refreshes;
+existing skill files were unchanged. A new writing-skill Python bytecode cache
+was retained without attributing its creator. Detailed checks and preservation
+scope are recorded in [the integration acceptance](mac-windows-assistant-integration.md#metadata-first-skills-installation-2026-11-20).

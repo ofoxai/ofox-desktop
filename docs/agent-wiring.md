@@ -54,6 +54,14 @@ Instructions preserve bytes outside the OFox markers. MCP patches owned leaves i
 
 Gemini respects an explicit app override, otherwise `GEMINI_CLI_HOME` plus `.gemini`; OpenCode uses its explicit app override or `XDG_CONFIG_HOME/opencode`. MCP auditing also includes OpenCode's three global files, `OPENCODE_CONFIG`, home `.opencode`, `OPENCODE_CONFIG_DIR` and inline content. Skills disclose shared and recursive readers, including Gemini/Codex `.agents`, OpenCode extra directories and Hermes configured paths. Dynamic routing keys and unresolved path references require a supported adapter and cannot be treated as literal paths. CLI/project overlays remain outside this global scope.
 
+Native Skills discovery reads only bounded `SKILL.md` metadata and stops at each
+skill directory. Full payload validation and content deduplication happen when
+the user imports a selection; discovery never equates independent copies from
+their manifests alone. Manifest or canonical link-target changes expire the selection;
+attached-resource changes are captured and checked at import. Explicit content
+comparisons also verify any matching managed artifact. Existing managed-state
+checks remain separate and may inspect their trees.
+
 New WebDAV snapshots contain only referenced immutable skill objects and the same captured DB snapshot. A distinct archive name/encoding makes old clients refuse before applying. Old flat archives restore available content into drafts, leaving legacy/native roots intact; they cannot recover hidden files or execution intent omitted by the old exporter. Full application SQL/WebDAV backups still include private legacy definitions and are not shareable resource packages.
 
 Source contracts were checked against [OpenCode v1.19.0](https://github.com/anomalyco/opencode/blob/v1.19.0/packages/opencode/src/config/config.ts) and [Hermes v0.22.0](https://github.com/NousResearch/hermes-agent/blob/v0.22.0/agent/skill_utils.py). Native execution, especially Windows, remains a separate acceptance gate.
