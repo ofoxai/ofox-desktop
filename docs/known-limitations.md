@@ -598,9 +598,11 @@ What the files and previews are:
   establish complete native conversion. See the [source coverage audit](superpowers/research/2026-11-10-ppt-source-coverage-audit.md).
   The new workflow performs license/capability/requirements filtering before
   model design judgment, freezes the chosen style and page plans, and preserves
-  manual selection precedence through queues and retries. Actual model selection
-  quality has not been accepted; offline tests exercise its contracts. Draft
-  choices do not persist across app restarts.
+  manual selection precedence through queues and retries. A source-scoped
+  candidate lookup carries the exact attachment version and ordered target pages
+  into the first freeze. A new eligible lookup can change the scope before that
+  freeze. Actual model selection quality has not been accepted. Offline tests
+  exercise its contracts. Draft choices do not persist across app restarts.
   Enabled is not quality acceptance. HTML source layouts are only partially
   mapped; no HTML-to-editable-PPTX converter is implemented. System font
   substitutions preserve type roles, but target-OS CJK metrics, visual parity

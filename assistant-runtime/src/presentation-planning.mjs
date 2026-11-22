@@ -771,6 +771,7 @@ export function createPresentationPlanning(runtime, context) {
     return null;
   let frozen = null;
   let freezing = false;
+  let candidateSourceKey;
   const shownPlan = () => ({
     status: "frozen",
     planId: frozen.planId,
@@ -832,6 +833,15 @@ export function createPresentationPlanning(runtime, context) {
           documents,
           args.source,
         );
+        if (result.status === "eligible") {
+          if (!frozen && !freezing)
+            candidateSourceKey = JSON.stringify(canonical(args.source ?? null));
+          if (args.source) {
+            result.source = clone(args.source);
+            result.nextAction +=
+              " Include this exact source, version and ordered pageNumbers in freeze_presentation_plan.";
+          }
+        }
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
           details: result,
@@ -845,6 +855,14 @@ export function createPresentationPlanning(runtime, context) {
       FREEZE_PRESENTATION_SCHEMA,
       async (given, signal, toolCallId) => {
         const args = clone(given);
+        if (
+          !frozen &&
+          candidateSourceKey !== undefined &&
+          candidateSourceKey !== JSON.stringify(canonical(args.source ?? null))
+        )
+          throw invalid(
+            "Freeze must match the source scope of the latest eligible candidates. Use the same attachment version and ordered pageNumbers for source edits. Get eligible candidates for the intended scope before changing it.",
+          );
         const candidates = checkedPlan(args, documents);
         const request = {
           ...clone(args),
