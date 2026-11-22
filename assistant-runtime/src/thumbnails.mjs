@@ -107,6 +107,201 @@ function setAttribute(tag, wanted, value) {
   );
 }
 
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const CHART_VIEWPORT_ATTRIBUTES = new Set([
+  "x",
+  "y",
+  "width",
+  "height",
+  "viewBox",
+  "preserveAspectRatio",
+]);
+const CHART_LABEL_ATTRIBUTES = new Set([
+  "x",
+  "y",
+  "fill",
+  "font-size",
+  "text-anchor",
+  "font-style",
+  "font-weight",
+]);
+const CHART_LINE_ATTRIBUTES = new Set([
+  "x1",
+  "y1",
+  "x2",
+  "y2",
+  "stroke",
+  "stroke-width",
+]);
+const OPAQUE_CHART_COLOR = /^#(?:[\da-f]{3}|[\da-f]{6})$/i;
+
+function chartNumber(attributes, name) {
+  const value = attributes[name]?.value ?? "";
+  return /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+}
+
+function chartViewport({ name, uri, attributes }, inChartGroup) {
+  if (
+    name !== "svg" ||
+    uri !== SVG_NAMESPACE ||
+    !inChartGroup ||
+    !Object.keys(attributes).every((name) =>
+      CHART_VIEWPORT_ATTRIBUTES.has(name),
+    ) ||
+    attributes.x?.value !== "0" ||
+    attributes.preserveAspectRatio?.value !== "xMidYMid meet" ||
+    !["width", "height"].every((axis) => {
+      const size = chartNumber(attributes, axis);
+      return size > 0 && size <= 8192;
+    })
+  )
+    return null;
+  const viewBox = attributes.viewBox?.value.match(/^0 0 (\d+) (\d+)$/);
+  if (!viewBox) return null;
+  const [width, height] = viewBox.slice(1).map(Number);
+  if (![width, height].every((size) => size > 0 && size <= 8192)) return null;
+  return { width, height, lines: [], labels: [] };
+}
+
+function axisSpacing(chart) {
+  const { width, height, labels, lines } = chart;
+  const titles = labels.filter(
+    ({ x, y }) => x === width / 2 && y === height - 2,
+  );
+  if (titles.length !== 1) return null;
+  const title = titles[0];
+  const horizontalRows = new Set(
+    lines
+      .filter(([x1, y1, x2, y2]) => y1 === y2 && x1 < x2)
+      .map((line) => line[1]),
+  );
+  // OfficeCLI draws a four-unit tick and places its label 16 units from
+  // the horizontal axis. Use both strokes to distinguish actual tick labels
+  // from series labels or ordinary text near the bottom of a nested SVG.
+  const ticks = new Set(
+    lines
+      .filter(
+        ([x1, y1, x2, y2]) =>
+          x1 === x2 && y2 === y1 + 4 && horizontalRows.has(y1),
+      )
+      .map(([x, y]) => `${x},${y + 16}`),
+  );
+  let titleY = title.y;
+  for (const tick of labels) {
+    if (tick.y < title.y && ticks.has(`${tick.x},${tick.y}`)) {
+      titleY = Math.max(
+        titleY,
+        tick.y + Math.ceil(Math.max(title.size, tick.size)) + 2,
+      );
+    }
+  }
+  if (titleY === title.y) return null;
+  const viewHeight = Math.max(height, titleY + Math.ceil(title.size / 4));
+  return viewHeight <= 8192 ? { title, titleY, viewHeight } : null;
+}
+
+// The pinned OfficeCLI chart viewport can place the bottom title on the
+// same ink row as the ticks. Reserve space inside the chart's existing
+// frame before rasterization. The native slide and plot coordinates stay intact.
+function withChartAxisSpacing(source) {
+  if (!source.includes("xMidYMid meet")) return source;
+  const parser = new SaxesParser({ xmlns: true });
+  const stack = [];
+  const edits = [];
+  let parseFailed = false;
+  parser.on("error", () => {
+    parseFailed = true;
+  });
+  parser.on("opentag", (tag) => {
+    const parent = stack.at(-1);
+    if (parent?.label) parent.label = null;
+    const end = parser.position;
+    const isChartGroup =
+      tag.name === "g" &&
+      tag.uri === SVG_NAMESPACE &&
+      /^translate\([^()]+\)$/.test(tag.attributes.transform?.value ?? "") &&
+      Object.keys(tag.attributes).length === 1;
+    const node = {
+      isChartGroup,
+      start: source.lastIndexOf("<", end - 1),
+      end,
+      chart: chartViewport(tag, parent?.isChartGroup),
+    };
+    if (parent?.chart && tag.uri === SVG_NAMESPACE) {
+      const value = (name) => chartNumber(tag.attributes, name);
+      if (
+        tag.name === "line" &&
+        OPAQUE_CHART_COLOR.test(tag.attributes.stroke?.value ?? "") &&
+        value("stroke-width") > 0 &&
+        Object.keys(tag.attributes).every((name) =>
+          CHART_LINE_ATTRIBUTES.has(name),
+        )
+      ) {
+        const line = ["x1", "y1", "x2", "y2"].map(value);
+        if (line.every(Number.isFinite)) parent.chart.lines.push(line);
+      }
+      if (
+        tag.name === "text" &&
+        tag.attributes["text-anchor"]?.value === "middle" &&
+        OPAQUE_CHART_COLOR.test(tag.attributes.fill?.value ?? "") &&
+        Object.keys(tag.attributes).every((name) =>
+          CHART_LABEL_ATTRIBUTES.has(name),
+        )
+      ) {
+        const [x, y, size] = ["x", "y", "font-size"].map(value);
+        if (
+          [x, y, size].every(Number.isFinite) &&
+          size > 0 &&
+          size <= parent.chart.height
+        ) {
+          node.label = { x, y, size, start: node.start, end };
+        }
+      }
+    }
+    stack.push(node);
+  });
+  parser.on("text", (value) => {
+    const label = stack.at(-1)?.label;
+    if (label && value.trim()) label.hasText = true;
+  });
+  parser.on("closetag", () => {
+    const node = stack.pop();
+    if (node?.label?.hasText) stack.at(-1)?.chart?.labels.push(node.label);
+    if (!node?.chart) return;
+    const spacing = axisSpacing(node.chart);
+    if (!spacing) return;
+    edits.push(
+      {
+        start: node.start,
+        end: node.end,
+        name: "viewBox",
+        value: `0 0 ${node.chart.width} ${spacing.viewHeight}`,
+      },
+      {
+        start: spacing.title.start,
+        end: spacing.title.end,
+        name: "y",
+        value: String(spacing.titleY),
+      },
+    );
+  });
+  parser.write(source).close();
+  if (parseFailed || !edits.length) return source;
+  const parts = [];
+  let cursor = 0;
+  for (const { start, end, name, value } of edits.sort(
+    (a, b) => a.start - b.start,
+  )) {
+    parts.push(
+      source.slice(cursor, start),
+      setAttribute(source.slice(start, end), name, value),
+    );
+    cursor = end;
+  }
+  parts.push(source.slice(cursor));
+  return parts.join("");
+}
+
 export function withTextFonts(source) {
   const records = [],
     stack = [];
@@ -186,7 +381,7 @@ async function loadSlide(bytes) {
   const { loadImage } = await import("@napi-rs/canvas");
   const source = Buffer.from(bytes).toString("utf8");
   const text = slideText(source);
-  const drawn = withTextFonts(source);
+  const drawn = withTextFonts(withChartAxisSpacing(source));
   return {
     image: await loadImage(drawn === source ? bytes : Buffer.from(drawn)),
     text,

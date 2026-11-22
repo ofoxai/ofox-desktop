@@ -649,6 +649,10 @@ What the files and previews are:
   serves only validated JPEG pages within the current attachment/session/account
   authority. Legacy attachments and failed rasterization keep save/open working
   without a preview. Word and Excel have no page preview.
+- The shared rasterizer reserves room for overlapping bottom-axis titles in
+  OfficeCLI charts whose axis and tick geometry it recognizes. This applies to
+  file-workspace pages, generated previews and model overviews. Native chart
+  layout and editing are verified with the exported presentation in Office.
 - OfficeCLI does not faithfully render native OMML. Math preview uses a temporary
   copy selecting the equation's existing compatibility fallback; the delivered
   PPTX retains native OMML. A preview of a fallback cannot establish editable
