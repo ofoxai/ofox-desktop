@@ -102,6 +102,7 @@ export function AssistantFileWorkspace({
 }) {
   const { t } = useTranslation();
   const root = useRef<HTMLDivElement>(null);
+  const chatPane = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const focusOpener = useRef(false);
   const focusVersion = useRef(false);
@@ -126,18 +127,33 @@ export function AssistantFileWorkspace({
   const id = useId();
   const selected = files.find((file) => file.id === selectedId);
   const open = Boolean(active && authority && selected);
+  const chatHidden = open && ((narrow && tab === "files") || expanded);
+  const previousView = useRef({ open, chatHidden });
   useLayoutEffect(() => {
-    if (!open && focusOpener.current) {
+    if (open) return;
+    carryHeadingFocus.current = false;
+    focusVersion.current = false;
+    if (focusOpener.current) {
       focusOpener.current = false;
       opener.current?.focus();
     }
   }, [open]);
   useLayoutEffect(() => {
-    if (open && focusVersion.current) {
+    const previous = previousView.current;
+    previousView.current = { open, chatHidden };
+    if (!open) return;
+    const focused = document.activeElement;
+    // The Files button disappears on open, and a layout change can hide chat.
+    const leavingOpener =
+      !previous.open || (chatHidden && !previous.chatHidden);
+    const focusNeedsHandoff =
+      focused === document.body ||
+      (chatHidden && chatPane.current?.contains(focused));
+    if (focusVersion.current || (leavingOpener && focusNeedsHandoff)) {
       focusVersion.current = false;
       fileHeading.current?.focus();
     }
-  }, [open, selectedId, expectedVersion]);
+  }, [open, chatHidden, selectedId, expectedVersion]);
   useLayoutEffect(() => {
     const node = root.current;
     if (!node) return;
@@ -288,9 +304,10 @@ export function AssistantFileWorkspace({
       )}
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
+          ref={chatPane}
           className={cn(
             "flex min-h-0 min-w-0 flex-1 flex-col",
-            open && ((narrow && tab === "files") || expanded) && "hidden",
+            chatHidden && "hidden",
           )}
           style={
             open && !narrow && !expanded
