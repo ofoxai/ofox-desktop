@@ -1589,7 +1589,29 @@ async fn public_runner_refuses_unproven_or_changed_runtime_before_launch() {
         .get_or_init(Default::default)
         .lock()
         .unwrap()
-        .insert(cached.source.clone(), cached.digest);
+        .insert(cached.source.clone(), cached.digest.clone());
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir(other.path().join("node")).unwrap();
+    let other_node = other.path().join("node/node.exe");
+    fs::copy(&node, &other_node).unwrap();
+    let other_cache = cache_runtime(other.path(), &cap, &current_user().unwrap()).unwrap();
+    assert_eq!(other_cache.digest, cached.digest);
+    assert_ne!(other_cache.source, cached.source);
+    assert_eq!(
+        run_windows_engine_limited(
+            &other_node,
+            &[],
+            task.path(),
+            &home,
+            other.path(),
+            Duration::from_secs(1),
+            1024,
+        )
+        .await
+        .unwrap_err(),
+        "assistant_document_sandbox_unproven_runtime",
+        "identical bytes cannot borrow another runtime path's proof"
+    );
     fs::write(
         &node,
         b"changed synthetic executable; must still never launch",

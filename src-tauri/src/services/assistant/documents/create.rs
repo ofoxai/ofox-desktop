@@ -2916,8 +2916,131 @@ async fn view_report(work: &Work<'_>, file: &str) -> Option<Value> {
         .filter(|report| data(report)["issues"].is_array())
 }
 
-/// The shapes a fix round looks up (one `get` each); see [`fix_layout`].
+/// The most shapes a fix round looks up; see [`fix_layout`].
 const MAX_GEOMETRY_LOOKUPS: usize = 40;
+/// OfficeCLI spills batch output above 8 KiB. Small groups keep ordinary
+/// shape reports inline while bounding the number of reads in each launch.
+const GEOMETRY_BATCH_SIZE: usize = 4;
+
+fn geometry_path(issue: &fix::ViewIssue) -> Option<&str> {
+    (issue.needs_geometry() && names_an_element(&issue.path, false, &[]))
+        .then_some(issue.path.as_str())
+}
+
+fn inline_geometry(report: &Value, paths: &[&str], places: &mut [Option<fix::Geometry>]) {
+    let envelope = data(report);
+    if report["success"] == false
+        || report.get("outputFile").is_some()
+        || envelope.get("outputFile").is_some()
+        || envelope["atomicRolledBack"] == true
+        || envelope["summary"]["atomicRolledBack"] == true
+    {
+        return;
+    }
+    let Some(results) = envelope["results"].as_array() else {
+        return;
+    };
+    if results.len() > paths.len() {
+        return;
+    }
+    for (index, (path, place)) in paths.iter().zip(places).enumerate() {
+        let mut items = results
+            .iter()
+            .filter(|item| item["index"].as_u64() == Some(index as u64));
+        let Some(item) = items.next() else { continue };
+        if items.next().is_some() || item["success"] != true {
+            continue;
+        }
+        let output = &item["output"];
+        if output["matches"] == 1
+            && output["results"]
+                .as_array()
+                .is_some_and(|rows| rows.len() == 1 && rows[0]["path"].as_str() == Some(*path))
+        {
+            *place = fix::geometry(&json!({"data": output}));
+        }
+    }
+}
+
+/// Even a batch of reads opens an editable handler. Give each batch a fresh
+/// deck and private home in its own working directory. The directory sits
+/// under the document's output so run cleanup owns it after cancellation.
+async fn inspect_geometry(
+    work: &Work<'_>,
+    file: &str,
+    paths: &[&str],
+    places: &mut [Option<fix::Geometry>],
+) -> Result<(), String> {
+    const INSPECTION: &str = "inspection.pptx";
+    const INPUT: &str = "get.json";
+    for (paths, places) in paths
+        .chunks(GEOMETRY_BATCH_SIZE)
+        .zip(places.chunks_mut(GEOMETRY_BATCH_SIZE))
+    {
+        if paths.len() < 2 {
+            break;
+        }
+        check_deadline(work.deadline)?;
+        let commands: Vec<Value> = paths
+            .iter()
+            .map(|path| json!({"command": "get", "path": path, "depth": 0}))
+            .collect();
+        let json = serde_json::to_vec(&commands).map_err(|_| PROTOCOL)?;
+        let (parent, source) = (work.dir.to_path_buf(), work.dir.join(file));
+        let copy = blocking(move || {
+            let temp = tempfile::Builder::new()
+                .prefix("geometry-")
+                .tempdir_in(parent)
+                .map_err(|_| unwritable())?;
+            let home = temp.path().join(HOME);
+            crate::config::create_private_dir_all(&home).map_err(|_| unwritable())?;
+            take_deck(&source, &temp.path().join(INSPECTION))?;
+            write_new(&temp.path().join(INPUT), &json)?;
+            Ok((temp, home))
+        })
+        .await;
+        check_deadline(work.deadline)?;
+        let Ok((temp, home)) = copy else {
+            break;
+        };
+        let inspection = Work {
+            dir: temp.path(),
+            home: &home,
+            ..*work
+        };
+        let report = inspection
+            .report(&["batch", INSPECTION, "--input", INPUT, "--json"])
+            .await;
+        check_deadline(work.deadline)?;
+        if let Some(report) = report {
+            inline_geometry(&report, paths, places);
+        }
+    }
+    Ok(())
+}
+
+async fn layout_geometry(
+    work: &Work<'_>,
+    file: &str,
+    paths: &[&str],
+) -> Result<Vec<Option<fix::Geometry>>, String> {
+    let mut places = vec![None; paths.len()];
+    if paths.len() > 1 {
+        inspect_geometry(work, file, paths, &mut places).await?;
+    }
+    for (path, place) in paths.iter().zip(&mut places) {
+        if place.is_none() {
+            check_deadline(work.deadline)?;
+            *place = work
+                .report(&["get", file, path, "--json"])
+                .await
+                .as_ref()
+                .and_then(fix::geometry);
+        }
+    }
+    check_deadline(work.deadline)?;
+    Ok(places)
+}
 
 /// A deck's overflowing text, shapes past the slide's edge and dim text,
 /// fixed by the host (see [`fix`]) and checked again, for at most
@@ -2952,29 +3075,29 @@ async fn fix_layout(
             .iter()
             .filter_map(fix::parse_issue)
             .collect();
-        // One `get` a shape a round, of at most MAX_GEOMETRY_LOOKUPS shapes,
-        // and only of a path the batch checks would let a fix name.
-        let mut places: Vec<(&str, Option<fix::Geometry>)> = vec![];
+        let mut paths = vec![];
+        for path in found.iter().filter_map(geometry_path) {
+            if !paths.contains(&path) {
+                paths.push(path);
+                if paths.len() == MAX_GEOMETRY_LOOKUPS {
+                    break;
+                }
+            }
+        }
+        let places = layout_geometry(work, file, &paths).await?;
         let mut fixes = vec![];
         for issue in &found {
-            let place = match places.iter().find(|(path, _)| *path == issue.path) {
-                Some((_, place)) => *place,
-                None if issue.needs_geometry() && names_an_element(&issue.path, false, &[]) => {
-                    if places.len() == MAX_GEOMETRY_LOOKUPS {
-                        // Left as it is: it stays a warning.
+            let place = match geometry_path(issue) {
+                Some(path) => {
+                    let Some(index) = paths.iter().position(|found| *found == path) else {
+                        // The round reached its lookup limit. Keep the warning.
                         continue;
-                    }
-                    let place = work
-                        .report(&["get", file, &issue.path, "--json"])
-                        .await
-                        .as_ref()
-                        .and_then(fix::geometry);
-                    places.push((&issue.path, place));
-                    place
+                    };
+                    places[index].as_ref()
                 }
                 None => None,
             };
-            fixes.extend(fix::fix_for(issue, place.as_ref()));
+            fixes.extend(fix::fix_for(issue, place));
         }
         if fixes.is_empty() {
             break;
@@ -3944,7 +4067,14 @@ impl AssistantHost {
             timeout: PYTHON_TIMEOUT,
             deadline: Some(run.deadline),
         };
-        let sandbox = self.python_engine(&python).await;
+        // Windows readiness proves both engines in the same runtime. The
+        // Python launcher still verifies the exact bytes and admission
+        // independently before starting its LPAC job.
+        let sandbox = if cfg!(windows) && office.sandbox == Some(runtime.as_path()) {
+            Some(runtime.clone())
+        } else {
+            self.python_engine(&python).await
+        };
         check_deadline(Some(run.deadline))?;
         let sandbox = sandbox.ok_or_else(no_python)?;
         python.sandbox = Some(&sandbox);
@@ -4793,6 +4923,210 @@ esac"#
 
     /// officecli 1.0.160's `get --json` of that box.
     const GEOMETRY: &str = r#"{"success":true,"data":{"matches":1,"results":[{"path":"/slide[1]/shape[@id=100000]","type":"textbox","format":{"name":"Body","id":100000,"x":"2.33cm","y":"5.2cm","width":"14cm","height":"2cm","size":"20pt"}}]}}"#;
+
+    const GEOMETRY_BODY: &str = "/slide[1]/shape[@id=100000]";
+    const GEOMETRY_EDGE: &str = "/slide[2]/shape[@id=100001]";
+    const GEOMETRY_CONTRAST: &str = "/slide[2]/shape[@id=100002]";
+
+    fn layout_batch_item(index: usize, path: &str, y: &str, width: &str) -> Value {
+        let output = json!({"matches": 1, "results": [{
+            "path": path, "type": "textbox",
+            "format": {"x": "2.33cm", "y": y, "width": width, "height": "2cm"},
+        }]});
+        json!({"index": index, "success": true, "output": output})
+    }
+
+    fn layout_batch_report(body: &str) -> Value {
+        // Report the second command first. Its geometry would give a different
+        // fix if assigned to the first one by array position.
+        json!({"results": [
+            layout_batch_item(1, GEOMETRY_EDGE, "15cm", "6cm"),
+            layout_batch_item(0, body, "5.2cm", "14cm"),
+        ], "summary": {"total": 2, "executed": 2, "succeeded": 2, "failed": 0, "skipped": 0}})
+    }
+
+    async fn layout_inspection_round(
+        reports: &[Value],
+        extra_paths: &[&str],
+        trace: &Path,
+    ) -> Vec<String> {
+        let mut issues = json!({"success": true, "data": {"issues": [
+            {"path": GEOMETRY_BODY, "message": OVERFLOW_MESSAGE},
+            {"path": GEOMETRY_CONTRAST, "subtype": "low_contrast", "message": "Low contrast"},
+            {"path": GEOMETRY_EDGE, "message": "Text shape extends 2.1cm past slide right edge"},
+            {"path": GEOMETRY_BODY, "message": "Text shape extends 2.1cm past slide bottom edge"},
+        ]}});
+        issues["data"]["issues"]
+            .as_array_mut()
+            .unwrap()
+            .extend(extra_paths.iter().map(
+            |path| json!({"path": path, "message": "Text shape extends 2.1cm past slide top edge"}),
+        ));
+        let trace_shell = trace.to_string_lossy().replace('\'', "'\"'\"'");
+        let geometry = serde_json::from_str::<Value>(GEOMETRY).unwrap();
+        let mut edge = geometry.clone();
+        edge["data"]["results"][0]["path"] = json!(GEOMETRY_EDGE);
+        edge["data"]["results"][0]["format"]["width"] = json!("6cm");
+        let reports: Vec<String> = reports.iter().map(Value::to_string).collect();
+        let reports: Vec<&str> = reports.iter().map(String::as_str).collect();
+        let report_counter = format!("'{trace_shell}/report.calls'");
+        let print_report = by_call(&report_counter, &reports);
+        let batch = format!(
+            r#"if grep -q '"command"[[:space:]]*:[[:space:]]*"get"' "$4"; then
+    printf '%s\n' inspect >> '{trace_shell}/calls'
+    inspection=$(cat {report_counter} 2>/dev/null || echo 0)
+    pwd -P > '{trace_shell}/inspection-'"$inspection"'.dir'
+    cp "$4" '{trace_shell}/inspection-'"$inspection"'.json'
+    if ! cmp -s "$2" '{trace_shell}/original.pptx'; then
+      printf '%s\n' dirty >> '{trace_shell}/calls'
+      exit 73
+    fi
+    printf 'inspection-only' >> "$2"
+    {print_report}
+  else
+    cmp "$2" '{trace_shell}/original.pptx' || exit 71
+    printf '%s\n' fix >> '{trace_shell}/calls'
+    {FIX_APPLIED}
+  fi"#
+        );
+        let script = officecli_fixing(
+            &[&issues.to_string(), NO_ISSUES],
+            r#"{"slides":2}"#,
+            GEOMETRY,
+            &batch,
+            &[VALID],
+        )
+        .replace(
+            r#"printf 'PK\003\004stub' > "$2""#,
+            &format!(
+                r#"printf 'PK\003\004stub' > "$2"; cp "$2" '{trace_shell}/original.pptx'; pwd -P > '{trace_shell}/original-dir'"#
+            ),
+        )
+        .replace(
+            &format!("get) echo \"$3\" >> gets.log; cat <<'JSON'\n{GEOMETRY}\nJSON\n;;"),
+            &format!(
+                r#"get) printf '%s\n' "$3" >> '{trace_shell}/calls'
+  if [ "$3" = '{GEOMETRY_EDGE}' ]; then
+    cat <<'JSON'
+{edge}
+JSON
+  else
+    cat <<'JSON'
+{geometry}
+JSON
+  fi ;;"#
+            ),
+        );
+        let (_fixture, result) = made_deck(&script).await;
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(result["fixed"], 4 + extra_paths.len(), "{result}");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            std::fs::read(trace.join("original.pptx")).unwrap()
+        );
+        let mut fixes = vec![
+            json!({"command": "set", "path": GEOMETRY_BODY, "props": {"height": "6.2cm"}}),
+            json!({"command": "set", "path": GEOMETRY_CONTRAST, "props": {"color": "FFFFFF"}}),
+            json!({"command": "set", "path": GEOMETRY_EDGE, "props": {"x": "26.597cm"}}),
+            json!({"command": "set", "path": GEOMETRY_BODY, "props": {"y": "15.78cm"}}),
+        ];
+        fixes.extend(
+            extra_paths
+                .iter()
+                .map(|path| json!({"command": "set", "path": path, "props": {"y": "1.27cm"}})),
+        );
+        assert_eq!(fix_commands(&file, "fix-1.json"), Value::Array(fixes));
+        let calls = std::fs::read_to_string(trace.join("calls")).unwrap();
+        let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
+        assert!(!calls.iter().any(|call| call == "dirty"), "{calls:?}");
+        assert_eq!(
+            calls.get(..reports.len()),
+            Some(vec!["inspect".to_owned(); reports.len()].as_slice()),
+            "{calls:?}"
+        );
+        assert_eq!(calls.last().map(String::as_str), Some("fix"), "{calls:?}");
+        let original_dir = std::fs::read_to_string(trace.join("original-dir")).unwrap();
+        let paths = [GEOMETRY_BODY, GEOMETRY_EDGE]
+            .into_iter()
+            .chain(extra_paths.iter().copied())
+            .collect::<Vec<_>>();
+        let mut inspection_dirs = vec![];
+        for (chunk, paths) in paths.chunks(GEOMETRY_BATCH_SIZE).enumerate() {
+            let dir =
+                std::fs::read_to_string(trace.join(format!("inspection-{chunk}.dir"))).unwrap();
+            let dir = dir.trim();
+            assert_eq!(
+                dir.rsplit_once('/').map(|(parent, _)| parent),
+                Some(original_dir.trim()),
+                "{dir}"
+            );
+            assert!(
+                !inspection_dirs.iter().any(|previous| previous == dir),
+                "{dir}"
+            );
+            inspection_dirs.push(dir.to_owned());
+            let requests: Value = serde_json::from_slice(
+                &std::fs::read(trace.join(format!("inspection-{chunk}.json"))).unwrap(),
+            )
+            .unwrap();
+            let expected = paths
+                .iter()
+                .map(|path| json!({"command": "get", "path": path, "depth": 0}))
+                .collect();
+            assert_eq!(requests, Value::Array(expected));
+        }
+        calls[reports.len()..calls.len() - 1].to_vec()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn batched_layout_geometry_keeps_replay_order_and_the_deck_bytes() {
+        let trace = tempfile::tempdir().unwrap();
+        let lookups =
+            layout_inspection_round(&[layout_batch_report(GEOMETRY_BODY)], &[], trace.path()).await;
+        assert!(lookups.is_empty(), "{lookups:?}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn batched_layout_geometry_gives_each_chunk_a_fresh_snapshot() {
+        let trace = tempfile::tempdir().unwrap();
+        let extra_paths = [
+            "/slide[2]/shape[@id=100003]",
+            "/slide[2]/shape[@id=100004]",
+            "/slide[2]/shape[@id=100005]",
+            "/slide[2]/shape[@id=100006]",
+        ];
+        let mut first = layout_batch_report(GEOMETRY_BODY);
+        first["results"].as_array_mut().unwrap().extend([
+            layout_batch_item(2, extra_paths[0], "5cm", "10cm"),
+            layout_batch_item(3, extra_paths[1], "5cm", "10cm"),
+        ]);
+        let second = json!({"results": [
+            layout_batch_item(0, extra_paths[2], "5cm", "10cm"),
+            layout_batch_item(1, extra_paths[3], "5cm", "10cm"),
+        ]});
+        let lookups = layout_inspection_round(&[first, second], &extra_paths, trace.path()).await;
+        assert!(lookups.is_empty(), "{lookups:?}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn batched_layout_geometry_falls_back_for_aliases_and_spills() {
+        let trace = tempfile::tempdir().unwrap();
+        let alias = layout_batch_report("/slide[1]/textbox[@id=100000]");
+        let lookups = layout_inspection_round(&[alias], &[], trace.path()).await;
+        assert_eq!(lookups, [GEOMETRY_BODY]);
+
+        let trace = tempfile::tempdir().unwrap();
+        let spill_file = trace.path().join("output.json");
+        std::fs::write(&spill_file, layout_batch_report(GEOMETRY_BODY).to_string()).unwrap();
+        let spill = json!({"outputFile": spill_file, "outputSize": 8193, "results": [
+            {"index": 0, "success": true}, {"index": 1, "success": true},
+        ]});
+        let lookups = layout_inspection_round(&[spill], &[], trace.path()).await;
+        assert_eq!(lookups, [GEOMETRY_BODY, GEOMETRY_EDGE]);
+    }
 
     /// The input files of the batches officecli ran beside `file`.
     fn batches(file: &Path) -> Vec<String> {

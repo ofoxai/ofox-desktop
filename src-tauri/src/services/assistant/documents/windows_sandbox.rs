@@ -3616,10 +3616,33 @@ pub async fn ensure_windows_document_engine_ready(runtime_root: &Path) -> Result
     ensure_windows_document_engine_ready_until(runtime_root, None).await
 }
 
+#[cfg(test)]
+static READINESS_CHECKS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::services::assistant) fn readiness_check_count(runtime_root: &Path) -> u64 {
+    READINESS_CHECKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(runtime_root)
+        .copied()
+        .unwrap_or_default()
+}
+
 pub async fn ensure_windows_document_engine_ready_until(
     runtime_root: &Path,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        *READINESS_CHECKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry(runtime_root.to_path_buf())
+            .or_default() += 1;
+    }
     let result = ensure_ready(runtime_root, deadline).await;
     if result.as_ref().is_err_and(|error| error != RUN_TIMEOUT) {
         invalidate_admission();

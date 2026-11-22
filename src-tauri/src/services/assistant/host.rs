@@ -4412,6 +4412,98 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_python_document_checks_windows_readiness_once_for_the_same_runtime() {
+        use super::super::{
+            documents::windows_sandbox::{
+                readiness_check_count, windows_document_sandbox_receipts,
+            },
+            media_tools::host::MediaRun,
+        };
+
+        let (_tmp, env, host) = fixture_with_env();
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assistant-runtime/resources")
+            .canonicalize()
+            .expect("run pnpm assistant:prepare before native tests");
+        *env.runtime.lock().unwrap() = Some(runtime.clone());
+        host.wait_document_preparation().await;
+        assert!(
+            host.python_offered(),
+            "the prepared Windows runtime must prove isolation"
+        );
+
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().media = Some(MediaRun::new(Default::default()));
+        host.register_run(run.clone(), host.generation(), || {
+            store.mutate(&sid, |record| {
+                record.session.active_run = Some(RunRef {
+                    run_id: run.run_id.clone(),
+                    operation_id: run.operation_id.clone(),
+                });
+                Ok(())
+            })
+        })
+        .unwrap();
+        let checks_before = readiness_check_count(&runtime);
+        let sequence_before = windows_document_sandbox_receipts(0)
+            .last()
+            .and_then(|receipt| receipt["sequence"].as_u64())
+            .unwrap_or_default();
+        let started = std::time::Instant::now();
+        let preview = host
+            .dispatch_document_tool(
+                &run,
+                &json!({
+                    "sessionId":sid, "runId":run.run_id, "operationId":run.operation_id,
+                    "toolCallId":"preview", "name":"create_document",
+                    "args":{
+                        "name":"Readiness fixture.pptx", "format":"pptx", "preview":true,
+                        "content":{"kind":"python","code":
+                            "prs = new_deck(title='Readiness fixture')\ncover_slide(prs, 'Readiness fixture', subtitle='中文 日本語')\n"}
+                    }
+                }),
+            )
+            .await
+            .expect("the fixed Python preview must complete through the native Host");
+        let checks = readiness_check_count(&runtime) - checks_before;
+        let receipts = windows_document_sandbox_receipts(sequence_before);
+        eprintln!(
+            "Windows Python preview: readiness_checks={checks} lpac_launches={} elapsed_ms={}",
+            receipts.len(),
+            started.elapsed().as_millis()
+        );
+        assert_eq!(preview["status"], "completed");
+        assert_eq!(preview["preview"], true);
+        assert_eq!(preview["slides"], 1);
+        assert_eq!(preview["pagePaths"].as_array().map(Vec::len), Some(1));
+        for name in ["node.exe", "officecli.exe"] {
+            assert!(
+                receipts.iter().any(|receipt| {
+                    receipt["executable"]
+                        .as_str()
+                        .is_some_and(|executable| Path::new(executable).ends_with(name))
+                        && receipt["trustedProbe"] == false
+                        && receipt["tokenVerified"] == true
+                        && receipt["jobStopped"] == true
+                        && receipt["cleanupComplete"] == true
+                        && receipt["status"] == 0
+                }),
+                "{name} must keep using the verified LPAC launch"
+            );
+        }
+        host.remove_document_folders(&run).await;
+        host.release_run(&run);
+        assert_eq!(
+            checks, 1,
+            "one runtime readiness check for the whole document"
+        );
+    }
+
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
