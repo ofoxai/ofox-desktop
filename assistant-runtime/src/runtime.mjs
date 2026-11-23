@@ -26,6 +26,7 @@ import { skillTools, skillPrompt } from "./skills.mjs";
 import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
 import { modelActivity } from "./model-activity.mjs";
+import { modelTransport } from "./model-transport.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -277,34 +278,6 @@ function safeMessage(message, secrets) {
   return typeof safe?.errorMessage === "string"
     ? { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) }
     : safe;
-}
-
-// The application's proxy for model requests: an HTTP(S) or SOCKS5 proxy URL
-// (credentials included) and the hosts that bypass it. Every request tunnels
-// through it; the Ofox origin check still applies to the target. Neither the
-// URL nor its credentials may appear in an error.
-async function proxiedFetch(proxy) {
-  if (proxy === undefined || proxy === null) return undefined;
-  let url;
-  try {
-    url = new URL(proxy.url);
-  } catch {
-    throw new Error("The proxy setting is not a valid URL");
-  }
-  if (url.protocol === "socks5h:") url.protocol = "socks5:";
-  if (!["http:", "https:", "socks5:"].includes(url.protocol))
-    throw new Error("The proxy setting uses an unsupported scheme");
-  const { EnvHttpProxyAgent, fetch } = await import("undici");
-  const dispatcher = new EnvHttpProxyAgent({
-    httpProxy: url.href,
-    httpsProxy: url.href,
-    noProxy: typeof proxy.noProxy === "string" ? proxy.noProxy : "",
-    proxyTunnel: true,
-  });
-  return {
-    fetch: (input, init) => fetch(input, { ...init, dispatcher }),
-    close: () => dispatcher.destroy().catch(() => undefined),
-  };
 }
 
 // What a web_search result cost is known from its usage counts. It is unknown
@@ -1309,10 +1282,10 @@ export class AssistantRuntime {
     this.secrets.add(apiKey);
     const context = { params, abort: new AbortController() };
     this.runs.set(params.runId, context);
-    let proxy;
+    let transport;
     try {
       const modelRuntime = await ofoxModelRuntime(model, apiKey);
-      proxy = await proxiedFetch(params.proxy);
+      transport = await modelTransport(params.proxy);
       const signal = AbortSignal.any([
         context.abort.signal,
         AbortSignal.timeout(this.titleTimeoutMs),
@@ -1321,7 +1294,7 @@ export class AssistantRuntime {
       const safeFetch = credentialFetch({
         baseUrl: model.baseUrl,
         apiKey,
-        providerFetch: this.providerFetch ?? proxy?.fetch ?? globalThis.fetch,
+        providerFetch: this.providerFetch ?? transport.fetch,
         signal,
       });
       const question = clip(params.userText);
@@ -1393,7 +1366,7 @@ export class AssistantRuntime {
       );
       return { title: title || null, ...projection(manager, secrets) };
     } finally {
-      void proxy?.close();
+      void transport?.close();
       this.runs.delete(params.runId);
     }
   }
@@ -1807,7 +1780,7 @@ export class AssistantRuntime {
     });
     this.runs.set(params.runId, context);
     let unsubscribe;
-    let proxy;
+    let transport;
     try {
       const {
         createAgentSession,
@@ -1902,9 +1875,8 @@ export class AssistantRuntime {
       });
       const modelRuntime = await ofoxModelRuntime(model, apiKey);
       const originalStream = modelRuntime.streamSimple.bind(modelRuntime);
-      proxy = await proxiedFetch(params.proxy);
-      const providerFetch =
-        this.providerFetch ?? proxy?.fetch ?? globalThis.fetch;
+      transport = await modelTransport(params.proxy);
+      const providerFetch = this.providerFetch ?? transport.fetch;
       const recordSummaryUsage = (target, usage) =>
         manager.appendCustomEntry(
           "ofox-desktop-usage",
@@ -2909,7 +2881,7 @@ export class AssistantRuntime {
       } catch {
         this.mcpCleanupConfirmed = false;
       } finally {
-        void proxy?.close();
+        void transport?.close();
         this.runs.delete(params.runId);
         context.resolveDone();
       }
