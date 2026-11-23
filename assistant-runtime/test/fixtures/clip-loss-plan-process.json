@@ -1,0 +1,205 @@
+{
+  "decisionSummary": "选择 knowledge-arch-blueprint，因为它面向技术/架构类讲解，支持可编辑的流程图、代码面板和步骤卡，适合给计算机本科生做 CLIP 的技术教学。",
+  "requirements": {
+    "aspectRatio": "16:9",
+    "audience": "计算机专业本科生",
+    "brand": null,
+    "contentMix": {
+      "data": 0.4,
+      "formulas": 0.1,
+      "images": 0
+    },
+    "density": "medium",
+    "durationMinutes": null,
+    "language": "zh",
+    "nativeEditing": {
+      "charts": true,
+      "diagrams": true,
+      "formulas": true,
+      "text": true
+    },
+    "purpose": "给计算机专业本科生介绍 CLIP 的基本概念和关键机制，使用可编辑图形解释核心步骤",
+    "roundTrip": "unverifiedAllowed",
+    "scenario": "educational",
+    "slideCount": 8,
+    "visualNeeds": ["concept", "process", "data"]
+  },
+  "slides": [
+    {
+      "id": "s1_problem_motivation",
+      "claim": "问题与动机：视觉模型与文本模型长期各自训练，难以直接比较图像和文字语义，现实应用需要能跨模态匹配的表示。",
+      "composition": "标题＋要点列表＋小型示意（概念性 native-diagram），左侧标题与三点要点，右侧示意图显示“图像空间”与“文本空间”分离",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "视觉识别与语言模型通常在不同任务/目标下训练，缺乏统一表示",
+        "许多跨模态应用（检索、零样本分类）需要将图像与文本放在同一语义空间进行比较"
+      ],
+      "pageKind": "chapter",
+      "relationship": "single-claim",
+      "visual": {
+        "kind": "native-diagram",
+        "fallback": "native-summary",
+        "purpose": "用可编辑的方框与箭头示意‘图像编码器→图像嵌入’与‘文本编码器→文本嵌入’在不同空间的分离，表明需要统一表示"
+      }
+    },
+    {
+      "id": "s2_two_encoders",
+      "claim": "双编码器结构：独立的图像编码器与文本编码器分别将输入投影到同一向量空间，以便比较相似度。",
+      "composition": "中间大图示（native-diagram）展示 Image Encoder、Text Encoder、投影/归一化与嵌入空间，底部列要点（编码器类型示例：CNN、ViT、Transformer）",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "双编码器避免在每次查询时同时处理图像与文本的交叉注意力，适合大规模检索场景",
+        "图像与文本编码后可用余弦相似度比较"
+      ],
+      "pageKind": "process",
+      "relationship": "sequence",
+      "visual": {
+        "kind": "native-diagram",
+        "fallback": "native-summary",
+        "purpose": "可编辑流程图：左侧 Image→Encoder→Projection，右侧 Text→Encoder→Projection，中间为共享 embedding space 与相似度计算"
+      }
+    },
+    {
+      "id": "s3_contrastive_learning",
+      "claim": "对比学习（contrastive learning）：通过拉近匹配的图文对、推远不匹配对来学习联合表示，常用 InfoNCE 类损失。",
+      "composition": "标题＋公式区域（native-math）显示对比损失的符号形式＋解释要点（正样本、负样本、温度系数、对比矩阵构造）",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "训练目标是让匹配对在嵌入空间中相互靠近、非对应对相互远离",
+        "常见实现用批内所有样本构成正负对并计算 InfoNCE 损失（温度参数用于缩放相似度）"
+      ],
+      "pageKind": "process",
+      "relationship": "single-claim",
+      "visual": {
+        "kind": "native-math",
+        "fallback": "native-summary",
+        "purpose": "以可编辑的原生公式（OMML）展示对比损失的符号表达，并用一两个短句注解正负样本如何构成"
+      }
+    },
+    {
+      "id": "s4_training_pipeline",
+      "claim": "训练流程：大规模图文对采集→预处理→编码器前向→计算对比损失→优化；关键是大样本、随机负样本与批量内对比。",
+      "composition": "大图（code-figure）以 SVG 流程图形式绘制训练流水线的模块与数据流，右侧短要点说明实现细节（数据过滤、多卡训练、归一化）",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "大规模、自动收集的图文对是该方法可行的基础（规模上通常为‘大规模网络爬取’）",
+        "训练时常采用大批量并行与对比损失的向量化实现以提高效率"
+      ],
+      "pageKind": "code",
+      "relationship": "process",
+      "visual": {
+        "kind": "code-figure",
+        "fallback": "native-summary",
+        "purpose": "用可绘制的 SVG 流程图显示从数据采集到优化的模块（Data → Aug/Tokenize → ImageEncoder / TextEncoder → Projections → ContrastiveLoss → Optimizer）"
+      }
+    },
+    {
+      "id": "s5_zero_shot",
+      "claim": "零样本分类：将文本标签用自然语言模板编码为文本嵌入，与图像嵌入相似度排序即可实现零样本预测，无需对任务微调。",
+      "composition": "左侧步骤列（如何构造提示/模板），右侧示意（native-diagram）展示文本提示编码与图像匹配的流程，并给出简短使用场景举例",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "零样本分类通过把类别描述编码为文本向量，并与图像向量做相似度比较实现",
+        "提示（prompt）设计会影响性能，但不要求在下游任务上额外训练"
+      ],
+      "pageKind": "process",
+      "relationship": "sequence",
+      "visual": {
+        "kind": "native-diagram",
+        "fallback": "native-summary",
+        "purpose": "用可编辑图示展示从‘类别文本模板’到‘文本嵌入’再到与图像嵌入比较的流程，突出无需微调的特性"
+      }
+    },
+    {
+      "id": "s6_image_text_retrieval",
+      "claim": "图文检索：把图像与文本集合的嵌入预计算，检索时只需对查询嵌入做近邻搜索，适合大规模检索场景。",
+      "composition": "上方短句概述检索方法，下方用 code-figure 绘制检索索引与查询流程（向量索引、近邻检索、重排序），并说明效率要点",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "预计算库中项的嵌入使得检索仅需对查询向量进行近邻搜索（可用 ANN 索引如 Faiss）",
+        "双编码器架构天然适合检索类应用，因为图文可以分开编码并缓存"
+      ],
+      "pageKind": "process",
+      "relationship": "sequence",
+      "visual": {
+        "kind": "code-figure",
+        "fallback": "native-summary",
+        "purpose": "绘制可编辑检索示意：数据库嵌入索引、查询编码、ANN 检索、结果返回与可选 rerank 步骤"
+      }
+    },
+    {
+      "id": "s7_limitations_bias",
+      "claim": "局限与偏差：训练数据的网络分布导致语义偏差与刻板印象，模型对 prompt 敏感且对细粒度/因果推断能力有限。",
+      "composition": "左侧要点列表（偏差、鲁棒性、细粒度不足、语言/文化偏倚等），右侧 native-diagram 示意数据中的偏差如何传递到模型输出",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "基于网络收集的训练集会包含文化与采集偏差，可能在下游任务中放大不公平结果",
+        "对细粒度辨别或需要领域知识的任务，零样本方法通常不如针对性微调模型"
+      ],
+      "pageKind": "chapter",
+      "relationship": "comparison",
+      "visual": {
+        "kind": "native-diagram",
+        "fallback": "native-summary",
+        "purpose": "用可编辑箭头与注释显示：数据偏差→表示学习→下游决策 的传递路径，便于讨论缓解策略"
+      }
+    },
+    {
+      "id": "s8_summary",
+      "claim": "总结：CLIP 通过双编码器与对比学习在大规模图文数据上学习联合表示，支持零样本与高效检索，但受数据偏差与任务细粒度限制。",
+      "composition": "要点式总结（3–5 条），最后给出进一步学习的建议（论文与实现库名）以及演示/练习建议",
+      "editing": {
+        "charts": true,
+        "diagrams": true,
+        "formulas": true,
+        "text": true
+      },
+      "evidence": [
+        "要点汇总，指出可进一步阅读的方向（如 CLIP 原论文与向量检索库 Faiss）"
+      ],
+      "pageKind": "closing",
+      "relationship": "single-claim",
+      "visual": {
+        "kind": "native-diagram",
+        "fallback": "omit",
+        "purpose": "简洁的可编辑要点面板，便于讲者在结尾强调三点核心结论"
+      }
+    }
+  ],
+  "styleId": "knowledge-arch-blueprint"
+}

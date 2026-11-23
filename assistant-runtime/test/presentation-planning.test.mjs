@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { Check } from "typebox/value";
+import { FREEZE_PRESENTATION_SCHEMA } from "../src/presentation-planning.mjs";
 import { documentTools } from "../src/document-tools.mjs";
 import { mediaTools } from "../src/media-tools.mjs";
 import { ADAPTED_STYLES } from "../src/deck/catalog.mjs";
@@ -586,6 +589,71 @@ test("planning schema explains document-wide visual needs, required density and 
     /reuse.*complete.*requirements.*density/i,
   );
 });
+test("the actual CLIP fourth-page process alias freezes as sequence without mutating the model call", async () => {
+  const given = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/clip-loss-plan-process.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const before = structuredClone(given);
+  const f = fixture();
+  assert.equal(given.slides[3].relationship, "process");
+  assert.equal(
+    Check(f.get("freeze_presentation_plan").parameters, given),
+    true,
+  );
+  assert.equal(
+    Check(FREEZE_PRESENTATION_SCHEMA, given),
+    false,
+    "canonical Host inputs keep the standard enum",
+  );
+  const result = await f.get("freeze_presentation_plan").execute(given);
+  assert.equal(result.details.status, "frozen");
+  assert.equal(f.calls.length, 1);
+  const canonical = {
+    ...given,
+    slides: structuredClone(f.calls[0].args.slides),
+  };
+  assert.equal(canonical.slides[3].relationship, "sequence");
+  assert.equal(Check(FREEZE_PRESENTATION_SCHEMA, canonical), true);
+  assert.deepEqual(given, before);
+  await f.get("freeze_presentation_plan").execute(canonical);
+  assert.equal(
+    f.calls.length,
+    1,
+    "equivalent alias and canonical calls reuse the existing freeze",
+  );
+});
+
+test("planning aliases stay narrow and preserve the distinct spatial relationship", async () => {
+  for (const value of ["sequential", "Process", " process", "sequence "]) {
+    const f = fixture();
+    const args = {
+      requirements: requirements(),
+      styleId: "cartesian",
+      decisionSummary: "Test a relationship",
+      slides: slides(),
+    };
+    args.slides[1].relationship = value;
+    await assert.rejects(
+      f.get("freeze_presentation_plan").execute(args),
+      /Malformed/,
+    );
+    assert.deepEqual(f.calls, []);
+  }
+  const f = fixture();
+  const args = {
+    requirements: requirements(),
+    styleId: "cartesian",
+    decisionSummary: "A spatial claim",
+    slides: slides(),
+  };
+  args.slides[1].relationship = "spatial";
+  await f.get("freeze_presentation_plan").execute(args);
+  assert.equal(f.calls[0].args.slides[1].relationship, "spatial");
+});
+
 test("actual malformed planning requests remain rejected without a Host freeze and can be corrected", async () => {
   const f = fixture();
   const req = { ...requirements(), slideCount: 6 };
@@ -605,7 +673,7 @@ test("actual malformed planning requests remain rejected without a Host freeze a
     decisionSummary: "A six-page lesson",
     slides: pages.map((page, index) => ({
       ...page,
-      relationship: index === 1 ? "process" : page.relationship,
+      relationship: index === 1 ? "sequential" : page.relationship,
     })),
   };
   const originals = structuredClone({
@@ -638,7 +706,7 @@ test("actual malformed planning requests remain rejected without a Host freeze a
     slides: invalidPlan.slides.map((page) => ({
       ...page,
       relationship:
-        page.relationship === "process" ? "sequence" : page.relationship,
+        page.relationship === "sequential" ? "sequence" : page.relationship,
     })),
   };
   const result = await f.get("freeze_presentation_plan").execute(corrected);

@@ -19,6 +19,7 @@ import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { crc32 } from "node:zlib";
 import { redact } from "../assistant-runtime/src/security.mjs";
+import { normalizePresentationPlanInput } from "../assistant-runtime/src/presentation-plan-input.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MODELS = ["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-5-mini"];
@@ -1145,6 +1146,19 @@ export async function boundedZip(bytes) {
     );
   });
 }
+export function assertCapturedPlan(input, frozenPlan) {
+  assert.equal(
+    canonical(input?.requirements),
+    canonical(frozenPlan?.requirements),
+    "captured requirements differ from frozen Host plan",
+  );
+  assert.equal(
+    canonical(normalizePresentationPlanInput(input)?.slides),
+    canonical(frozenPlan?.slides),
+    "captured pages differ from frozen Host plan",
+  );
+}
+
 async function inspectArtifact(directory, task, receipt, sourcePath) {
   const file = path.resolve(directory, receipt.artifact.path);
   assert.ok(
@@ -1365,16 +1379,7 @@ async function inspectArtifact(directory, task, receipt, sourcePath) {
       ),
     "capture must contain every exact Python document input",
   );
-  assert.equal(
-    canonical(input.freeze?.requirements),
-    canonical(receipt.frozenPlan?.requirements),
-    "captured requirements differ from frozen Host plan",
-  );
-  assert.equal(
-    canonical(input.freeze?.slides),
-    canonical(receipt.frozenPlan?.slides),
-    "captured pages differ from frozen Host plan",
-  );
+  assertCapturedPlan(input.freeze, receipt.frozenPlan);
   return {
     sha256: hash(bytes),
     slides,

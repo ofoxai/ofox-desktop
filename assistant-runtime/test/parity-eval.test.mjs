@@ -16,7 +16,33 @@ import {
   forwarder,
   classifyWindows,
   boundedZip,
+  assertCapturedPlan,
 } from "../../scripts/assistant-parity-eval.mjs";
+
+test("capture comparison accepts only the explicit process alias without changing raw evidence", () => {
+  const input = {
+    requirements: { slideCount: 1 },
+    slides: [{ id: "page-1", relationship: "process", claim: "raw" }],
+  };
+  const before = structuredClone(input);
+  const frozen = structuredClone(input);
+  frozen.slides[0].relationship = "sequence";
+  assert.doesNotThrow(() => assertCapturedPlan(input, frozen));
+  assert.deepEqual(input, before);
+  for (const wrong of ["spatial", "sequential", "Process"]) {
+    const invalid = structuredClone(input);
+    invalid.slides[0].relationship = wrong;
+    assert.throws(() => assertCapturedPlan(invalid, frozen), /captured pages/);
+  }
+  const changed = structuredClone(frozen);
+  changed.slides[0].claim = "changed";
+  assert.throws(() => assertCapturedPlan(input, changed), /captured pages/);
+  changed.requirements.slideCount = 2;
+  assert.throws(
+    () => assertCapturedPlan(input, changed),
+    /captured requirements/,
+  );
+});
 
 test("parity matrix fixes twelve tasks and keeps Win10 engine replay separate", () => {
   const campaign = buildCampaign({

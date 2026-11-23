@@ -1117,23 +1117,26 @@ class _LatexMath:
         if command in self.symbols: return self.symbols[command]
         if command in (",", ";", "!", " "): return " "
         if command == "quad": return "\u2003"  # fixed em-space; glyph width is font-dependent
-        if command in ("sin", "cos"): return {"roman": command}
+        if command in ("sin", "cos", "log", "exp"): return {"roman": command}
         if command in ("{", "}", "_", "%"): return command
         if command == "frac": return {"fraction": [self.argument(), self.argument()]}
         if command == "sqrt":
             if self.peek() != "{": raise ValueError("equation sqrt requires a braced radicand; indexed roots are unsupported")
             return {"sqrt": self.argument()}
-        if command in ("mathrm", "operatorname"):
-            if self.take() != "{": raise ValueError("equation upright names require a braced literal name")
+        if command in ("mathrm", "operatorname", "mathcal"):
+            label = "calligraphic" if command == "mathcal" else "upright"
+            if self.take() != "{": raise ValueError("equation " + label + " names require a braced literal name")
             letters = []
             while self.peek() != "}":
                 letter = self.take()
-                if not re.fullmatch(r"[A-Za-z0-9]", letter) or len(letters) >= 64:
-                    raise ValueError("equation upright names accept only 1–64 literal ASCII letters/digits, without nested macros or scripts")
+                pattern = r"[A-Za-z]" if command == "mathcal" else r"[A-Za-z0-9]"
+                if not re.fullmatch(pattern, letter) or len(letters) >= 64:
+                    allowed = "letters" if command == "mathcal" else "letters/digits"
+                    raise ValueError("equation " + label + " names accept only 1–64 literal ASCII " + allowed + ", without nested macros or scripts")
                 letters.append(letter)
             self.take()
-            if not letters: raise ValueError("equation upright names must not be empty")
-            return {"roman": "".join(letters)}
+            if not letters: raise ValueError("equation " + label + " names must not be empty")
+            return {"script" if command == "mathcal" else "roman": "".join(letters)}
         if command in ("hat", "widehat"): return {"hat": self.argument()}
         if command == "sum": return {"sum": ["", "", None]}
         if command in ("left", "right"):
@@ -1196,11 +1199,17 @@ def _math_node(expression, size):
     if kind == "sequence":
         if not isinstance(values, (list, tuple)) or not values: raise ValueError("equation sequence must be a nonempty list")
         return [part for value in values for part in _math_parts(value, size)]
-    if kind == "roman":
-        if not isinstance(values, str) or not re.fullmatch(r"[A-Za-z0-9]{1,64}", values):
-            raise ValueError("equation upright name must contain 1–64 literal ASCII letters/digits")
+    if kind in ("roman", "script"):
+        pattern = r"[A-Za-z]{1,64}" if kind == "script" else r"[A-Za-z0-9]{1,64}"
+        if not isinstance(values, str) or not re.fullmatch(pattern, values):
+            raise ValueError("equation calligraphic name must contain 1–64 literal ASCII letters" if kind == "script" else "equation upright name must contain 1–64 literal ASCII letters/digits")
         result = _math_node(values, size)
-        properties = node("rPr"); style = node("sty"); style.set(f"{{{_MATH_NS}}}val", "p")
+        properties = node("rPr")
+        if kind == "script":
+            # OMML encodes calligraphic ASCII letters as editable script runs.
+            # https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.math.script
+            script = node("scr"); script.set(f"{{{_MATH_NS}}}val", "script"); properties.append(script)
+        style = node("sty"); style.set(f"{{{_MATH_NS}}}val", "p")
         properties.append(style); result.insert(0, properties)
         return result
     if kind == "sqrt":
@@ -1234,7 +1243,7 @@ def _math_linear(expression):
     if isinstance(expression, (str, int, float)): return str(expression)
     kind, values = next(iter(expression.items()))
     if kind == "sequence": return "".join(map(_math_linear, values))
-    if kind == "roman": return values
+    if kind in ("roman", "script"): return values
     if kind == "sqrt": return "√(" + _math_linear(values) + ")"
     if kind == "hat": return _math_linear(values) + "\u0302"
     if kind == "sum":
@@ -1351,7 +1360,9 @@ def relation(slide, items, x, y, w, h, kind="process", size=15):
     """Editable process or comparison: native shapes, text and connectors.
     Comparison uses side-by-side columns; a process uses directional links."""
     _using(slide)
-    if kind not in ("process", "comparison"): raise ValueError("relation kind must be process or comparison")
+    if kind == "sequence": kind = "process"
+    if kind not in ("process", "comparison"):
+        raise ValueError("relation kind must be process, sequence (alias), or comparison; spatial is not a sequential relation. Use kind='comparison' for independent items, or fork_join() for parallel branches with a source and merge")
     if not isinstance(items, (list, tuple)) or not 2 <= len(items) <= 6 or any(not isinstance(item, str) for item in items):
         raise ValueError("relation needs 2 to 6 string labels; use steps/timeline for structured title/body items")
     _diagram_bounds(slide, x, y, w, h, "relation")

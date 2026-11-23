@@ -1783,3 +1783,13 @@ The abandoned Assistant Vault prototype had a durable, context-bound pending mar
 Assistant cached startup and ordinary text turns do not wait for the optional Windows document-isolation preparation. Until that shared preparation proves the current runtime, Python remains unavailable; a text turn admitted during preparation can therefore begin without Python in its tool schema. Explicit deck workflows and Python document calls still wait for the shared proof, and the launcher rechecks execution admission. Preparation failures can be retried by a later operation. Source-level regression checks do not certify that a newly built desktop package has been installed and exercised on the user's machine.
 
 Calendar rollover, routing readiness and message-count regressions are verified through simulated UI and temporary native logs. New installed-app acceptance remains separate from these source checks; the installed release is not silently replaced during workspace consolidation.
+
+The CLIP repair accepts `process` as a model-input alias for the canonical plan
+relationship `sequence`, and Python `relation(kind="sequence")` as an alias for
+`process`. `spatial` is ambiguous and remains refused: choose a parallel
+comparison or explicit `fork_join()` connections. The bounded equation subset
+supports upright `\log` / `\exp` and literal ASCII `\mathcal` names as editable
+OMML script runs. Both inner and outer summands still need explicit braces;
+unsupported macros and double-escaped commands remain refused. Offline native
+generation and preview evidence does not certify a real-model deck or its
+PowerPoint graph/equation editing and save-reopen behavior.

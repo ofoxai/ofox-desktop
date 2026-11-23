@@ -66,8 +66,8 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `pyramid(slide, levels, x, y, w, h, size=14)`: 2–6 native levels, narrowest first; label or `{"title","body"}`.
 - `code(slide, source, x, y, w, h, size=12)`: ≤40 monospaced lines on a dark panel.
 - `formula(slide, x, y, w, h, lines, size=15)`: plain text; warns; not academic math.
-- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; LaTeX adds noneditable PNG. `{"latex":r"\sin(x)"}` or structures. LaTeX: scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos,quad (em-space),mathrm/operatorname (1–64 ASCII alphanumerics). Brace signed/multi-digit scripts; other macros fail. Literal text. Verify WPS/PowerPoint display/editing.
-- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels; process means sequence, comparison means independent items without arrows.
+- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; LaTeX adds noneditable PNG. `{"latex":r"\sin(x)"}` or structures. LaTeX: scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos/log/exp,quad (em-space),mathrm/operatorname (1–64 ASCII alphanumerics),mathcal (1–64 literal ASCII letters). `\log`/`\exp` are upright functions; `\mathcal{L}` is an editable script-style math run. Brace signed/multi-digit scripts and every sum body; other macros fail. Literal text. Verify WPS/PowerPoint display/editing.
+- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels; process and its sequence alias draw ordered arrows, comparison draws independent items without arrows. Do not pass spatial: choose comparison for independent spatial items, or fork_join() for parallel branches with source/merge. Do not infer sequential arrows from a spatial layout.
 - `fork_join(slide, branches, x, y, w, h, source="", merge="")`: 2–6 parallel label strings; source→all→merge, no branch-to-branch arrows. For lesson/panel bodies use the `main` box, not full-slide `G`.
 - `native_chart(slide, kind, categories, series, x, y, w, h, title="")`: native chart plus workbook; bar/line/pie; series `[{"name":"…","values":[…]}]`, at most 100 supplied finite values.
 - `shape(slide, kind, x, y, w, h, fill=None, line=None, line_w=0.75, radius=None)`: `MSO_SHAPE.RECTANGLE`, `ROUNDED_RECTANGLE`, `OVAL`, etc.; radius only for rounded.
@@ -79,6 +79,19 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `background(slide, color)`: whole-slide fill. On dark fills, recolour native title runs via `r.font.color.rgb = rgb(T.white)` and use light text/subtitles.
 - Native chart: `slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(x), Inches(y), Inches(w), Inches(h), chart_data).chart`; set chart/axis/data-label fonts ≥12pt and distinct series colours.
 - Fit: `text_height(text, pt, width_in, spacing=1.3)`, `lines_for(text, pt, width_in)`, `em_width(s)`, `bullets_height(items, pt, width_in, gap_pt=6)`, `need(what, needed, has, slide=None)` (overflow lint), `rgb(h)` (hex to colour).
+
+### CLIP diagrams and loss
+
+Planning uses `relationship="sequence"` for an ordered workflow (`process` is a model-input alias). Python accepts `relation(..., kind="sequence")` or `kind="process"`. For the parallel image/text encoders, use `fork_join(..., source="Image/text pairs", merge="Similarity")`, not `relation(kind="spatial")` or arrows between the two branches.
+
+Keep both outer and inner summands explicitly braced. Define the score `s_{ij}` and temperature `\tau`; the full symmetric loss below includes both image→text and text→image directions and normalizes over the batch. Split the explanation across pages if needed; keep each equation box large enough for its rendered preview.
+
+```python
+clip_loss = r"\mathcal{L}=-\frac{1}{2N}\sum_{i=1}^{N}{\left(\log\frac{\exp(s_{ii}/\tau)}{\sum_{j=1}^{N}{\exp(s_{ij}/\tau)}}+\log\frac{\exp(s_{ii}/\tau)}{\sum_{j=1}^{N}{\exp(s_{ji}/\tau)}}\right)}"
+equation(slide, .75, 2, 11.8, 2.4, {"latex": clip_loss}, size=16)
+```
+
+Write `\sum_i{...}` and `\sum_j{...}` at their respective scopes; never `\sum_i\log...` or an unbraced inner sum. Do not double-escape a Python raw string, add unsupported layout macros such as `\nobreak`, or replace editable equations with a picture.
 
 ## Design rules
 

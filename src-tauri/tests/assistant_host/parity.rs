@@ -115,6 +115,82 @@ fn captured_calls(history: &str) -> Vec<Value> {
         .collect()
 }
 
+// Pair raw model arguments with an accepted tool result for the current Host
+// plan. SDK-refused or truncated calls remain in the untouched native history.
+fn captured_freeze(history: &str, plan: &Value) -> Value {
+    let entries: Vec<Value> = history
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, entry)| {
+            let message = &entry["message"];
+            (entry["type"] == "message"
+                && message["role"] == "toolResult"
+                && message["toolName"] == "freeze_presentation_plan"
+                && message["isError"] == false
+                && message["details"]["status"] == "frozen"
+                && plan["planId"].is_string()
+                && message["details"]["planId"] == plan["planId"]
+                && message["details"]["revision"] == plan["revision"])
+                .then(|| {
+                    entries[..index]
+                        .iter()
+                        .rev()
+                        .filter(|entry| {
+                            entry["type"] == "message" && entry["message"]["role"] == "assistant"
+                        })
+                        .filter_map(|entry| entry["message"]["content"].as_array())
+                        .flat_map(|parts| parts.iter().rev())
+                        .find(|call| {
+                            call["type"] == "toolCall"
+                                && call["name"] == "freeze_presentation_plan"
+                                && call["id"].is_string()
+                                && call["id"] == message["toolCallId"]
+                        })
+                        .map(|call| call["arguments"].clone())
+                })
+                .flatten()
+        })
+        .next()
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn capture_uses_accepted_current_freeze_and_keeps_raw_alias() {
+    let call = |id: &str, relationship: &str| json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":id,"name":"freeze_presentation_plan","arguments":{"slides":[{"relationship":relationship}]}}]}});
+    let result = |id: &str, plan: &str, error: bool| json!({"type":"message","message":{"role":"toolResult","toolName":"freeze_presentation_plan","toolCallId":id,"isError":error,"details":{"status":"frozen","planId":plan,"revision":1}}});
+    let entries = [
+        call("truncated", "invalid"),
+        result("truncated", "current", true),
+        call("old", "spatial"),
+        result("old", "old-plan", false),
+        call("accepted", "process"),
+        result("accepted", "current", false),
+        // Reusing an ID later is refused by the runtime; it must not replace
+        // the raw arguments paired with the earlier successful result.
+        call("accepted", "comparison"),
+        result("accepted", "current", true),
+    ];
+    let history = entries
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let current = json!({"planId":"current","revision":1});
+    assert_eq!(
+        captured_freeze(&history, &current)["slides"][0]["relationship"],
+        "process"
+    );
+    assert_eq!(captured_calls(&history).len(), 4);
+    assert!(captured_freeze(&history, &json!({"planId":"missing","revision":1})).is_null());
+    assert!(captured_freeze(&history, &json!({"planId":"current","revision":2})).is_null());
+    assert!(captured_freeze(&history, &Value::Null).is_null());
+}
+
 fn verify_compiled_source(case: &Value) {
     assert_eq!(
         option_env!("OFOX_BUILD_SOURCE_CLEAN"),
@@ -382,6 +458,130 @@ fn windows_host_python_preview_and_page_three_source_edit_use_real_lpac() {
     );
 }
 
+/// Windows counterpart of the Python Node fixture tests, which intentionally
+/// skip Windows. This executes trusted inputs through the real Host/LPAC path.
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn windows_host_clip_contract_generates_native_math_and_renders_eight_pages() {
+    let bundle = runtime_dir().expect("prepared Windows runtime is mandatory");
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    let before = runner::windows_document_sandbox_receipts(0)
+        .last()
+        .and_then(|receipt| receipt["sequence"].as_u64())
+        .unwrap_or(0);
+    let evidence = runtime().block_on(async {
+        host.set_preferences(serde_json::from_value(json!({
+            "instructions":"","autoTitle":false,"notifyOnFinish":false,
+            "expectedOwner":owner(),"expectedGeneration":host.generation()
+        })).unwrap()).await.unwrap();
+        let sid = create(&host).await;
+        let mut plan = synthetic_plan(8, None);
+        plan["requirements"]["nativeEditing"]["formulas"] = json!(true);
+        plan["requirements"]["nativeEditing"]["diagrams"] = json!(true);
+        for page in plan["slides"].as_array_mut().unwrap() {
+            page["editing"]["formulas"] = json!(true);
+            page["editing"]["diagrams"] = json!(true);
+        }
+        // The model-facing alias must never cross the canonical Rust boundary.
+        plan["slides"][3]["relationship"] = json!("process");
+        gateway.reply(Reply::ToolCalls(vec![("freeze_presentation_plan", plan)]));
+        gateway.reply(Reply::ToolCalls(vec![("create_document", json!({
+            "name":"clip-contract.pptx","format":"pptx","preview":true,
+            "content":{"kind":"python","code":include_str!("../../../assistant-runtime/test/fixtures/clip-loss-contract.py")}
+        }))]));
+        gateway.reply(Reply::Stream("The trusted CLIP contract fixture is ready.".into()));
+        let run = host.send(request(&sid, "Generate the trusted eight-page CLIP contract fixture.", json!({
+            "presentationWorkflowVersion":1,"presentationStyleId":"auto",
+            "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
+            "expectedOwner":owner(),"expectedGeneration":host.generation()
+        }))).await.unwrap().run_id;
+        let end = native_finished(&env, &run).await;
+        assert_eq!(end.data["status"], "completed", "{:?}", env.events(&run));
+        assert!(of_type(&env, &run, "tool_end").iter().all(|event| event["success"] == true));
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.attachments.len(), 1);
+        let frozen = detail.messages.iter().rev().find_map(|m| m.presentation_plan.as_ref()).unwrap();
+        assert_eq!(frozen["slides"][3]["relationship"], "sequence");
+        let attachment = &detail.attachments[0];
+        let bytes = std::fs::read(session_dir(config.path(), &sid).join("attachments").join(&attachment.id)).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut formula = String::new();
+        archive.by_name("ppt/slides/slide5.xml").unwrap().read_to_string(&mut formula).unwrap();
+        assert_eq!(formula.matches("<m:nary>").count(), 3);
+        assert!(formula.contains("<m:scr m:val=\"script\""));
+        assert!(formula.contains(">log</m:t>") && formula.contains(">exp</m:t>"));
+        assert!(formula.contains("Equation fallback (rendered image, not editable math)"));
+        let authority = json!({"sessionId":sid,"attachmentId":attachment.id,"expectedOwner":owner(),"expectedGeneration":host.generation()});
+        let manifest = host.file_preview(serde_json::from_value(authority.clone()).unwrap()).await.unwrap();
+        assert_eq!(manifest["totalPages"], 8);
+        let evidence = std::env::var_os("OFOX_CLIP_CONTRACT_OUT").map(PathBuf::from);
+        if let Some(out) = &evidence {
+            assert!(out.is_absolute());
+            std::fs::create_dir(out).expect("use a fresh evidence directory");
+            std::fs::write(out.join("clip-contract.pptx"), &bytes).unwrap();
+        }
+        for number in 1..=8 {
+            let mut page = authority.clone();
+            page["version"] = manifest["version"].clone();
+            page["page"] = json!(number);
+            page["scale"] = json!(1);
+            let image = host.file_preview_page(serde_json::from_value(page).unwrap()).await.unwrap();
+            assert_eq!(image["mimeType"], "image/jpeg");
+            use base64::Engine;
+            let jpeg = base64::engine::general_purpose::STANDARD.decode(image["dataBase64"].as_str().unwrap()).unwrap();
+            assert!(jpeg.starts_with(&[0xff, 0xd8]) && jpeg.len() > 100);
+            if let Some(out) = &evidence { std::fs::write(out.join(format!("page-{number}.jpg")), jpeg).unwrap(); }
+        }
+        host.shutdown().await;
+        evidence.map(|out| (out, json!({
+                "scope":"trusted-offline-clip-contract-through-native-windows-host",
+                "sourceSha":option_env!("OFOX_BUILD_SOURCE_SHA").unwrap_or("uncommitted"),
+                "sourceClean":option_env!("OFOX_BUILD_SOURCE_CLEAN") == Some("true"),
+                "artifactSha256":sha(&bytes),"generatedAttachments":1,"renderedPages":8,
+                "canonicalFourthPageRelationship":"sequence","nativeSums":3,"paidModelCalls":0,
+                "liveModelAcceptance":false,"powerPointRoundTrip":"pending"
+            })))
+    });
+    let receipts = runner::windows_document_sandbox_receipts(before);
+    let successful: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| {
+            receipt["trustedProbe"] == false
+                && receipt["policy"] == "lpac-v1"
+                && receipt["tokenVerified"] == true
+                && receipt["childProcessDenied"] == true
+                && receipt["lowImageDenied"] == true
+                && receipt["jobStopped"] == true
+                && receipt["cleanupComplete"] == true
+                && receipt["taskRemoved"] == true
+                && receipt["profileRemoved"] == true
+                && receipt["cancelled"] == false
+                && receipt["status"] == 0
+        })
+        .collect();
+    assert!(
+        successful.iter().any(|r| r["executable"]
+            .as_str()
+            .is_some_and(|p| p.replace('\\', "/").starts_with("node/"))),
+        "fresh Python LPAC execution proof missing: {receipts:?}"
+    );
+    assert!(
+        successful.iter().any(|r| r["executable"]
+            .as_str()
+            .is_some_and(|p| p.contains("officecli"))),
+        "fresh OfficeCLI proof missing: {receipts:?}"
+    );
+    if let Some((out, mut receipt)) = evidence {
+        receipt["isolationReceipts"] = json!(successful);
+        receipt["status"] = json!("passed");
+        write_json(&out.join("receipt.json"), &receipt, KEY);
+    }
+}
+
 #[test]
 #[ignore = "explicit #1701 root controller only; loopback proxy, bounded shared ledger, no real key in this process"]
 #[serial_test::serial]
@@ -539,11 +739,13 @@ fn one_guarded_task() {
     let history = std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
         .unwrap_or_default();
     let calls = captured_calls(&history);
-    let freeze = calls
+    let plan = detail
+        .messages
         .iter()
-        .find(|call| call["name"] == "freeze_presentation_plan")
-        .map(|call| call["arguments"].clone())
+        .rev()
+        .find_map(|message| message.presentation_plan.clone())
         .unwrap_or(Value::Null);
+    let freeze = captured_freeze(&history, &plan);
     let creates: Vec<_> = calls
         .iter()
         .filter(|call| {
@@ -574,12 +776,6 @@ fn one_guarded_task() {
     } else {
         Value::Null
     };
-    let plan = detail
-        .messages
-        .iter()
-        .rev()
-        .find_map(|message| message.presentation_plan.clone())
-        .unwrap_or(Value::Null);
     let engine_executed = python && files.len() == 1;
     #[cfg(windows)]
     let isolation_receipts = runner::windows_document_sandbox_receipts(before_sequence);
