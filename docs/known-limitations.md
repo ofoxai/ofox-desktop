@@ -771,8 +771,10 @@ What the files and previews are:
   On the same Mac, typecheck, formatting and all-targets Clippy passed.
   The full Rust suite passed 4,526 tests with 28 ignored, the frontend
   passed 3,344 with one skipped, and runtime and search passed 805 and 102.
-  The #1733 Host fixture passed in a separate opt-in run. Windows native
-  verification is pending.
+  The #1733 Host fixture passed in a separate opt-in run. Windows now uses
+  the same 12 MiB capture limit for on-demand workspace pages. The opt-in
+  Host regression accepts a task-private copy on both platforms. Windows
+  verification with the original sample is pending.
 - The 2026-11-21 local Mac integration retains the large-page preview fix and
   metadata-first Skills discovery while incorporating background document
   preparation. Portable barrier regressions cover plain Full Auto questions

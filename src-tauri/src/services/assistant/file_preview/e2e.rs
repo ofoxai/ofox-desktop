@@ -10,11 +10,11 @@ use crate::services::assistant::{
     store::AssistantStore,
     types::{id, Attachment, Event as AssistantEvent},
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::collections::HashSet;
 use std::{
     io::{Cursor, Write},
@@ -460,7 +460,7 @@ fn preview_e2e_nine_html_reopens_keep_http_authority_version_and_keyless_boundar
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn jpeg_dimensions(bytes: &[u8]) -> (u16, u16) {
     assert!(bytes.starts_with(&[255, 216, 255]) && bytes.ends_with(&[255, 217]));
     let mut offset = 2usize;
@@ -489,7 +489,7 @@ fn jpeg_dimensions(bytes: &[u8]) -> (u16, u16) {
     panic!("JPEG dimensions were not found")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[tokio::test]
 #[ignore = "Requires a task-private copy of the original issue #1733 deck"]
 async fn preview_e2e_issue_1733_renders_original_large_pages_without_changing_the_deck() {

@@ -574,7 +574,7 @@ impl AssistantHost {
                 &home,
                 &runtime,
                 Duration::from_secs(60),
-                super::documents::runner::SVG_OUTPUT_LIMIT,
+                FILE_PAGE_SVG_LIMIT,
             )
             .await?
         };
