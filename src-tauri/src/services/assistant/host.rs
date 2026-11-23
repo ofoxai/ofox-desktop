@@ -7999,11 +7999,11 @@ while read line; do :; done"#,
         let sid = host
             .store(&identity().owner)
             .unwrap()
-            .create("test/model", false)
+            .create("tool/model", false)
             .unwrap()
             .session
             .id;
-        let send = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic text only","presentationWorkflowVersion":1})).unwrap();
+        let send = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"PPT是什么？怎么创建PPT？","presentationWorkflowVersion":1})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), host.send(send))
             .await
             .expect("ordinary text must not wait for document isolation")
@@ -8026,6 +8026,38 @@ while read line; do :; done"#,
                 .is_err(),
             "explicit document work waits for the shared proof"
         );
+        let mut other_deck_sends = Vec::new();
+        for (text, skill) in [
+            (
+                "请制作一份用于本机验收的4页16:9 Transformer介绍PPT：包含原生可编辑的自注意力公式。",
+                None,
+            ),
+            ("Transformer introduction", Some("ofox-office-pptx")),
+        ] {
+            let sid = host
+                .store(&identity().owner)
+                .unwrap()
+                .create("tool/model", false)
+                .unwrap()
+                .session
+                .id;
+            let send = serde_json::from_value(json!({
+                "sessionId":sid,"runId":id(),"operationId":id(),"text":text,
+                "presentationWorkflowVersion":1,"skill":skill
+            }))
+            .unwrap();
+            let mut pending = tokio::spawn({
+                let host = host.clone();
+                async move { host.send(send).await }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err(),
+                "a direct PPT request or selected PPT skill must share the proof: {text}"
+            );
+            other_deck_sends.push(pending);
+        }
         host.generation.fetch_add(1, Ordering::SeqCst);
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -8055,6 +8087,9 @@ while read line; do :; done"#,
         assert_eq!(event.data["owner"], identity().owner);
         assert_eq!(event.data["generation"], host.generation());
         assert_eq!(deck_send.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        for pending in other_deck_sends {
+            assert_eq!(pending.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        }
         assert!(
             tokio::time::timeout(Duration::from_millis(20), entered.notified())
                 .await

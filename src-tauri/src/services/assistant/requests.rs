@@ -17,6 +17,116 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// A narrow startup hint, never execution authority. Only the current user's
+/// opening clause is considered; tutorials, quotations and history are not
+/// document requests. Ambiguous turns can still select a PPT style or skill.
+fn requests_presentation(text: &str) -> bool {
+    fn word_position(text: &str, word: &str) -> Option<usize> {
+        text.match_indices(word).find_map(|(at, _)| {
+            let boundary = |ch: char| !ch.is_ascii_alphanumeric() && ch != '_';
+            (text[..at].chars().next_back().is_none_or(boundary)
+                && text[at + word.len()..].chars().next().is_none_or(boundary))
+            .then_some(at)
+        })
+    }
+    let clause = text
+        .split(['\n', '\r', '。', '；', ';'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if clause.contains(['`', '?', '？']) {
+        return false;
+    }
+    let ascii_format = ["pptx", "ppt", "powerpoint", "slides"]
+        .iter()
+        .filter_map(|word| word_position(&clause, word))
+        .min();
+    let local_format = [
+        "幻灯片",
+        "演示文稿",
+        "スライド",
+        "プレゼンテーション",
+        "パワーポイント",
+    ]
+    .iter()
+    .filter_map(|word| clause.find(word))
+    .min();
+    if ascii_format.is_none() && local_format.is_none() {
+        return false;
+    }
+    let direct = ["请帮我", "请你", "帮我", "请", "please "]
+        .iter()
+        .find_map(|prefix| clause.strip_prefix(prefix))
+        .unwrap_or(&clause)
+        .trim_start();
+    let chinese = [
+        "制作", "生成", "创建", "做", "修改", "编辑", "更新", "重做", "调整", "优化",
+    ]
+    .iter()
+    .any(|verb| direct.starts_with(verb))
+        && !["怎么", "如何", "什么", "方法", "教程", "能不能", "是否"]
+            .iter()
+            .any(|question| direct.contains(question));
+    let english = [
+        "create ",
+        "generate ",
+        "make ",
+        "build ",
+        "edit ",
+        "update ",
+        "revise ",
+        "modify ",
+        "redesign ",
+    ]
+    .iter()
+    .any(|verb| direct.starts_with(verb))
+        && ascii_format.is_some_and(|at| {
+            // "Generate Python code to create a PPTX" requests code, not a
+            // presentation. Likewise a tutorial or UI component about slides.
+            ![
+                "markdown",
+                "tutorial",
+                "code",
+                "function",
+                "component",
+                "script",
+                "guide",
+                "react",
+                "html",
+            ]
+            .iter()
+            .any(|word| word_position(&clause[..at], word).is_some())
+                && !["pptx", "ppt", "powerpoint", "slides"]
+                    .iter()
+                    .any(|format| {
+                        clause[at..].strip_prefix(format).is_some_and(|tail| {
+                            let tail = tail.trim_start();
+                            [
+                                "tutorial",
+                                "component",
+                                "function",
+                                "code",
+                                "script",
+                                "guide",
+                            ]
+                            .iter()
+                            .any(|word| word_position(tail, word) == Some(0))
+                        })
+                    })
+        });
+    chinese
+        || english
+        || [
+            "を作成してください",
+            "を修正してください",
+            "を編集してください",
+            "を更新してください",
+        ]
+        .iter()
+        .any(|ending| direct.trim_end_matches(['.', '！', '!']).ends_with(ending))
+}
+
 // Only supported UI language codes cross the runtime boundary. The renderer
 // resolves first-launch language; persisted settings keep old callers working.
 fn request_ui_language(requested: Option<&str>, saved: Option<&str>) -> String {
@@ -738,6 +848,8 @@ impl AssistantHost {
         // A normal text turn carries workflowVersion too, so that flag alone
         // must never make chat wait for optional document isolation.
         let deck_context = branch.presentation_style_id.is_some()
+            || branch.skill.as_deref() == Some(super::skills::PPTX_BUILTIN)
+            || requests_presentation(branch.resent_text.as_deref().unwrap_or(&request.text))
             || branch.file_references.iter().any(|reference| {
                 record.attachments.iter().any(|file| {
                     file.id == reference.attachment_id
@@ -2254,6 +2366,51 @@ mod tests {
     use super::*;
     use crate::services::assistant::host::Identity;
 
+    #[test]
+    fn current_user_presentation_commands_wait_without_matching_format_questions() {
+        for text in [
+            "请制作一份用于本机验收的4页16:9 Transformer介绍PPT：包含可编辑公式。",
+            "制作一个transformer汇报PPT",
+            "帮我生成PPTX，不联网。",
+            "请帮我修改这份演示文稿",
+            "更新第4页幻灯片",
+            "Create an eight-page PowerPoint presentation.",
+            "Please generate a PPTX with native equations.",
+            "Edit the slides, preserving their notes.",
+            "Transformerのスライドを作成してください。",
+            "このプレゼンテーションを修正してください。",
+        ] {
+            assert!(requests_presentation(text), "{text}");
+        }
+        for text in [
+            "hi",
+            "PPT是什么？",
+            "怎么创建PPT",
+            "请解释如何制作幻灯片",
+            "制作PPT需要什么软件",
+            "生成PPT的方法",
+            "你能生成PPT吗？",
+            "Explain how to create PowerPoint presentations.",
+            "Can you edit PPTX files?",
+            "Generate an appt reminder.",
+            "Create a powerpoint_helper function.",
+            "Create a slideshare link.",
+            "Create a Markdown tutorial explaining how to edit PowerPoint.",
+            "Create a React slides component.",
+            "Generate Python code to create a PPTX.",
+            "Create a slides component.",
+            "Create a PowerPoint tutorial.",
+            "`Create a PPTX`",
+            "\"Create a PPTX\"",
+            "> Create a PPTX",
+            "Here is an example:\nCreate a PPTX",
+            "先解释一下。请制作PPT",
+            "スライドの作成方法を説明してください。",
+            "「スライドを作成してください」",
+        ] {
+            assert!(!requests_presentation(text), "{text}");
+        }
+    }
     #[test]
     #[cfg(unix)]
     fn local_task_home_is_pinned_before_partial_mutation_results() {
