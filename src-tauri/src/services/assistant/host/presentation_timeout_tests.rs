@@ -27,7 +27,7 @@ fn timeout_presentation_run() -> (tempfile::TempDir, Arc<AssistantHost>, Arc<Run
     let state = Arc::get_mut(&mut run).unwrap();
     state.presentation_enabled = true;
     state.local_enabled = true;
-    state.local_home = Some(tmp.path().to_path_buf());
+    state.local_home = Some(super::super::tools::scope::resolve(tmp.path()).unwrap());
     state.media = Some(MediaRun::new(Default::default()));
     host.register_run(run.clone(), host.generation(), || {
         store.mutate(&sid, |record| {
