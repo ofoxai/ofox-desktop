@@ -9,15 +9,15 @@ Prefer the offered `{"kind":"python","code":"…"}` route; otherwise use "When P
 
 When offered, use `get_presentation_candidates` first, choose an eligible ID (manual wins), then read `get_presentation_style({id:"…"})`. Otherwise list styles. Match audience/density; adaptations are experimental.
 
-Distinguish theme/fonts, composition, narrative, workflow and engine. Keep composition, not just colours. Partial native layouts need no HTML runtime/remote assets. Check font fallback; see [workflow](resources/design-workflow.md).
+Distinguish theme, composition, narrative and engine. Keep composition and font fallback; native layouts need no HTML runtime. See [workflow](resources/design-workflow.md).
 
-Plan each page's claim, evidence, relationship, visual, composition, density and editing. Check facts/exports; plans certify nothing. Core formulas use `equation()` even on diagram pages. Visual kinds: `native-chart` data, `native-math` formulas, `native-diagram` simple steps/relations, `code-figure` a richer diagram or curve drawn with `figure()`/`plot()`, `generated-image` a picture.
+Plan each page's claim, evidence, relationship, visual, composition, density and editing. Verify facts/exports. Core formulas use `equation()` even on diagram pages. Visual kinds: `native-chart`, `native-math`, `native-diagram`, `code-figure` (diagram/curve via `figure()`/`plot()`), `generated-image`.
 
-Use candidates for requirements (optional unknowns: null), then `freeze_presentation_plan` once for all pages. Explain inferences. Current plan references bind automatically; explicit ones must match. New plan, new turn.
+Candidate unknowns: null. `freeze_presentation_plan` once for all pages; explain inferences. References bind automatically; explicit ones must match. New plan, new turn.
 
-Native editing is not prior round-trip certification: default to `unverifiedAllowed`; use `verifiedRequired` only for explicit certification demands. If blocked, follow `nextAction`, never retry unchanged or skip freezing.
+Native editing needs `unverifiedAllowed`; `verifiedRequired` adds explicit prior round-trip certification. If blocked, follow `nextAction`; never retry unchanged or skip freezing.
 
-The opening Host text says whether slide images are on and how many (up to N, or exactly N): plan `generated-image` pages to match; when off, plan none. It also lists pictures the conversation already holds: place one free as a `user-image` whose `assetId` is its attachment id, and keep an earlier deck's pictures that way when changing it. A plan grants no budget; without Host approval use supplied assets or the declared fallback. Planned `generate_image` calls carry `presentationAssetId`/`planId`/`revision`. Never expose private paths or asset bytes.
+Host text states image count (off/ceiling/exact): match `generated-image` plans; off means none. Existing pictures are free `user-image` assets (`assetId`: attachment id); reuse earlier deck pictures when editing. A plan grants no budget: without Host approval use supplied assets/fallback. Planned `generate_image` calls carry `presentationAssetId`/`planId`/`revision`. Never expose private paths or asset bytes.
 
 ## Python deck code
 
@@ -66,8 +66,8 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `pyramid(slide, levels, x, y, w, h, size=14)`: 2–6 native levels, narrowest first; label or `{"title","body"}`.
 - `code(slide, source, x, y, w, h, size=12)`: ≤40 monospaced lines on a dark panel.
 - `formula(slide, x, y, w, h, lines, size=15)`: plain text; warns; not academic math.
-- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; LaTeX adds noneditable PNG. `{"latex":r"\sin(x)"}` or structures. LaTeX: scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos/log/exp,quad (em-space),mathrm/operatorname (1–64 ASCII alphanumerics),mathcal (1–64 literal ASCII letters). `\log`/`\exp` are upright functions; `\mathcal{L}` is an editable script-style math run. Brace signed/multi-digit scripts and every sum body; other macros fail. Literal text. Verify WPS/PowerPoint display/editing.
-- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels; process and its sequence alias draw ordered arrows, comparison draws independent items without arrows. Do not pass spatial: choose comparison for independent spatial items, or fork_join() for parallel branches with source/merge. Do not infer sequential arrows from a spatial layout.
+- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; `{"latex":r"\log(x)"}` adds PNG fallback. Supports scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos/log/exp,quad,mathrm/operatorname,mathcal. Names: 1–64 ASCII alphanumerics (mathcal: letters only). Functions upright; mathcal editable script. Brace signed/multi-digit scripts and all sum bodies. Other macros fail. Verify Office display/editing.
+- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 labels. process/sequence: ordered arrows; comparison: no arrows. spatial fails: choose comparison for independent items or fork_join() for source→parallel branches→merge.
 - `fork_join(slide, branches, x, y, w, h, source="", merge="")`: 2–6 parallel label strings; source→all→merge, no branch-to-branch arrows. For lesson/panel bodies use the `main` box, not full-slide `G`.
 - `native_chart(slide, kind, categories, series, x, y, w, h, title="")`: native chart plus workbook; bar/line/pie; series `[{"name":"…","values":[…]}]`, at most 100 supplied finite values.
 - `shape(slide, kind, x, y, w, h, fill=None, line=None, line_w=0.75, radius=None)`: `MSO_SHAPE.RECTANGLE`, `ROUNDED_RECTANGLE`, `OVAL`, etc.; radius only for rounded.
@@ -80,18 +80,7 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - Native chart: `slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(x), Inches(y), Inches(w), Inches(h), chart_data).chart`; set chart/axis/data-label fonts ≥12pt and distinct series colours.
 - Fit: `text_height(text, pt, width_in, spacing=1.3)`, `lines_for(text, pt, width_in)`, `em_width(s)`, `bullets_height(items, pt, width_in, gap_pt=6)`, `need(what, needed, has, slide=None)` (overflow lint), `rgb(h)` (hex to colour).
 
-### CLIP diagrams and loss
-
-Planning uses `relationship="sequence"` for an ordered workflow (`process` is a model-input alias). Python accepts `relation(..., kind="sequence")` or `kind="process"`. For the parallel image/text encoders, use `fork_join(..., source="Image/text pairs", merge="Similarity")`, not `relation(kind="spatial")` or arrows between the two branches.
-
-Keep both outer and inner summands explicitly braced. Define the score `s_{ij}` and temperature `\tau`; the full symmetric loss below includes both image→text and text→image directions and normalizes over the batch. Split the explanation across pages if needed; keep each equation box large enough for its rendered preview.
-
-```python
-clip_loss = r"\mathcal{L}=-\frac{1}{2N}\sum_{i=1}^{N}{\left(\log\frac{\exp(s_{ii}/\tau)}{\sum_{j=1}^{N}{\exp(s_{ij}/\tau)}}+\log\frac{\exp(s_{ii}/\tau)}{\sum_{j=1}^{N}{\exp(s_{ji}/\tau)}}\right)}"
-equation(slide, .75, 2, 11.8, 2.4, {"latex": clip_loss}, size=16)
-```
-
-Write `\sum_i{...}` and `\sum_j{...}` at their respective scopes; never `\sum_i\log...` or an unbraced inner sum. Do not double-escape a Python raw string, add unsupported layout macros such as `\nobreak`, or replace editable equations with a picture.
+For CLIP, first read [loss/diagram examples](resources/clip-loss.md). Brace both sums. Plan `sequence` (`process` alias); encoders use fork/join.
 
 ## Design rules
 

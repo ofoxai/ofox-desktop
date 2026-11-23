@@ -126,7 +126,7 @@ fn captured_freeze(history: &str, plan: &Value) -> Value {
         .iter()
         .enumerate()
         .rev()
-        .filter_map(|(index, entry)| {
+        .find_map(|(index, entry)| {
             let message = &entry["message"];
             (entry["type"] == "message"
                 && message["role"] == "toolResult"
@@ -155,7 +155,6 @@ fn captured_freeze(history: &str, plan: &Value) -> Value {
                 })
                 .flatten()
         })
-        .next()
         .unwrap_or(Value::Null)
 }
 
