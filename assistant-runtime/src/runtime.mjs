@@ -25,6 +25,7 @@ import {
 import { skillTools, skillPrompt } from "./skills.mjs";
 import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
+import { modelActivity } from "./model-activity.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -2379,6 +2380,9 @@ export class AssistantRuntime {
         flush("thinking_delta", true);
         this.notify(context, "thinking_end");
       };
+      const activity = modelActivity((bytes) =>
+        this.notify(context, "model_activity", { bytes }),
+      );
       const preparations = new Map();
       const prepareTool = (update) => {
         if (
@@ -2461,6 +2465,10 @@ export class AssistantRuntime {
         }
         if (event.type === "message_update") {
           const update = event.assistantMessageEvent;
+          if (
+            ["text_delta", "thinking_delta", "toolcall_delta"].includes(update.type)
+          )
+            activity(update.delta);
           if (update.type === "text_delta") {
             endThinking();
             pendingText += update.delta;

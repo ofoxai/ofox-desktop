@@ -133,6 +133,16 @@ already in progress can finish before the UI receives the timeout. The turn can
 retain attachments already committed and previews prepared before expiry. Record
 the turn outcome and the retained file checks separately during acceptance.
 
+A persisted, accepted presentation plan extends the ordinary 15-minute turn
+limit to a fixed one-hour ceiling measured from that turn's start. Re-freezing
+does not renew it. An inactive model stream still stops after five minutes;
+nonempty text, reasoning and streamed tool arguments renew that idle timer,
+while bounded Host document/media work is allowed to finish within its existing
+worker limits and the overall ceiling. Local configuration callbacks keep their
+original time budget. Large decks can still take several minutes to render and
+validate; this policy does not make rendering faster or automatically replay a
+timed-out paid request.
+
 Verification debt retention covers known tool mutations. A generic write/edit
 may commit before a later identity fence rejects its result; the encrypted
 change journal remains, but this slice does not add durable task recovery for

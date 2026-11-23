@@ -61,6 +61,8 @@ pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
 const RUNTIME_EXITED: &str = "assistant_runtime_exited";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
+const PRESENTATION_RUN_DEADLINE: Duration = Duration::from_secs(60 * 60);
+const PRESENTATION_MODEL_IDLE: Duration = Duration::from_secs(5 * 60);
 /// How long a fetched model catalog is trusted.
 const MODELS_TTL: Duration = Duration::from_secs(600);
 /// How long a send does not ask again a catalog source whose read failed: a
@@ -257,6 +259,9 @@ pub struct RunControl {
     live_input: Mutex<Option<mpsc::Sender<super::live::LiveCommand>>>,
     pub cancel: watch::Sender<bool>,
     pub deadline: tokio::time::Instant,
+    initial_deadline: tokio::time::Instant,
+    presentation_deadline: tokio::time::Instant,
+    presentation_admitted: AtomicBool,
     /// The accepted Ofox credential, never selected from the scrub list.
     ofox_api_key: Mutex<String>,
     /// Every secret this run must redact, including Ofox keys and unrelated
@@ -266,6 +271,7 @@ pub struct RunControl {
 
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
+        let started = tokio::time::Instant::now();
         Self {
             presentation_style_id: request.presentation_style_id.clone(),
             presentation_enabled: false,
@@ -301,9 +307,45 @@ impl RunControl {
             live_runs: Mutex::new(HashSet::new()),
             live_input: Mutex::new(None),
             cancel: watch::channel(false).0,
-            deadline: tokio::time::Instant::now() + RUN_DEADLINE,
+            deadline: started + RUN_DEADLINE,
+            initial_deadline: started + RUN_DEADLINE,
+            presentation_deadline: started + PRESENTATION_RUN_DEADLINE,
+            presentation_admitted: AtomicBool::new(false),
             ofox_api_key: Mutex::new(secret.clone()),
             secret: Mutex::new(vec![secret]),
+        }
+    }
+
+    /// Only an accepted, persisted deck plan gets the longer overall budget.
+    /// Local callbacks retain `deadline`; an explicitly shorter limit also
+    /// constrains presentation work. Re-freezing never moves the absolute cap.
+    pub(super) fn run_deadline(&self) -> tokio::time::Instant {
+        if self.presentation_admitted.load(Ordering::SeqCst)
+            && self.deadline >= self.initial_deadline
+        {
+            self.presentation_deadline
+        } else {
+            self.deadline
+        }
+    }
+
+    pub(super) fn admit_presentation_deadline(&self) -> Result<(), String> {
+        if self.cancelled() {
+            return Err(CANCELLED.into());
+        }
+        if tokio::time::Instant::now() >= self.run_deadline() {
+            return Err(RUN_TIMEOUT.into());
+        }
+        self.presentation_admitted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn model_wait_deadline(&self, progress: tokio::time::Instant) -> tokio::time::Instant {
+        let end = self.run_deadline();
+        if self.presentation_admitted.load(Ordering::SeqCst) {
+            end.min(progress + PRESENTATION_MODEL_IDLE)
+        } else {
+            end
         }
     }
 
@@ -832,6 +874,8 @@ impl From<&str> for Failure {
 #[derive(Default)]
 struct Attempt {
     projection: ProjectionBuffer,
+    model_progress: Option<tokio::time::Instant>,
+    model_progress_bytes: u64,
     /// Text reached the user or a request counted tokens: a refused key is
     /// then not retried, so nothing shown or billed is replayed.
     progressed: bool,
@@ -1966,7 +2010,11 @@ impl AssistantHost {
         };
         if result.is_err()
             && !attempt.answered
-            && (control.cancelled() || tokio::time::Instant::now() >= control.deadline)
+            && (control.cancelled()
+                || tokio::time::Instant::now() >= control.run_deadline()
+                || result
+                    .as_ref()
+                    .is_err_and(|error| error.code == RUN_TIMEOUT))
         {
             // Let the runtime save the interrupted turn before the process goes.
             self.stop_runtime(control, &request_id, &mut input, &mut output, &mut buffer)
@@ -2057,6 +2105,7 @@ impl AssistantHost {
         attempt.sent = true;
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut pending: HashMap<String, super::live::LiveCommand> = HashMap::new();
+        let mut model_progress = tokio::time::Instant::now();
         loop {
             let length = tokio::select! {
                 _ = cancel.changed() => return Err(CANCELLED.into()),
@@ -2085,7 +2134,7 @@ impl AssistantHost {
                         return Err(IDENTITY_CHANGED.into());
                     }
                     self.validate_run(control)?;
-                    if tokio::time::Instant::now() >= control.deadline {
+                    if tokio::time::Instant::now() >= control.model_wait_deadline(model_progress) {
                         return Err(RUN_TIMEOUT.into());
                     }
                     continue;
@@ -2094,6 +2143,9 @@ impl AssistantHost {
             };
             if length == 0 {
                 return Err(RUNTIME_EXITED.into());
+            }
+            if tokio::time::Instant::now() >= control.model_wait_deadline(model_progress) {
+                return Err(RUN_TIMEOUT.into());
             }
             let value: Value = serde_json::from_slice(buffer).map_err(|_| PROTOCOL)?;
             buffer.clear();
@@ -2107,6 +2159,9 @@ impl AssistantHost {
                 let _ = command.reply.send(result);
             } else if value["method"] == "event" {
                 self.on_event(control, &value["params"], attempt).await?;
+                if let Some(progress) = attempt.model_progress.take() {
+                    model_progress = progress;
+                }
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
@@ -2125,7 +2180,7 @@ impl AssistantHost {
                     let result = self.dispatch_document_tool(control, &value["params"]).await;
                     // Tool execution owns its workers through cleanup. A
                     // document deadline ends the run, not just the callback.
-                    if tokio::time::Instant::now() >= control.deadline
+                    if tokio::time::Instant::now() >= control.run_deadline()
                         || result.as_ref().is_err_and(|error| error == RUN_TIMEOUT)
                     {
                         if self.identity().await? != control.identity {
@@ -2143,6 +2198,16 @@ impl AssistantHost {
                 } else {
                     self.dispatch_tool(control, &value["params"]).await
                 };
+                if self.identity().await? != control.identity {
+                    return Err(IDENTITY_CHANGED.into());
+                }
+                self.validate_run(control)?;
+                if tokio::time::Instant::now() >= control.run_deadline() {
+                    return Err(RUN_TIMEOUT.into());
+                }
+                // Tool workers have their own bounded waits. Their elapsed
+                // time is not a model stall, but cannot renew the overall cap.
+                model_progress = tokio::time::Instant::now();
                 let reply = tool_reply(
                     &value["id"],
                     result,
@@ -2171,6 +2236,16 @@ impl AssistantHost {
         }
         super::mcp::scrub_event_data(&mut data, &control.mcp)?;
         match kind {
+            "model_activity" => {
+                let bytes = data["bytes"]
+                    .as_u64()
+                    .filter(|bytes| *bytes > 0 && *bytes <= 9_007_199_254_740_991)
+                    .ok_or(PROTOCOL)?;
+                if bytes > attempt.model_progress_bytes {
+                    attempt.model_progress_bytes = bytes;
+                    attempt.model_progress = Some(tokio::time::Instant::now());
+                }
+            }
             "retrying" => {
                 let retry = data["attempt"]
                     .as_u64()
@@ -2185,6 +2260,12 @@ impl AssistantHost {
                 self.emit(control, "steer_applied", data);
             }
             "text_delta" | "thinking_delta" => {
+                if data["delta"]
+                    .as_str()
+                    .is_some_and(|delta| !delta.is_empty())
+                {
+                    attempt.model_progress = Some(tokio::time::Instant::now());
+                }
                 attempt.progressed = true;
                 attempt.projection.push(control, kind, &mut data);
                 if attempt.projection.due() {
@@ -2831,6 +2912,7 @@ mod tests {
     use super::*;
 
     include!("host/local_interruption_tests.rs");
+    include!("host/presentation_timeout_tests.rs");
 
     #[tokio::test]
     async fn task_progress_persists_without_local_access_before_publication() {

@@ -3303,9 +3303,18 @@ test("tool preparation is visible while arguments stream, before any execution a
                           type: "function",
                           function: {
                             name: "create_document",
-                            arguments:
-                              '{"name":"notes.md","format":"md","content":"',
+                            arguments: '{"name":"notes.md",',
                           },
+                        },
+                      ],
+                    }),
+                  );
+                  controller.enqueue(
+                    chunk({
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: { arguments: '"format":"md","content":"' },
                         },
                       ],
                     }),
@@ -3358,6 +3367,10 @@ test("tool preparation is visible while arguments stream, before any execution a
       false,
     );
     assert.equal(calls.length, 0, "the Host has not executed a tool");
+    const activity = events.filter((event) => event.type === "model_activity");
+    assert.ok(activity.length > 0, "streamed arguments must renew model liveness");
+    assert.deepEqual(Object.keys(activity[0].data), ["bytes"]);
+    assert.ok(activity[0].data.bytes > 0);
   } finally {
     release();
     await running;

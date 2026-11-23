@@ -3660,7 +3660,7 @@ impl AssistantHost {
         params: &Value,
     ) -> Result<Value, String> {
         let call = self.tool_call(run, params).await?;
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         let media = run
             .media
             .as_ref()
@@ -3680,7 +3680,7 @@ impl AssistantHost {
         let result = if run.cancelled() {
             result
         } else {
-            check_deadline(Some(run.deadline)).and(result)
+            check_deadline(Some(run.run_deadline())).and(result)
         };
         let result = result.map_err(|error| scrub_secrets(&error, &run.secrets()));
         media.end_call(call.tool_call_id, fingerprint, &result)?;
@@ -3722,10 +3722,10 @@ impl AssistantHost {
         // Refused before the document counts; a sandbox probe that fails
         // later (see `python_deck`) is refused the same way.
         if matches!(document.content, Content::Python(_)) {
-            tokio::time::timeout_at(run.deadline, self.wait_document_preparation())
+            tokio::time::timeout_at(run.run_deadline(), self.wait_document_preparation())
                 .await
                 .map_err(|_| RUN_TIMEOUT.to_owned())?;
-            check_deadline(Some(run.deadline))?;
+            check_deadline(Some(run.run_deadline()))?;
             if !self.python_offered() {
                 return Err(refuse(FAILED, NO_PYTHON));
             }
@@ -3748,7 +3748,7 @@ impl AssistantHost {
                 &document.name,
                 document.format,
                 &made,
-                Some(run.deadline),
+                Some(run.run_deadline()),
             )
             .await
         }
@@ -3781,7 +3781,7 @@ impl AssistantHost {
             if let Some(source) = Self::source_snapshot(run)? {
                 result["targetPageNumbers"] = json!(source.page_numbers);
             }
-            check_deadline(Some(run.deadline))?;
+            check_deadline(Some(run.run_deadline()))?;
             Ok((made, result))
         }
         .await;
@@ -3853,7 +3853,7 @@ impl AssistantHost {
                 &name,
                 preview.format,
                 &preview.made,
-                Some(run.deadline),
+                Some(run.run_deadline()),
             )
             .await;
         if delivered.is_ok() {
@@ -4065,7 +4065,7 @@ impl AssistantHost {
             scratch: None,
             read_root: Some(&runtime),
             timeout: PYTHON_TIMEOUT,
-            deadline: Some(run.deadline),
+            deadline: Some(run.run_deadline()),
         };
         // Windows readiness proves both engines in the same runtime. The
         // Python launcher still verifies the exact bytes and admission
@@ -4075,7 +4075,7 @@ impl AssistantHost {
         } else {
             self.python_engine(&python).await
         };
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         let sandbox = sandbox.ok_or_else(no_python)?;
         python.sandbox = Some(&sandbox);
         let frozen = run
@@ -4136,7 +4136,7 @@ impl AssistantHost {
                 &serde_json::to_vec(&source.meta()).map_err(|_| PROTOCOL)?,
             )?;
         }
-        let _turn = tokio::time::timeout_at(run.deadline, self.python_turn.lock())
+        let _turn = tokio::time::timeout_at(run.run_deadline(), self.python_turn.lock())
             .await
             .map_err(|_| RUN_TIMEOUT.to_owned())?;
         make_python(
@@ -4160,9 +4160,9 @@ impl AssistantHost {
         document: &Document,
         engine: Option<PathBuf>,
     ) -> Result<Made, String> {
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         attachments::tool_room(&self.load(run).await?, 1, 0)?;
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         let store = self.store(&run.identity.owner)?;
         // The folder outlives this call: the runtime reads the preview from
         // it once the call has answered, and a preview is delivered from it.
@@ -4176,7 +4176,7 @@ impl AssistantHost {
             move || prepare(&store, &sid, &doc_id, &document, &language)
         })
         .await?;
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         let format = document.format;
         let made = match (format.engine(), engine.as_deref(), &document.content) {
             (Engine::Office, Some(exe), content) => {
@@ -4194,10 +4194,10 @@ impl AssistantHost {
                     scratch: scratch.as_deref(),
                     read_root: None,
                     timeout: ENGINE_TIMEOUT,
-                    deadline: Some(run.deadline),
+                    deadline: Some(run.run_deadline()),
                 };
                 let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
-                check_deadline(Some(run.deadline))?;
+                check_deadline(Some(run.run_deadline()))?;
                 work.sandbox = sandbox.as_deref();
                 match content {
                     Content::Python(_) => {
@@ -4224,10 +4224,10 @@ impl AssistantHost {
                     scratch: None,
                     read_root: None,
                     timeout: ENGINE_TIMEOUT,
-                    deadline: Some(run.deadline),
+                    deadline: Some(run.run_deadline()),
                 };
                 let sandbox = self.engine_sandbox(&self.typst_sandbox, &work).await;
-                check_deadline(Some(run.deadline))?;
+                check_deadline(Some(run.run_deadline()))?;
                 work.sandbox = sandbox.as_deref();
                 make_pdf(&work, body).await?
             }
@@ -4242,7 +4242,7 @@ impl AssistantHost {
             },
             _ => return Err(DISABLED.into()),
         };
-        check_deadline(Some(run.deadline))?;
+        check_deadline(Some(run.run_deadline()))?;
         if format == DocumentFormat::Pptx && run.presentation_enabled {
             let slides = run
                 .presentation
@@ -4293,7 +4293,7 @@ impl AssistantHost {
         check_deadline(deadline)?;
         // Finalization can still retain a previously accepted preview. Skip
         // a new raster pass after expiry while keeping its existing pages.
-        let raster_deadline = Some(run.deadline);
+        let raster_deadline = Some(run.run_deadline());
         let rasters = if format == DocumentFormat::Pptx
             && !made.pages.is_empty()
             && check_deadline(raster_deadline).is_ok()
