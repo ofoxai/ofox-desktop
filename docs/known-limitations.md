@@ -79,7 +79,14 @@ The functional gate rejected the result. A [follow-up kernel event check](https:
 returned `no-match`. Its report combined an empty query with an event whose caller
 could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
 completed successfully and found no KernelMode event 4 during the fixed Node
-process's lifetime. Run
+process's lifetime. On Windows 11 25H2 (build 26200.9974), the same fixed request
+returned `UNKNOWN` in a standard user's desktop session. A unique KernelMode
+event 4 matched the Node process creation time, caller, main thread, child
+image and arguments, confirming the child-process policy blocked that request.
+The Windows 11 event carries no Win32 return code. See the
+[early native diagnostics](assistant-capability-1701.md#windows-11-普通桌面的功能前置).
+
+On Server 2022, run
 [44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
 paired the fixed request's failed return with Win32 error 367
 (`ERROR_CHILD_PROCESS_BLOCKED`). The diagnostic's private-directory removal

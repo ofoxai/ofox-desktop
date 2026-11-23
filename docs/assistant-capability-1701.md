@@ -865,3 +865,105 @@ Win32 错误属于哪一类？
 修正后文档诊断测试 101/101 通过。Windows 目标的两种 Clippy 配置、独立复审和 macOS
 全目标 Clippy 均通过。macOS Rust 测试 4555 项通过、28 项忽略，前端 3377 项通过、1 项跳过。
 新读取方式尚待原生运行。
+
+### Windows 11 普通桌面的功能前置
+
+在 Windows 11 家庭版 25H2 x64（26200.9974）上，从 bundle 核对提交
+`d1af0ec44a5383a410952b1b75b1784dc9e9fcaa`。以下运行都使用同一测试二进制和
+内置 Node 22.23.4。每次只执行普通主机用例
+`document_lpac_proves_python_office_and_escape_denials`，调试器和 CI 诊断均未启用。
+
+1. SSH 服务会话使用管理员令牌。四个注册表键可读，LPAC 令牌检查通过；
+   Node 在第一个检查点之前以 `0xc0000142` 退出，未超时，也没有输出。
+   仅凭退出码无法确定此次初始化失败的具体位置。
+2. 同账户的交互桌面使用普通权限令牌。Node 到达检查点 7，固定子进程请求返回
+   `UNKNOWN`，Node 退出 1，未超时。Job 活动进程归零，任务目录和 AppContainer
+   配置文件均已清理。运行窗口内有一条 KernelMode 事件 4，调用进程、主线程、
+   子程序映像和固定参数都吻合。此次功能测试自身未记录进程创建时间和退出时间。
+3. 再次在普通桌面运行同一用例，验证上述内核事件能否归属到该次 Node 实例。宿主仅对
+   已核对映像的 Node 保留查询句柄，读取创建和退出时间。精确生存窗口内只有一条
+   KernelMode 事件 4。事件里的调用进程创建时间与句柄值精确一致，调用进程、主线程、
+   目标映像及固定参数全部匹配。Win11 内核确实阻止了这次固定请求。Node 仍在
+   检查点 7 返回 `UNKNOWN`，退出 1，未超时。Job 归零，任务目录及配置文件均已清理。
+   [微软对事件 4 的定义](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection#review-exploit-protection-events-in-windows-event-viewer)
+
+从 SSH 切到桌面时同时改变了会话和权限，无法区分各自对初始化的影响。普通桌面运行复现了
+Server 2022 的检查点 7 结果。功能前置仍失败，后续隔离检查、Pyodide 和 OfficeCLI
+尚未执行。事件 4 不含 `CreateProcessW` 返回点的 Win32 错误码。内置 libuv 会将未映射的
+错误归为 `UV_UNKNOWN`，无法从 Node 结果反推原值。Server 2022 的原始错误仍待独立诊断。
+[Node 22.23.4 的 libuv 错误映射](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/error.c#L153-L167)
+
+### Server 2022 检查点 7 的原始错误码复核
+
+运行 [44437664975](https://github.com/ofoxai/ofox-desktop/actions/runs/44437664975)
+（`d1af0ec4`，手动，第 1 次）要确认固定请求的 `CreateProcessW` 失败返回点上，
+同一线程记录的原始 Win32 错误。生产运行时准备和完整性检查通过，独立诊断失败。
+已核对产物 SHA-256，`summary.json` 和 `child-call-trace.log` 均记录
+`diagnosticRecorded=false`、`verdict=inconclusive`、`incompleteStage=cleanup`。
+
+诊断宿主在终止调试工具的 Job、等待控制器退出、确认该 Job 归零、移除私有临时目录
+四项中任一项出错时，只报告 `cleanup`。该分支会覆盖此前的观测结果或失败阶段。
+现有回执无法区分哪一项失败，也无法判定此次是否读到了错误码。Server 2022 的原始
+错误码仍待验证，Win11 的事件 4 无法补足这个数值。此次仅运行独立诊断。
+
+运行 [44441881312](https://github.com/ofoxai/ofox-desktop/actions/runs/44441881312)
+（`e17de183`，手动，第 1 次）分别记录清理前的控制器状态和四项清理结果。
+生产运行时准备通过，两份产物的内容一致且归档 SHA-256 已核对。整次诊断失败。
+清理前处于 `exit`，缺少控制器结论。工具 Job 终止、控制器回收、Job 归零均成功，
+仅私有临时目录删除失败。这些记录不足以确认原始 Win32 错误码、删除错误的原因或持有者。
+
+Win11 25H2 对照使用同版本 Rust 1.95 和 `tempfile 3.27.0`。在独立临时目录内，
+普通文件和只读文件都被 `TempDir::close()` 成功删除；保持文件以独占方式打开时，
+该操作失败，关闭句柄后测试目录可完整回收。此对照只描述该 Win11 主机上的行为。
+
+运行 [44446009244](https://github.com/ofoxai/ofox-desktop/actions/runs/44446009244)
+（`fc77b6b4`，手动，第 1 次）分别核对进程调用的配对返回和目录删除的原始错误类别。
+两份产物一致，归档 SHA-256 已校验。生产运行时准备通过；诊断为
+`inconclusive`，清理前为 `return-pair`，回执中没有 `pairedReturn` 或
+`controllerVerdict`。该阶段可以表示配对未完成，也可以表示后续记录与已有配对矛盾。
+本轮无法判定哪种情形发生，检查点 7 的 Win32 错误码仍未知。
+
+工具 Job 终止、控制器回收和 Job 归零成功，删除私有临时目录失败。
+`scratchRemovalError=access-denied` 唯一对应目录删除操作的 Win32 错误 5。
+产物没有记录根目录或哪一个子项触发拒绝。此前 Win11 独占普通文件对照的删除错误是
+32；该场景尚不能解释 Server 2022 的错误 5。本轮未执行无调试器功能门禁。
+
+随后在 Win11 25H2 上使用 Rust 1.95 的 `std::fs::remove_dir_all` 做文件系统对照。
+普通目录、仅根目录带只读属性、仅嵌套目录带只读属性，三组均删除成功，并分别确认目录已消失。
+在这台主机上，单独设置目录只读属性未复现 Server 2022 的删除错误 5。
+
+在 Win11 25H2 x64 上，已核对本地候选 `2be96f85` 的完整 SHA 和 bundle SHA-256。
+使用内置 Node 22.23.4 和 Windows PowerShell 5.1.26100.9818，协议回放和产物校验
+6/6 通过，Rust 1.95 控制器定点用例 1/1 通过。回放覆盖返回点的单行读数、缺失退出记录
+及旧格式记录。出现后续矛盾或观测工具报错时，分别记录 `return-conflict` 或
+`return-observer-error`，两者均撤销配对类别。本次仅验证协议，未测得原始 Win32 错误码。
+
+运行 [44450426997](https://github.com/ofoxai/ofox-desktop/actions/runs/44450426997)
+（`2be96f85`，Server 2022，手动，第 1 次）通过生产运行时准备和完整性检查。
+归档 SHA-256 已核对，`summary.json` 与 `child-call-trace.log` 两份记录一致。
+清理前的阶段为 `return-observer-error`。宿主只有在已收到固定调用的配对结果后才接受
+这一阶段。后续观测出错使该结果失效，回执没有 `pairedReturn` 或 `controllerVerdict`。
+这一阶段不能识别具体的工具错误，也不能还原已撤销的返回类别。
+
+工具 Job 终止、控制器回收及 Job 归零均成功；私有临时目录删除再次返回错误 5。
+整次独立诊断失败，检查点 7 的原始 Win32 错误码仍未知。无调试器功能门禁尚未通过。
+
+用本次提交的 PowerShell 解析器离线回放：在配对结果送达后，分别于 `EXIT_PAIRED` 之前
+和之后注入断点错误、语法错误、命令文件读取错误，六种情况都得到 `return-observer-error`。
+两个位置注入显式矛盾记录均得到 `return-conflict`。本次 Actions 作业日志也未收录返回数值行
+或退出标记，现有记录无法判定出错时是否已看见 `EXIT_PAIRED`。
+
+本地候选 `9717e783` 为后续观测补充 `observerError`。仅在收到唯一完整的原生失败回执、
+已撤销配对且错误可分类时，记录退出标记前后及断点、语法、命令文件读取三类原因。
+Win11 25H2 已核对 bundle 摘要和完整提交，PowerShell/JS 回放与产物校验 6/6，Rust 控制器
+定点用例 1/1。测试覆盖文件名中含 `breakpoint` 时仍正确归类为命令文件读取错误。
+本次验证没有启动 CDB，之前 Server 2022 产物的错误归属和原始 Win32 数值仍无法恢复。
+
+
+### Server 2022 后续结果
+
+上述记录保留各次运行当时的结论。后续 Server 2022 运行
+[44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
+取得固定调用的配对 Win32 错误 367。针对私有临时目录的清理修复随后通过
+[44531568236](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236)。
+完整功能门禁、Win11 对照和安装版验证范围见[文档引擎开发诊断](windows-testing.md#文档引擎开发诊断)。
