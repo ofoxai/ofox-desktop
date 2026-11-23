@@ -67,7 +67,7 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `code(slide, source, x, y, w, h, size=12)`: ≤40 monospaced lines on a dark panel.
 - `formula(slide, x, y, w, h, lines, size=15)`: plain text; warns; not academic math.
 - `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; `{"latex":r"\log(x)"}` adds PNG fallback. Supports scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos/log/exp,quad,mathrm/operatorname,mathcal. Names: 1–64 ASCII alphanumerics (mathcal: letters only). Functions upright; mathcal editable script. Brace signed/multi-digit scripts and all sum bodies. Other macros fail. Verify Office display/editing.
-- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 labels. process/sequence: ordered arrows; comparison: no arrows. spatial fails: choose comparison for independent items or fork_join() for source→parallel branches→merge.
+- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels. process/sequence: ordered arrows; comparison: no arrows. spatial fails: choose comparison for independent items or fork_join() for source→parallel branches→merge.
 - `fork_join(slide, branches, x, y, w, h, source="", merge="")`: 2–6 parallel label strings; source→all→merge, no branch-to-branch arrows. For lesson/panel bodies use the `main` box, not full-slide `G`.
 - `native_chart(slide, kind, categories, series, x, y, w, h, title="")`: native chart plus workbook; bar/line/pie; series `[{"name":"…","values":[…]}]`, at most 100 supplied finite values.
 - `shape(slide, kind, x, y, w, h, fill=None, line=None, line_w=0.75, radius=None)`: `MSO_SHAPE.RECTANGLE`, `ROUNDED_RECTANGLE`, `OVAL`, etc.; radius only for rounded.
