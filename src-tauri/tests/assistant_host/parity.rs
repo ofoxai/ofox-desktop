@@ -345,9 +345,34 @@ async fn native_finished(env: &TestEnv, run_id: &str) -> Event {
 #[test]
 #[serial_test::serial]
 fn windows_host_python_preview_and_page_three_source_edit_use_real_lpac() {
+    fn deliver_preview(request: &Request) -> Reply {
+        let (name, preview_id) = tool_results(request)
+            .iter()
+            .rev()
+            .find_map(|text| {
+                let preview = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Previewed "))?;
+                let (name, rest) = preview.split_once(" (")?;
+                let (_, rest) = rest.split_once("as previewId ")?;
+                Some((name.to_owned(), rest.split(';').next()?.to_owned()))
+            })
+            .expect("the real preview result names its file and previewId");
+        assert!(matches!(
+            name.as_str(),
+            "native-host-seed.pptx" | "native-host-revision.pptx"
+        ));
+        Reply::ToolCalls(vec![(
+            "create_document",
+            json!({
+                "name":name,"format":"pptx","fromPreview":preview_id
+            }),
+        )])
+    }
     let bundle = runtime_dir().expect("prepared Windows runtime is mandatory");
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
+    gateway.strict_admission();
     let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     let before = runner::windows_document_sandbox_receipts(0)
@@ -360,24 +385,61 @@ fn windows_host_python_preview_and_page_three_source_edit_use_real_lpac() {
             "expectedOwner":owner(),"expectedGeneration":host.generation()
         })).unwrap()).await.unwrap();
         let sid = create(&host).await;
+        let opening = json!([
+            {"step":"Freeze the synthetic page plan","status":"in_progress"},
+            {"step":"Generate and preview the eight-page deck","status":"pending"},
+            {"step":"Deliver the checked presentation","status":"pending"}
+        ]);
+        let previewed = json!([
+            {"step":"Freeze the synthetic page plan","status":"completed"},
+            {"step":"Generate and preview the eight-page deck","status":"completed"},
+            {"step":"Deliver the checked presentation","status":"in_progress"}
+        ]);
+        let finished = json!([
+            {"step":"Freeze the synthetic page plan","status":"completed"},
+            {"step":"Generate and preview the eight-page deck","status":"completed"},
+            {"step":"Deliver the checked presentation","status":"completed"}
+        ]);
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":opening}))]));
         gateway.reply(Reply::ToolCalls(vec![("freeze_presentation_plan", synthetic_plan(8,None))]));
         gateway.reply(Reply::ToolCalls(vec![("create_document",json!({
             "name":"native-host-seed.pptx","format":"pptx","preview":true,
             "content":{"kind":"python","code":"prs=new_deck(title='Native Host fixture')\nfor page in range(1,9):\n    slide=content_slide(prs,f'HOST_PAGE_{page:03}',notes=f'Preserve note {page}')\n    text(slide,f'Synthetic fixture page {page}',1,2,10,1,size=24)\n"}
         }))]));
-        gateway.reply(Reply::Stream("The isolated preview is ready for delivery.".into()));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":previewed}))]));
+        gateway.reply(Reply::Answer(deliver_preview));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":finished}))]));
+        gateway.reply(Reply::Stream("The isolated eight-page deck has been delivered.".into()));
         let extra = json!({"presentationWorkflowVersion":1,"presentationStyleId":"auto",
             "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
             "expectedOwner":owner(),"expectedGeneration":host.generation()});
         let first = host.send(request(&sid,"Create the trusted synthetic eight-page fixture.",extra.clone())).await.unwrap().run_id;
         let first_end = native_finished(&env,&first).await;
         assert_eq!(first_end.data["status"],"completed","{:?}",env.events(&first));
+        assert!(of_type(&env,&first,"tool_end").iter().all(|event| event["success"] == true));
+        assert_eq!(of_type(&env,&first,"task_plan").iter().map(|event| event["steps"].clone()).collect::<Vec<_>>(), [opening,previewed,finished]);
         let first_detail = host.get_session(&sid).await.unwrap();
         assert_eq!(first_detail.attachments.len(),1);
         let parent = &first_detail.attachments[0];
         let parent_path = session_dir(config.path(),&sid).join("attachments").join(&parent.id);
         let original = std::fs::read(&parent_path).unwrap();
         let version = sha(&original);
+        let edit_opening = json!([
+            {"step":"Freeze the authorized page-three edit","status":"in_progress"},
+            {"step":"Revise and preview source page three","status":"pending"},
+            {"step":"Deliver the checked revision","status":"pending"}
+        ]);
+        let edit_previewed = json!([
+            {"step":"Freeze the authorized page-three edit","status":"completed"},
+            {"step":"Revise and preview source page three","status":"completed"},
+            {"step":"Deliver the checked revision","status":"in_progress"}
+        ]);
+        let edit_finished = json!([
+            {"step":"Freeze the authorized page-three edit","status":"completed"},
+            {"step":"Revise and preview source page three","status":"completed"},
+            {"step":"Deliver the checked revision","status":"completed"}
+        ]);
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":edit_opening}))]));
         gateway.reply(Reply::ToolCalls(vec![("freeze_presentation_plan",synthetic_plan(1,Some(json!({
             "attachmentId":parent.id,"version":version,"pageNumbers":[3]
         }))))]));
@@ -385,12 +447,18 @@ fn windows_host_python_preview_and_page_three_source_edit_use_real_lpac() {
             "name":"native-host-revision.pptx","format":"pptx","preview":true,
             "content":{"kind":"python","code":"prs=source_deck()\ntarget_slides(prs)[0].shapes.title.text='EDITED_HOST_PAGE_003'\n"}
         }))]));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":edit_previewed}))]));
+        gateway.reply(Reply::Answer(deliver_preview));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":edit_finished}))]));
         gateway.reply(Reply::Stream("Only source page three was revised.".into()));
         let mut edit = extra;
         edit["fileReferences"] = json!([{"attachmentId":parent.id,"version":version,"page":3}]);
         let second = host.send(request(&sid,"Revise only page 3 of the referenced source.",edit)).await.unwrap().run_id;
         let second_end = native_finished(&env,&second).await;
         assert_eq!(second_end.data["status"],"completed","{:?}",env.events(&second));
+        assert!(of_type(&env,&second,"tool_end").iter().all(|event| event["success"] == true));
+        assert_eq!(of_type(&env,&second,"task_plan").iter().map(|event| event["steps"].clone()).collect::<Vec<_>>(), [edit_opening,edit_previewed,edit_finished]);
+        assert!(gateway.admission_requests().is_empty(), "native fixtures must script their own real task plans");
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.attachments.len(),2);
         let revision = detail.attachments.iter().find(|file|file.id != parent.id).unwrap();
@@ -463,9 +531,26 @@ fn windows_host_python_preview_and_page_three_source_edit_use_real_lpac() {
 #[test]
 #[serial_test::serial]
 fn windows_host_clip_contract_generates_native_math_and_renders_eight_pages() {
+    fn deliver_preview(request: &Request) -> Reply {
+        let preview_id = tool_results(request)
+            .iter()
+            .rev()
+            .find_map(|text| {
+                let (_, rest) = text.split_once("as previewId ")?;
+                rest.split(';').next().map(str::to_owned)
+            })
+            .expect("the real CLIP preview result names its previewId");
+        Reply::ToolCalls(vec![(
+            "create_document",
+            json!({
+                "name":"clip-contract.pptx","format":"pptx","fromPreview":preview_id
+            }),
+        )])
+    }
     let bundle = runtime_dir().expect("prepared Windows runtime is mandatory");
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
+    gateway.strict_admission();
     let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     let before = runner::windows_document_sandbox_receipts(0)
@@ -487,12 +572,31 @@ fn windows_host_clip_contract_generates_native_math_and_renders_eight_pages() {
         }
         // The model-facing alias must never cross the canonical Rust boundary.
         plan["slides"][3]["relationship"] = json!("process");
+        let opening = json!([
+            {"step":"Freeze the eight-page CLIP plan","status":"in_progress"},
+            {"step":"Preview native CLIP graphs and math","status":"pending"},
+            {"step":"Deliver the checked CLIP presentation","status":"pending"}
+        ]);
+        let previewed = json!([
+            {"step":"Freeze the eight-page CLIP plan","status":"completed"},
+            {"step":"Preview native CLIP graphs and math","status":"completed"},
+            {"step":"Deliver the checked CLIP presentation","status":"in_progress"}
+        ]);
+        let finished = json!([
+            {"step":"Freeze the eight-page CLIP plan","status":"completed"},
+            {"step":"Preview native CLIP graphs and math","status":"completed"},
+            {"step":"Deliver the checked CLIP presentation","status":"completed"}
+        ]);
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":opening}))]));
         gateway.reply(Reply::ToolCalls(vec![("freeze_presentation_plan", plan)]));
         gateway.reply(Reply::ToolCalls(vec![("create_document", json!({
             "name":"clip-contract.pptx","format":"pptx","preview":true,
             "content":{"kind":"python","code":include_str!("../../../assistant-runtime/test/fixtures/clip-loss-contract.py")}
         }))]));
-        gateway.reply(Reply::Stream("The trusted CLIP contract fixture is ready.".into()));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":previewed}))]));
+        gateway.reply(Reply::Answer(deliver_preview));
+        gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":finished}))]));
+        gateway.reply(Reply::Stream("The trusted CLIP contract fixture has been delivered.".into()));
         let run = host.send(request(&sid, "Generate the trusted eight-page CLIP contract fixture.", json!({
             "presentationWorkflowVersion":1,"presentationStyleId":"auto",
             "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
@@ -501,6 +605,8 @@ fn windows_host_clip_contract_generates_native_math_and_renders_eight_pages() {
         let end = native_finished(&env, &run).await;
         assert_eq!(end.data["status"], "completed", "{:?}", env.events(&run));
         assert!(of_type(&env, &run, "tool_end").iter().all(|event| event["success"] == true));
+        assert_eq!(of_type(&env,&run,"task_plan").iter().map(|event| event["steps"].clone()).collect::<Vec<_>>(), [opening,previewed,finished]);
+        assert!(gateway.admission_requests().is_empty(), "the native CLIP fixture must script its real task plan");
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.attachments.len(), 1);
         let frozen = detail.messages.iter().rev().find_map(|m| m.presentation_plan.as_ref()).unwrap();
