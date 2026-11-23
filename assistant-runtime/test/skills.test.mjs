@@ -12,7 +12,8 @@ const skill = (name = "one", mode = "auto") => ({
   reviewed: false,
 });
 const context = (skills = [skill()], localConfig) => ({
-  params: { skills, localConfig },
+  params: { skills },
+  localConfig,
   calls: new Map(),
   callCount: 0,
 });
@@ -36,7 +37,7 @@ test("auto list budgets heading, instructions and omission tail with scalar-safe
     "",
   );
 });
-test("skill bodies, files and no-local status use the shared wrapper", async () => {
+test("skill bodies and files use the shared wrapper without enabling scripts", async () => {
   for (const localConfig of [
     undefined,
     { definition: { limits: { maxToolCalls: 20 } } },
@@ -60,16 +61,17 @@ test("skill bodies, files and no-local status use the shared wrapper", async () 
     assert.equal([...result.details.body].length, 60000);
     assert.equal(result.details.files.length, 200);
     assert.equal(result.details.truncated, true);
-    assert.equal(result.details.scriptsUnavailable, !localConfig);
+    assert.equal(result.details.scriptsUnavailable, true);
     assert.deepEqual(await tool.execute("id", { name: "one" }), result);
     assert.equal(calls, 1);
     assert.equal(ctx.callCount, 1);
     await assert.rejects(tool.execute("id", { name: "other" }), /reused/);
     ctx.callCount = 20;
-    await assert.rejects(
-      tool.execute("over", { name: "one" }),
-      /Maximum tool-call/,
-    );
+    const over = await tool.execute("over", { name: "one" });
+    assert.equal(over.details.code, "assistant_tool_limit");
+    assert.equal(over.isError, true);
+    assert.equal(over.terminate, true);
+    assert.equal(calls, 1);
     const abort = new AbortController();
     abort.abort();
     await assert.rejects(tool.execute("cancel", { name: "one" }, abort.signal));
@@ -169,10 +171,13 @@ test("find install save use host callbacks, count calls and refresh before same-
   ]);
   assert.equal(ctx.callCount, 4);
   ctx.callCount = 20;
-  await assert.rejects(
-    tools.get("find_skills").execute("over", { query: "fixture" }),
-    /Maximum tool-call/,
-  );
+  const over = await tools
+    .get("find_skills")
+    .execute("over", { query: "fixture" });
+  assert.equal(over.details.code, "assistant_tool_limit");
+  assert.equal(over.isError, true);
+  assert.equal(over.terminate, true);
+  assert.equal(calls.length, 4);
 });
 
 test("new skill tools retain unknown-cost, repeat and run limits", async () => {

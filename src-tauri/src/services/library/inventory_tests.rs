@@ -5,6 +5,480 @@ fn write(path: &Path, content: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
 }
+
+#[test]
+#[serial_test::serial]
+fn an_oversized_skill_is_discovered_without_inspecting_its_payload() {
+    for entry_limit in [true, false] {
+        let sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let rejected = sandbox.home().join(".claude/skills/a-oversized");
+        write(&rejected.join("SKILL.md"), "# Oversized fixture");
+        if entry_limit {
+            for index in 0..10_001 {
+                fs::File::create(rejected.join(format!("file-{index}"))).unwrap();
+            }
+        } else {
+            // A sparse file exercises the byte limit without allocating it.
+            fs::File::create(rejected.join("large.bin"))
+                .unwrap()
+                .set_len(128 * 1024 * 1024 + 1)
+                .unwrap();
+        }
+        for (directory, name) in [
+            (".claude/skills", "z-healthy"),
+            (".codex/skills", "native-healthy"),
+            (".agents/skills", "academic-humanizer"),
+            (".agents/skills", "bestpaper-writing"),
+        ] {
+            write(
+                &sandbox.home().join(directory).join(name).join("SKILL.md"),
+                &format!("---\nname: {name}\ndescription: Fixture {name}\n---\n# {name}"),
+            );
+        }
+
+        let view = scan(&db, ResourceKind::Skills).unwrap();
+        for name in [
+            "z-healthy",
+            "native-healthy",
+            "academic-humanizer",
+            "bestpaper-writing",
+        ] {
+            let entry = view
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} was hidden after an oversized skill (entry limit: {entry_limit})"
+                    )
+                });
+            if name == "academic-humanizer" || name == "bestpaper-writing" {
+                for reader in ["codex", "copilot", "dsh", "gemini", "opencode"] {
+                    assert!(
+                        entry.sources.iter().any(|source| source.tool_id == reader),
+                        "{name}: missing {reader}"
+                    );
+                }
+                assert!(entry
+                    .locations
+                    .iter()
+                    .any(|location| location.target_id == "shared"));
+            }
+        }
+        let oversized = view
+            .entries
+            .iter()
+            .find(|entry| entry.directory.as_deref() == Some("a-oversized"))
+            .expect("a valid SKILL.md must remain discoverable even with a large payload");
+        assert!(view
+            .sources
+            .iter()
+            .filter(|source| { source.tool_id == "claude" || source.tool_id == "opencode" })
+            .all(|source| source.reason.is_none()));
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+        let healthy = view
+            .entries
+            .iter()
+            .find(|entry| entry.name == "z-healthy")
+            .unwrap();
+        let result = import(
+            &db,
+            &view.ticket_id,
+            &[oversized.entry_id.clone(), healthy.entry_id.clone()],
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.imported, 1);
+        assert_eq!(result.items[0].status, "failed");
+        assert_eq!(
+            result.items[0].reason.as_deref(),
+            Some("library.skillTooLarge")
+        );
+        assert_eq!(result.items[1].status, "imported");
+        assert_eq!(db.get_all_installed_skills().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(rejected.join("SKILL.md")).unwrap(),
+            "# Oversized fixture"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn every_native_reader_discovers_metadata_without_validating_deep_payloads() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let roots = super::super::skill_resource::native_paths().unwrap();
+    for (tool, root) in roots
+        .iter()
+        .filter(|(tool, _)| tool.as_str() != "claude-desktop")
+    {
+        let skill = root.join(format!("metadata-{tool}"));
+        write(
+            &skill.join("SKILL.md"),
+            &format!("---\nname: metadata-{tool}\n---\nInstructions"),
+        );
+        let mut deep = skill.join("payload");
+        for _ in 0..34 {
+            deep = deep.join("nested");
+        }
+        write(&deep.join("resource.txt"), "Not part of metadata discovery");
+    }
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    for tool in roots
+        .keys()
+        .filter(|tool| tool.as_str() != "claude-desktop")
+    {
+        let name = format!("metadata-{tool}");
+        let entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("missing {tool}"));
+        assert!(
+            entry.sources.iter().any(|source| source.tool_id == *tool),
+            "missing reader {tool}"
+        );
+        assert_eq!(entry.content_verified, Some(false));
+    }
+    assert!(view.sources.iter().all(|source| source.reason.is_none()));
+    assert!(discard(&view.ticket_id));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn large_payloads_and_their_aliases_do_not_exhaust_metadata_discovery() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let claude = sandbox.home().join(".claude/skills");
+    let shared = sandbox.home().join(".agents/skills");
+    let codex = sandbox.home().join(".codex/skills");
+    let oversized = |root: &Path| {
+        write(&root.join("SKILL.md"), "# Rejected fixture");
+        fs::File::create(root.join("large.bin"))
+            .unwrap()
+            .set_len(128 * 1024 * 1024 + 1)
+            .unwrap();
+    };
+    write(&claude.join("0-accepted/SKILL.md"), "# Already accepted");
+    oversized(&shared.join("a-rejected"));
+    std::os::unix::fs::symlink(shared.join("a-rejected"), claude.join("a-alias")).unwrap();
+    for index in 0..6 {
+        oversized(&claude.join(format!("b-rejected-{index}")));
+    }
+    write(&shared.join("healthy-shared/SKILL.md"), "# Healthy shared");
+    fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(claude.join("0-accepted"), codex.join("0-accepted")).unwrap();
+    oversized(&codex.join("z-eighth-rejection"));
+    write(
+        &codex.join("zzz-unchecked/SKILL.md"),
+        "# Still discoverable",
+    );
+
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let names: BTreeSet<_> = view
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(view.entries.len(), 11);
+    for name in ["0-accepted", "healthy-shared", "zzz-unchecked"] {
+        assert!(names.contains(name), "missing {name}");
+    }
+    assert!(view
+        .entries
+        .iter()
+        .all(|entry| entry.content_verified == Some(false)));
+    let shared_entry = view
+        .entries
+        .iter()
+        .find(|entry| entry.name == "healthy-shared")
+        .unwrap();
+    for reader in ["codex", "copilot", "dsh", "gemini", "opencode"] {
+        assert!(
+            shared_entry
+                .sources
+                .iter()
+                .any(|source| source.tool_id == reader),
+            "{reader}"
+        );
+    }
+    let accepted = view
+        .entries
+        .iter()
+        .find(|entry| entry.name == "0-accepted")
+        .unwrap();
+    assert!(accepted
+        .sources
+        .iter()
+        .any(|source| source.tool_id == "codex"));
+    assert!(view.sources.iter().all(|source| source.reason.is_none()));
+    assert!(codex.join("zzz-unchecked/SKILL.md").is_file());
+    assert!(discard(&view.ticket_id));
+}
+
+#[test]
+#[serial_test::serial]
+fn equal_manifests_do_not_make_different_skill_payloads_equal() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let roots = super::super::skill_resource::native_paths().unwrap();
+    let manifest = "---\nname: shared-title\n---\nSame instructions";
+    for (tool, content) in [("claude", "First assets"), ("codex", "Different assets")] {
+        write(&roots[tool].join("same/SKILL.md"), manifest);
+        write(&roots[tool].join("same/assets/icon.svg"), content);
+    }
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    assert_eq!(view.entries.len(), 2);
+    assert!(view
+        .entries
+        .iter()
+        .all(|entry| entry.matched_resource_ids.is_empty()));
+    let result = import(
+        &db,
+        &view.ticket_id,
+        &view
+            .entries
+            .iter()
+            .map(|entry| entry.entry_id.clone())
+            .collect::<Vec<_>>(),
+        0,
+    )
+    .unwrap();
+    assert_eq!(result.imported, 2);
+    let rows = db.get_all_installed_skills().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.values()
+            .filter_map(|row| row.content_hash.clone())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+    for (tool, content) in [("claude", "First assets"), ("codex", "Different assets")] {
+        assert_eq!(
+            fs::read_to_string(roots[tool].join("same/assets/icon.svg")).unwrap(),
+            content
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn skill_import_captures_the_current_payload_after_metadata_discovery() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let root = super::super::skill_resource::native_paths().unwrap()["claude"].join("current");
+    write(
+        &root.join("SKILL.md"),
+        "---\nname: current\n---\nInstructions",
+    );
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    write(&root.join("new-resource.txt"), "Added after discovery");
+    let result = import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
+    assert_eq!(result.imported, 1);
+    let row = db
+        .get_installed_skill(result.items[0].resource_id.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    let artifact = super::super::skill_artifact::path(row.content_hash.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        fs::read_to_string(artifact.join("new-resource.txt")).unwrap(),
+        "Added after discovery"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("new-resource.txt")).unwrap(),
+        "Added after discovery"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn metadata_discovery_does_not_follow_payload_links_and_import_still_refuses_them() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let root = sandbox.home().join(".claude/skills/linked-payload");
+    write(
+        &root.join("SKILL.md"),
+        "---\nname: linked-payload\n---\nInstructions",
+    );
+    let outside = sandbox.home().join("private.txt");
+    write(&outside, "Leave this file alone");
+    std::os::unix::fs::symlink(&outside, root.join("payload.txt")).unwrap();
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    assert_eq!(view.entries.len(), 1);
+    assert!(view.sources.iter().all(|source| source.reason.is_none()));
+    let result = import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
+    assert_eq!(result.items[0].status, "failed");
+    assert!(db.get_all_installed_skills().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(&outside).unwrap(),
+        "Leave this file alone"
+    );
+    assert!(fs::symlink_metadata(root.join("payload.txt"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_retargeted_skill_link_expires_selection_even_with_the_same_manifest() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let manifest = "---\nname: alias\n---\nInstructions";
+    let first = sandbox.home().join("first");
+    let second = sandbox.home().join("second");
+    for root in [&first, &second] {
+        write(&root.join("SKILL.md"), manifest);
+    }
+    let link = sandbox.home().join(".claude/skills/alias");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&first, &link).unwrap();
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&second, &link).unwrap();
+    let result = import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
+    assert_eq!(result.items[0].status, "stale");
+    assert!(db.get_all_installed_skills().unwrap().is_empty());
+    for root in [&first, &second] {
+        assert_eq!(fs::read_to_string(root.join("SKILL.md")).unwrap(), manifest);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn unreadable_and_oversized_skill_manifests_do_not_hide_healthy_metadata() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let root = sandbox.home().join(".claude/skills");
+    write(&root.join("a-large/SKILL.md"), &"x".repeat(1024 * 1024 + 1));
+    fs::create_dir_all(root.join("b-invalid")).unwrap();
+    fs::write(root.join("b-invalid/SKILL.md"), [0xff, 0xfe]).unwrap();
+    write(
+        &root.join("z-valid/SKILL.md"),
+        "---\nname: valid\n---\nInstructions",
+    );
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.entries[0].name, "valid");
+    assert!(view
+        .sources
+        .iter()
+        .any(|source| source.tool_id == "claude" && source.state == "unreadable"));
+    assert!(discard(&view.ticket_id));
+}
+
+#[test]
+#[serial_test::serial]
+fn truncated_discovery_directories_report_partial_even_when_children_are_hidden() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let root = sandbox.home().join(".claude/skills");
+    fs::create_dir_all(&root).unwrap();
+    for index in 0..10_002 {
+        fs::File::create(root.join(format!(".hidden-{index}"))).unwrap();
+    }
+    write(&root.join("visible/SKILL.md"), "Visible instructions");
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    assert!(view.sources.iter().any(|source| source.tool_id == "claude"
+        && source.reason.as_deref() == Some("library.inventoryLimit")));
+    assert!(discard(&view.ticket_id));
+}
+
+#[test]
+#[serial_test::serial]
+fn explicit_skill_comparison_does_not_match_a_damaged_managed_payload() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let root = super::super::skill_resource::native_paths().unwrap()["claude"].join("compare");
+    write(
+        &root.join("SKILL.md"),
+        "---\nname: compare\n---\nInstructions",
+    );
+    write(&root.join("assets.txt"), "Original assets");
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let imported = import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
+    let id = imported.items[0].resource_id.as_ref().unwrap();
+    let row = db.get_installed_skill(id).unwrap().unwrap();
+    let artifact = super::super::skill_artifact::path(row.content_hash.as_ref().unwrap()).unwrap();
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let entry = &view.entries[0];
+    let source = &entry.sources[0].source_id;
+    assert_eq!(
+        source_detail(&db, &view.ticket_id, &entry.entry_id, source, 0)
+            .unwrap()
+            .matched_resource_ids
+            .as_slice(),
+        std::slice::from_ref(id)
+    );
+    write(&artifact.join("assets.txt"), "Damaged managed assets");
+    assert!(
+        source_detail(&db, &view.ticket_id, &entry.entry_id, source, 0)
+            .unwrap()
+            .matched_resource_ids
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("assets.txt")).unwrap(),
+        "Original assets"
+    );
+    assert!(discard(&view.ticket_id));
+}
+
+#[test]
+#[ignore = "Read-only native acceptance; explicitly set OFOX_SKILL_DISCOVERY_HOME"]
+#[serial_test::serial]
+fn native_skill_metadata_discovery_acceptance() {
+    let home = PathBuf::from(
+        std::env::var_os("OFOX_SKILL_DISCOVERY_HOME").expect("explicit read-only source home"),
+    );
+    assert!(home.is_absolute());
+    let _sandbox = crate::test_sandbox::sandbox();
+    let mut settings = crate::settings::get_settings();
+    // Only these source roots are real. Settings, DB, ownership and all writes
+    // remain in the temporary home. Never import or remove a live skill here.
+    settings.claude_config_dir = Some(home.join(".claude").to_string_lossy().into_owned());
+    settings.codex_config_dir = Some(home.join(".agents").to_string_lossy().into_owned());
+    crate::settings::update_settings(settings).unwrap();
+    let db = Database::memory().unwrap();
+    let started = Instant::now();
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let elapsed = started.elapsed();
+    for name in ["ppt-master", "academic-humanizer", "bestpaper-writing"] {
+        assert!(
+            view.entries.iter().any(|entry| entry.name == name),
+            "missing {name}"
+        );
+    }
+    for tool in ["claude", "codex"] {
+        assert!(
+            view.sources
+                .iter()
+                .filter(|source| source.tool_id == tool)
+                .all(|source| source.reason.is_none()),
+            "partial {tool}"
+        );
+    }
+    assert!(db.get_all_installed_skills().unwrap().is_empty());
+    assert!(db
+        .library_snapshot()
+        .unwrap()
+        .machine
+        .assignments
+        .is_empty());
+    println!(
+        "native skill metadata discovery: {} entries in {} ms; all three targets visible",
+        view.entries.len(),
+        elapsed.as_millis()
+    );
+    assert!(discard(&view.ticket_id));
+}
+
 #[test]
 #[serial_test::serial]
 fn instructions_only_import_selected_user_content_without_native_changes() {
@@ -312,12 +786,12 @@ fn skill_variants_import_to_unique_directories_and_equal_copies_deduplicate() {
     write(&paths["codex"].join("sample/SKILL.md"), first);
     write(&paths["gemini"].join("sample/SKILL.md"), second);
     let view = scan(&db, ResourceKind::Skills).unwrap();
-    assert_eq!(view.entries.len(), 2);
+    assert_eq!(view.entries.len(), 3);
     assert!(view
         .entries
         .iter()
         .all(|entry| entry.conflict && entry.variant.is_some()));
-    assert!(view.entries.iter().any(|entry| entry
+    assert!(!view.entries.iter().any(|entry| entry
         .sources
         .iter()
         .any(|source| source.tool_id == "codex")
@@ -550,7 +1024,7 @@ fn duplicate_selection_is_rejected_and_exact_existing_definition_is_not_duplicat
 
 #[test]
 #[serial_test::serial]
-fn unreadable_skill_does_not_hide_a_valid_sibling_and_changes_are_stale() {
+fn unreadable_manifest_does_not_hide_a_valid_sibling_and_manifest_changes_are_stale() {
     let _sandbox = crate::test_sandbox::sandbox();
     let db = Database::memory().unwrap();
     let root = super::super::skill_resource::native_paths().unwrap()["codex"].clone();
@@ -573,7 +1047,7 @@ fn unreadable_skill_does_not_hide_a_valid_sibling_and_changes_are_stale() {
         .iter()
         .find(|entry| entry.name == "good")
         .unwrap();
-    write(&root.join("z-good/extra.txt"), "Native edit after scan");
+    write(&root.join("z-good/SKILL.md"), "Changed manifest after scan");
     let result = import(
         &db,
         &view.ticket_id,

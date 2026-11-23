@@ -78,13 +78,23 @@ async fn home_retarget_during_journal_key_wait_is_refused_before_mutation() {
             b"unchanged"
         );
     }
-    assert!(host.local_task_state(&identity().owner, &sid).is_null());
+    assert!(host.local_task_state(&identity().owner, &sid, None).is_null());
     host.release_run(&run);
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_result() {
+    interrupted_mutation_scope(false).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn scoped_interruption_keeps_debt_without_leaking_to_other_tasks() {
+    interrupted_mutation_scope(true).await;
+}
+
+async fn interrupted_mutation_scope(scoped: bool) {
     let _sandbox = crate::test_sandbox::sandbox();
     for cancel in [true, false] {
         let (_tmp, env, host) = fixture_with_env();
@@ -116,6 +126,13 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
         let state = Arc::get_mut(&mut run).unwrap();
         state.local_enabled = true;
         state.local_home = Some(admitted_home.clone());
+        if scoped {
+            state.local_task = Some((super::super::tools::task::Task {
+                tool: crate::app_config::BindableTool::Codex,
+                access: super::super::tools::task::Access::Configure,
+            }, admitted_home.clone()));
+        }
+        let target = state.local_task.as_ref().map(|(task, folder)| (task.tool, folder.clone()));
         if !cancel {
             state.deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         }
@@ -154,7 +171,7 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
             }
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"changed");
-        let pending = host.local_task_state(&identity().owner, &sid);
+        let pending = host.local_task_state(&identity().owner, &sid, target.as_ref());
         assert_eq!(
             pending["changed"], true,
             "committed mutation lost its verification debt"
@@ -168,7 +185,27 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
         // The runtime saw cancellation, not the successful changed result.
         // Its empty snapshot must not erase independently observed Host debt.
         host.keep_local_task(&run, &json!({"localTaskState":null}));
-        assert_eq!(host.local_task_state(&identity().owner, &sid), pending);
+        assert_eq!(host.local_task_state(&identity().owner, &sid, target.as_ref()), pending);
+        if scoped {
+            for (tool, folder) in [
+                (crate::app_config::BindableTool::OpenCode, admitted_home.clone()),
+                (crate::app_config::BindableTool::Codex, env.config.join("other-home")),
+            ] {
+                let other_target = (tool, folder.clone());
+                assert!(host.local_task_state(&identity().owner, &sid, Some(&other_target)).is_null());
+                let mut other = control(&sid);
+                let state = Arc::get_mut(&mut other).unwrap();
+                state.local_enabled = true;
+                state.local_task = Some((super::super::tools::task::Task {
+                    tool, access: super::super::tools::task::Access::Diagnose,
+                }, folder));
+                host.keep_local_task(&other, &json!({"localTaskState":null}));
+                assert_eq!(host.local_task_state(&identity().owner, &sid, target.as_ref()), pending);
+            }
+            let ordinary = control(&sid);
+            host.keep_local_task(&ordinary, &json!({"localTaskState":null}));
+            assert_eq!(host.local_task_state(&identity().owner, &sid, target.as_ref()), pending);
+        }
         host.release_run(&run);
         let changes = host
             .local_changes(
@@ -183,7 +220,7 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
             .unwrap();
         assert!(changes.iter().any(|change| change.changed));
         #[cfg(unix)]
-        verify_interrupted_debt_in_canonical_home(&env, &host, &run.session_id).await;
+        verify_interrupted_debt_in_canonical_home(&env, &host, &run.session_id, scoped).await;
     }
 }
 
@@ -192,6 +229,7 @@ async fn verify_interrupted_debt_in_canonical_home(
     env: &Arc<FixedEnvironment>,
     host: &Arc<AssistantHost>,
     sid: &str,
+    scoped: bool,
 ) {
     use std::os::unix::fs::PermissionsExt;
     struct RestoreShell(Option<std::ffi::OsString>);
@@ -221,13 +259,21 @@ async fn verify_interrupted_debt_in_canonical_home(
     state.local_enabled = true;
     let admitted_home = resolve_local_test_path(&env.config).unwrap();
     state.local_home = Some(admitted_home.clone());
+    if scoped {
+        state.local_task = Some((super::super::tools::task::Task {
+            tool: crate::app_config::BindableTool::Codex,
+            access: super::super::tools::task::Access::Configure,
+        }, admitted_home.clone()));
+    }
+    let target = state.local_task.as_ref().map(|(task, folder)| (task.tool, folder.clone()));
+    let selected = if scoped { "codex" } else { "chatgpt" };
     host.register_run(next.clone(), host.generation(), || Ok(()))
         .unwrap();
     let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":next.run_id,"operationId":next.operation_id,"toolCallId":id,"name":name,"args":args});
     let status = host
         .dispatch_tool(
             &next,
-            &call("canonical-status", "tool_status", json!({"tool":"chatgpt"})),
+            &call("canonical-status", "tool_status", json!({"tool":selected})),
         )
         .await
         .unwrap();
@@ -238,14 +284,14 @@ async fn verify_interrupted_debt_in_canonical_home(
             &call(
                 "verify-original",
                 "verify_in_folder",
-                json!({"tool":"chatgpt","folder":alias}),
+                json!({"tool":selected,"folder":if scoped { &admitted_home } else { &alias }}),
             ),
         )
         .await
         .unwrap();
     assert_eq!(verified["verified"], true, "{verified}");
     host.keep_local_task(&next, &json!({"localTaskState":null}));
-    assert!(host.local_task_state(&identity().owner, sid).is_null());
+    assert!(host.local_task_state(&identity().owner, sid, target.as_ref()).is_null());
     host.release_run(&next);
 }
 
@@ -281,9 +327,9 @@ async fn a_known_no_effect_mutation_failure_does_not_create_host_debt() {
         host.dispatch_tool(&run, &call).await.unwrap_err(),
         "assistant_local_unavailable"
     );
-    assert!(host.local_task_state(&identity().owner, &sid).is_null());
+    assert!(host.local_task_state(&identity().owner, &sid, None).is_null());
     host.keep_local_task(&run, &json!({"localTaskState":null}));
-    assert!(host.local_task_state(&identity().owner, &sid).is_null());
+    assert!(host.local_task_state(&identity().owner, &sid, None).is_null());
     host.release_run(&run);
 }
 
@@ -324,8 +370,35 @@ async fn lifecycle_unknown_outcome_keeps_host_debt_after_a_real_effect() {
     assert_eq!(std::fs::read(&path).unwrap(), b"changed");
     host.keep_local_task(&run, &json!({"localTaskState":null}));
     assert_eq!(
-        host.local_task_state(&identity().owner, &sid)["changed"],
+        host.local_task_state(&identity().owner, &sid, None)["changed"],
         true
     );
     host.release_run(&run);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_revoked_run_cannot_recreate_pending_state_from_a_late_result() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let (_tmp, _env, host) = fixture_with_env();
+    let (sid, run) = local_run(&host);
+    let pending = json!({"localTaskState":{"changed":true,"targets":[
+        {"tool":"codex","folder":"/old","verified":false}
+    ]}});
+    host.keep_local_task(&run, &pending);
+    assert_eq!(host.local_task_state(&identity().owner, &sid, None)["changed"], true);
+    host.revoke_runs(|_, _| {});
+    host.keep_local_task(&run, &pending);
+    assert!(host.local_task_state(&identity().owner, &sid, None).is_null());
+    let mut replacement = control(&sid);
+    let state = Arc::get_mut(&mut replacement).unwrap();
+    state.local_enabled = true;
+    state.mcp_generation = host.generation();
+    let fresh = json!({"localTaskState":{"changed":true,"targets":[
+        {"tool":"codex","folder":"/new","verified":false}
+    ]}});
+    host.keep_local_task(&replacement, &fresh);
+    host.keep_local_task(&run, &json!({"localTaskState":null}));
+    assert_eq!(host.local_task_state(&identity().owner, &sid, None), fresh["localTaskState"]);
+
 }

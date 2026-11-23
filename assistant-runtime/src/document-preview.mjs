@@ -57,8 +57,9 @@ function boundedEmbeddedImage(value) {
     size.width * size.height <= 40_000_000
   );
 }
-export function safeSvg(svg) {
-  if (typeof svg !== "string" || Buffer.byteLength(svg) > MAX_SVG) return false;
+export function safeSvg(svg, maxBytes = MAX_SVG) {
+  if (typeof svg !== "string" || Buffer.byteLength(svg) > maxBytes)
+    return false;
   try {
     const parser = new SaxesParser();
     let depth = 0;
@@ -117,8 +118,8 @@ export function safeSvg(svg) {
 // Skia omits OfficeCLI's objectBoundingBox PNG patterns. Project only the
 // unambiguous, aspect-matched rectangular case to a direct image; retain all
 // surrounding transforms and leave every other SVG construct unchanged.
-export function normalizeOfficePatternImages(svg) {
-  if (typeof svg !== "string" || Buffer.byteLength(svg) > MAX_SVG) return svg;
+export function normalizeOfficePatternImages(svg, maxBytes = MAX_SVG) {
+  if (typeof svg !== "string" || Buffer.byteLength(svg) > maxBytes) return svg;
   const SVG = "http://www.w3.org/2000/svg";
   const XLINK = "http://www.w3.org/1999/xlink";
   const nodes = [],
@@ -228,7 +229,7 @@ export function normalizeOfficePatternImages(svg) {
       const png = Buffer.from(data[1], "base64");
       if (
         png.length < 33 ||
-        png.length > MAX_SVG ||
+        png.length > maxBytes ||
         png.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
         png.readUInt32BE(8) !== 13 ||
         png.subarray(12, 16).toString() !== "IHDR"
@@ -319,7 +320,7 @@ export function normalizeOfficePatternImages(svg) {
       size +=
         Buffer.byteLength(replacement) -
         Buffer.byteLength(svg.slice(node.start, node.end));
-      if (size > MAX_SVG) return svg;
+      if (size > maxBytes) return svg;
       replacements.push({ start: node.start, end: node.end, replacement });
     }
     let result = "",
@@ -329,9 +330,7 @@ export function normalizeOfficePatternImages(svg) {
       at = item.end;
     }
     result += svg.slice(at);
-    return Buffer.byteLength(result) <= MAX_SVG && safeSvg(result)
-      ? result
-      : svg;
+    return safeSvg(result, maxBytes) ? result : svg;
   } catch {
     return svg;
   }
@@ -341,8 +340,8 @@ export function normalizeOfficePatternImages(svg) {
 // self-contained triangle markers. Curves, custom marker viewports, clipping,
 // inherited paint and resource references remain unchanged; this is not a
 // general SVG marker implementation and never edits the source document.
-export function normalizeOfficeArrowheads(svg) {
-  if (!safeSvg(svg)) return svg;
+export function normalizeOfficeArrowheads(svg, maxBytes = MAX_SVG) {
+  if (!safeSvg(svg, maxBytes)) return svg;
   const SVG = "http://www.w3.org/2000/svg";
   const nodes = [],
     stack = [],
@@ -611,7 +610,7 @@ export function normalizeOfficeArrowheads(svg) {
           "",
         ) + polygons;
       size += Buffer.byteLength(replacement) - Buffer.byteLength(original);
-      if (size > MAX_SVG) return svg;
+      if (size > maxBytes) return svg;
       replacements.push({ start: node.start, end: node.end, replacement });
     }
     let result = "",
@@ -621,9 +620,7 @@ export function normalizeOfficeArrowheads(svg) {
       at = item.end;
     }
     result += svg.slice(at);
-    return Buffer.byteLength(result) <= MAX_SVG && safeSvg(result)
-      ? result
-      : svg;
+    return safeSvg(result, maxBytes) ? result : svg;
   } catch {
     return svg;
   }

@@ -393,6 +393,25 @@ pub(super) fn scrub_event_data(data: &mut Value, snapshot: &Value) -> Result<(),
     }
     Ok(())
 }
+
+/// Checklist labels are payload; statuses and routing identities are typed
+/// host metadata. In particular, a password may itself be named "pending".
+pub(super) fn scrub_task_steps(data: &mut Value, snapshot: &Value) -> Result<(), String> {
+    let Some(pattern) = payload_pattern(snapshot)? else {
+        return Ok(());
+    };
+    for step in data
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(value) = step.get_mut("step").filter(|value| value.is_string()) {
+            *value = scrub_payload(value, &pattern)?;
+        }
+    }
+    Ok(())
+}
 pub(super) fn scrub_native_data(entries: &mut Value, snapshot: &Value) -> Result<(), String> {
     let Some(pattern) = payload_pattern(snapshot)? else {
         return Ok(());

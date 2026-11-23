@@ -389,6 +389,30 @@ mod tests {
     }
 
     #[test]
+    fn task_progress_survives_fork_and_native_merge_without_retiming() {
+        let (_temp, store, mut record, mut entries) = fixture();
+        let progress = json!({"startedAt":10,"steps":[
+            {"step":"Collect data","status":"completed"},
+            {"step":"Review output","status":"pending"}
+        ]});
+        let mut reply = serde_json::to_value(&record.messages[1]).unwrap();
+        reply["taskProgress"] = progress.clone();
+        record.messages[1] = serde_json::from_value(reply).unwrap();
+        entries[1]["timestamp"] = json!(500);
+        let stage = store.stage_fork(&record.session.id).unwrap();
+        write_bytes(&stage.native_path(), b"native copy\n").unwrap();
+        let fork = stage
+            .publish(record, &entries, "fork title", || Ok(()))
+            .unwrap();
+        let reopened = store.load_record(&fork.session.id).unwrap();
+        assert_eq!(reopened.messages[1].created_at, 500);
+        assert_eq!(
+            serde_json::to_value(&reopened.messages[1]).unwrap()["taskProgress"],
+            progress
+        );
+    }
+
+    #[test]
     fn fork_preserves_only_recorded_bounded_document_rasters() {
         let (_temp, store, mut record, entries) = fixture();
         let attachment = &mut record.attachments[0];

@@ -734,29 +734,42 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
-        // Local configuration where this computer offers it: a conversation
-        // still chats when its paths are unavailable.
-        self.start_document_preparation();
         // Explicit deck workflows need Python in the first runtime schema.
         // A normal text turn carries workflowVersion too, so that flag alone
         // must never make chat wait for optional document isolation.
         let deck_context = branch.presentation_style_id.is_some()
-            || record.attachments.iter().any(|file| {
-                file.mime_type
-                    == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                    && (file.origin.as_deref() == Some("generated")
-                        || branch
-                            .file_references
-                            .iter()
-                            .any(|reference| reference.attachment_id == file.id))
+            || branch.file_references.iter().any(|reference| {
+                record.attachments.iter().any(|file| {
+                    file.id == reference.attachment_id
+                        && file.mime_type
+                            == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                })
             });
         if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
             self.wait_document_preparation().await;
+        } else {
+            self.start_document_preparation();
         }
         self.ensure_current(&identity, generation).await?;
-        let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
+
+        // The persisted capability is eligibility. Resolve an actual target
+        // from the active user turn, before loading any model-only context.
+        let task = super::tools::task::Task::from_user_text(
+            branch.resent_text.as_deref().unwrap_or(&request.text),
+        );
+        let local_task = if model.tools {
+            task.filter(|task| {
+                task.access == super::tools::task::Access::Diagnose
+                    || (super::capabilities::enabled(&record.session.capabilities)
+                        && request.retry_message_id.is_none()
+                        && request.regenerate_message_id.is_none())
+            })
+        } else {
+            None
+        };
+        let local = if let Some(task) = local_task {
             match self.env.local_paths().await.and_then(local_task_paths) {
-                Ok(paths) => Some(paths),
+                Ok(paths) => Some((task, paths.home, paths.skill)),
                 Err(error) => {
                     log::warn!("[Assistant] local configuration is unavailable: {error}");
                     None
@@ -765,9 +778,9 @@ impl AssistantHost {
         } else {
             None
         };
-        let admitted_home = local_paths.as_ref().map(|paths| paths.home.clone());
-        let mut local_config = local_paths.map(|paths| {
-            json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
+        let mut local_config = local.as_ref().map(|(task, folder, skill)| {
+            let target = (task.tool, folder.clone());
+            json!({"task":task,"cwd":folder,"platform":std::env::consts::OS,"skillPath":skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id, Some(&target))})
         });
         self.remember_key(&key);
         let ui_language = request_ui_language(
@@ -775,7 +788,6 @@ impl AssistantHost {
             crate::settings::get_settings().language.as_deref(),
         );
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
-        control.local_home = admitted_home;
         control.presentation_style_id = branch.presentation_style_id.clone();
         control.file_references = branch.file_references.clone();
         control.presentation = std::sync::Mutex::new(super::presentation::State::new(
@@ -784,14 +796,16 @@ impl AssistantHost {
                 .clone()
                 .unwrap_or_default(),
         ));
-        control.presentation_context=branch.presentation_style_id.is_some() || branch.file_references.iter().any(|reference|record.attachments.iter().any(|file|file.id==reference.attachment_id && file.mime_type=="application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+        control.presentation_context = deck_context;
         carry_presentation_spend(&mut control, &record, &branch);
         control.presentation_enabled = request.presentation_workflow_version == Some(1)
             && model.tools
             && self.runtime().is_ok()
             && self.engines().formats().contains(&"pptx");
         control.ui_language = ui_language.clone();
-        control.local_enabled = local_config.is_some();
+        control.local_home = local.as_ref().map(|(_, folder, _)| folder.clone());
+        control.local_task = local.map(|(task, folder, _)| (task, folder));
+        control.local_enabled = control.local_task.is_some();
         control.mcp = super::mcp::current(self.env.config_dir())
             .await
             .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
@@ -950,6 +964,18 @@ impl AssistantHost {
         });
         if let Some(params) = params.as_object_mut() {
             params.insert("skills".into(), skills["skills"].clone());
+            if super::capabilities::enabled(&record.session.capabilities) {
+                params.insert("localEligible".into(), Value::Bool(true));
+            }
+            if model.tools
+                && control
+                    .skills
+                    .lock()
+                    .map_err(|_| "assistant_state_unavailable")?
+                    .has_selected()
+            {
+                params.insert("readSelectedSkill".into(), Value::Bool(true));
+            }
             params.insert(
                 "mcp".into(),
                 if control.mcp["servers"]
@@ -1006,14 +1032,8 @@ impl AssistantHost {
                 if !source_files.is_empty() {
                     documents.insert("sourceFiles".into(), json!(source_files));
                 }
-            }
-            if let Some(style) = branch
-                .presentation_style_id
-                .as_deref()
-                .filter(|style| *style != "auto")
-            {
-                if let Some(documents) = params.get_mut("documents").and_then(Value::as_object_mut)
-                {
+                // An explicit Auto picker selection also commits this turn to PPTX creation.
+                if let Some(style) = branch.presentation_style_id.as_deref() {
                     documents.insert("selectedStyle".into(), json!(style));
                 }
             }
@@ -2144,6 +2164,7 @@ pub(super) fn publish_turn(
     let at = now();
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
+        task_progress: None,
         file_references: branch.file_references.clone(),
         presentation_visual_policy: branch.presentation_visual_policy.clone(),
         presentation_plan: None,
@@ -2174,6 +2195,7 @@ pub(super) fn publish_turn(
         anchor_entry_id: anchor.clone(),
     });
     record.messages.push(Message {
+        task_progress: Some(TaskProgress::new(at)),
         file_references: vec![],
         presentation_visual_policy: None,
         presentation_plan: None,
@@ -2547,6 +2569,43 @@ mod tests {
                 style
             );
             assert_eq!(user.content, "Topic only");
+        }
+    }
+
+    #[test]
+    fn task_progress_starts_at_reply_registration_and_is_fresh_for_each_turn() {
+        let (mut record, _, _, _) = fixture();
+        for _ in 0..2 {
+            let request = send(&record, "Make a report", json!({}));
+            let branch = Branch::resolve(&record, &request).unwrap();
+            let control = RunControl::new(
+                Identity {
+                    owner: "ab".repeat(32),
+                    apex: "ofox.ai".into(),
+                },
+                &request,
+                String::new(),
+            );
+            publish_turn(
+                &mut record,
+                &control,
+                &request,
+                &branch,
+                "Make a report",
+                &[],
+                None,
+                "test/model",
+            )
+            .unwrap();
+            let reply = record.messages.last().unwrap();
+            let value = serde_json::to_value(reply).unwrap();
+            assert_eq!(value["taskProgress"]["startedAt"], reply.created_at);
+            assert_eq!(value["taskProgress"]["steps"], json!([]));
+            let user = &record.messages[record.messages.len() - 2];
+            assert!(serde_json::to_value(user)
+                .unwrap()
+                .get("taskProgress")
+                .is_none());
         }
     }
 

@@ -1198,7 +1198,7 @@ impl SkillService {
         let content = fs::read_to_string(path)?;
         Ok(Self::parse_skill_metadata_content(&content))
     }
-    fn parse_skill_metadata_content(content: &str) -> SkillMetadata {
+    pub(crate) fn parse_skill_metadata_content(content: &str) -> SkillMetadata {
         let content = content.trim_start_matches('\u{feff}');
 
         let parts: Vec<&str> = content.splitn(3, "---").collect();

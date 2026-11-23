@@ -241,8 +241,15 @@ function AssistantWorkspace() {
     localEntryPending.current = entry.request;
     void assistant
       .startLocalConfig(t("assistant.local.toolPrompt", { tool: entry.tool }))
-      .then((ok) => {
-        if (ok) shell?.consumeAssistantLocation(entry.request);
+      .then((result) => {
+        if (!result) return;
+        shell?.consumeAssistantLocation(entry.request);
+        if (result.modelName)
+          toast(
+            t("assistant.local.shortcutModel", { model: result.modelName }),
+          );
+        if (result.needsToolModel)
+          toast.warning(t("assistant.local.shortcutNeedsTools"));
       });
   }, [
     entry,
@@ -1613,14 +1620,6 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
-        {assistant.localModelNotice && (
-          <p
-            role="status"
-            className="border-b border-line px-4 py-2 text-note text-ink-muted"
-          >
-            {t(`assistant.local.${assistant.localModelNotice}`)}
-          </p>
-        )}
         {/* While a delete dialog is open it shows the failure itself: a
             banner behind it would be announced a second time. */}
         {assistant.error !== null && !deleteDialogOpen && !emptyTrash.open && (
@@ -1724,11 +1723,7 @@ function AssistantWorkspace() {
                         {!centred && starterButtons}
                         {!trashed && (
                           <p className="mt-4 text-balance text-note text-ink-muted">
-                            {t(
-                              assistant.localConfig
-                                ? "assistant.local.boundary"
-                                : "assistant.emptyBoundary",
-                            )}
+                            {t("assistant.emptyBoundary")}
                           </p>
                         )}
                         {!trashed && keyMissing && (
@@ -1762,23 +1757,47 @@ function AssistantWorkspace() {
                             key={turn ? `versions:${turn.group}` : message.id}
                             message={message}
                             taskProgress={
-                              live ? (
+                              live || message.taskProgress?.steps.length ? (
                                 <AssistantRunProgress
+                                  key={message.id}
                                   startedAt={
-                                    assistant.runProgress?.startedAt ??
+                                    message.taskProgress?.startedAt ??
+                                    (live
+                                      ? assistant.runProgress?.startedAt
+                                      : undefined) ??
                                     message.createdAt
                                   }
                                   lastEventAt={
-                                    assistant.runProgress?.lastEventAt
+                                    live
+                                      ? assistant.runProgress?.lastEventAt
+                                      : undefined
                                   }
-                                  activities={assistant.runProgress?.activities}
-                                  activity={assistant.activity}
-                                  intent={assistant.localIntent}
-                                  warning={assistant.localWarning}
-                                  plan={assistant.localPlan}
-                                  approvals={assistant.localApprovals.length}
-                                  retryAttempt={assistant.retryAttempt}
-                                  thinking={assistant.thinking?.since != null}
+                                  activities={
+                                    live
+                                      ? assistant.runProgress?.activities
+                                      : undefined
+                                  }
+                                  activity={live ? assistant.activity : null}
+                                  intent={live ? assistant.localIntent : null}
+                                  warning={live ? assistant.localWarning : null}
+                                  plan={
+                                    message.taskProgress?.steps ??
+                                    (live ? assistant.localPlan : [])
+                                  }
+                                  approvals={
+                                    live ? assistant.localApprovals.length : 0
+                                  }
+                                  retryAttempt={
+                                    live ? assistant.retryAttempt : undefined
+                                  }
+                                  thinking={
+                                    live && assistant.thinking?.since != null
+                                  }
+                                  replyStarted={Boolean(message.content)}
+                                  status={message.status}
+                                  completedAt={message.completedAt}
+                                  errorCode={message.errorCode}
+                                  mcpSteps={message.mcpSteps}
                                   onFinish={focusComposer}
                                 />
                               ) : undefined

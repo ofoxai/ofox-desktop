@@ -1697,6 +1697,24 @@ export function LibrarySkillsPage({
             </Button>
           </p>
         )}
+        {!native.loading &&
+          native.inventory?.sources
+            .filter((source) => !["ready", "missing"].includes(source.state))
+            .map((source) => (
+              <p
+                key={source.sourceId}
+                role="status"
+                className="break-words text-ctl text-warn"
+              >
+                {labelFor(source.toolId)} ·{" "}
+                {source.displayPath ?? t("library.workbench.nativeSource")}
+                {" · "}
+                {libraryError(
+                  source.reason ?? "library.inventorySourceUnreadable",
+                  t,
+                )}
+              </p>
+            ))}
         {(entries.length > 0 || native.loading) && (
           <section
             aria-label={t("library.skillsPage.inAgents")}

@@ -1070,7 +1070,7 @@ it("offers fork for a saved reply and keeps it unavailable while busy", async ()
   ).toBeDisabled();
 });
 
-it("shows a local run's progress only while the reply streams", () => {
+it("keeps a supplied saved checklist beneath the reply after it finishes", () => {
   const reply = (status: AssistantMessage["status"]) => (
     <TooltipProvider>
       <AssistantMessageView
@@ -1093,7 +1093,12 @@ it("shows a local run's progress only while the reply streams", () => {
     within(screen.getByRole("article")).getByText("Reading the Codex config"),
   ).toBeVisible();
   shown.rerender(reply("completed"));
-  expect(screen.queryByText("Reading the Codex config")).toBeNull();
+  expect(screen.getByText("Reading the Codex config")).toBeVisible();
+  const body = screen.getByText("Looking");
+  expect(
+    body.compareDocumentPosition(screen.getByText("Reading the Codex config")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
 });
 
 it("reopened assistant replies display persisted read-only skill results", () => {

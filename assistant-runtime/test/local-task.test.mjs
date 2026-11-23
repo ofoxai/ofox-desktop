@@ -99,7 +99,7 @@ test("a known tool change with no diagnosed folder is verified in its home folde
   const home = "/Users/me";
   const task = new LocalTask(limits, Date.now, null, home);
   task.observe("rebind_tool", { tool: "codex" }, { changed: true });
-  assert.match(task.continuation(), /codex/);
+  assert.match(task.continuation(), /original authorized folder/);
   task.observe(
     "verify_in_folder",
     { tool: "codex", folder: "/elsewhere" },

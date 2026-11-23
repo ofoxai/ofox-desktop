@@ -10,6 +10,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { planningOpening } from "./fixtures/planning-opening.mjs";
 
 const limits = {
   repeatWarning: 3,
@@ -117,6 +118,7 @@ async function fixture(t, turns, { model = {}, host = () => ({}) } = {}) {
     localConfig: {
       cwd: root,
       platform: process.platform === "win32" ? "windows" : "macos",
+      task: { tool: "codex", access: "diagnose" },
       skillPath: fileURLToPath(
         new URL("../skills/local-config/SKILL.md", import.meta.url),
       ),
@@ -150,6 +152,7 @@ test("a reset after the request was written is asked again, and what it may have
   const f = await fixture(
     t,
     [
+      () => planningOpening("single"),
       () => call("tool_status", { tool: "codex" }),
       through("http", port),
       reply,
@@ -158,14 +161,19 @@ test("a reset after the request was written is asked again, and what it may have
   );
   assert.equal(f.result.status, "completed", f.result.errorMessage);
   assert.equal(f.result.errorCode, undefined);
-  assert.equal(f.requests.length, 3);
+  assert.equal(f.requests.length, 4);
   assert.equal(f.calls.length, 1);
-  assert.deepEqual(f.receipts, ["completed", "unknown", "completed"]);
+  assert.deepEqual(f.receipts, [
+    "completed",
+    "completed",
+    "unknown",
+    "completed",
+  ]);
   // The receipts stay honest: one request's cost is not known.
   assert.equal(f.result.usageCoverage, "incomplete");
-  // Two answered requests cost 15 tokens each; the unanswered one counts for
-  // at least a full-length answer on top of them.
-  const known = (2 * 15) / 1e6;
+  // Admission and two answered requests use 32 tokens together. The
+  // unanswered request counts for at least a full-length answer on top.
+  const known = (2 + 2 * 15) / 1e6;
   assert.ok(
     f.spent.at(-1) >= known + 1024 / 1e6,
     `${f.spent.at(-1)} includes the unanswered request`,
@@ -243,13 +251,17 @@ test("an image whose outcome is unknown fails that image only", async () => {
   );
 });
 
-test("the shell tool says it waits for approval and names the tools that do not", async (t) => {
-  const f = await fixture(t, []);
-  const system = JSON.parse(f.requests[0]).messages.find(
-    (message) => message.role === "system" || message.role === "developer",
-  );
-  const text = JSON.stringify(system.content);
-  assert.match(text, /approv/i);
-  assert.match(text, /ls, find, grep/);
-  assert.match(text, /assistant_approval_timeout/);
+test("a scoped diagnosis exposes its two read-only tools after single-step admission", async (t) => {
+  const f = await fixture(t, [() => planningOpening("single")]);
+  const names = (request) =>
+    JSON.parse(request)
+      .tools.map(({ function: tool }) => tool.name)
+      .sort();
+  assert.deepEqual(names(f.requests[0]), ["beginSingleStep", "updatePlan"]);
+  assert.deepEqual(names(f.requests[1]), [
+    "beginSingleStep",
+    "diagnose_in_folder",
+    "tool_status",
+    "updatePlan",
+  ]);
 });

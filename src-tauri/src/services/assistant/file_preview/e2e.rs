@@ -490,6 +490,62 @@ fn jpeg_dimensions(bytes: &[u8]) -> (u16, u16) {
 }
 
 #[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "Requires a task-private copy of the original issue #1733 deck"]
+async fn preview_e2e_issue_1733_renders_original_large_pages_without_changing_the_deck() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let case = checkout.join(".real-eval/issue-1733/original.pptx");
+    let bytes = std::fs::read(&case).unwrap();
+    let hash = digest(&bytes);
+    assert_eq!(
+        hash,
+        "42a455b294a4ac3694bae559d92fdd51ca80792f6799cdb82597e99c1dd842fa"
+    );
+    let fixture = Fixture::new(Some(checkout.join("assistant-runtime/resources")));
+    let request = fixture.add(PPTX, "large-page-regression.pptx", &bytes);
+    let manifest = fixture.host.file_preview(request.clone()).await.unwrap();
+    assert_eq!(manifest["totalPages"], 13);
+    assert_eq!(manifest["version"], hash);
+    let mut digests = HashSet::new();
+    for page in [2, 1, 3] {
+        let result = fixture
+            .host
+            .file_preview_page(PageRequest {
+                file: request.clone(),
+                version: hash.clone(),
+                page,
+                scale: 1,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("issue #1733 page {page}: {error}"));
+        assert_eq!(result["page"], page);
+        assert_eq!(result["version"], hash);
+        assert_eq!(result["mimeType"], "image/jpeg");
+        let jpeg = STANDARD
+            .decode(result["dataBase64"].as_str().unwrap())
+            .unwrap();
+        assert!(jpeg.len() <= 2 * 1024 * 1024);
+        assert_eq!(jpeg_dimensions(&jpeg), (1536, 864));
+        assert!(
+            digests.insert(digest(&jpeg)),
+            "page {page} must render its own content"
+        );
+    }
+    assert_eq!(digest(&std::fs::read(case).unwrap()), hash);
+    let staged = fixture
+        .store
+        .attachment_root(&fixture.sid)
+        .unwrap()
+        .join(request.attachment_id);
+    assert_eq!(digest(&std::fs::read(staged).unwrap()), hash);
+    fixture.assert_keyless();
+}
+
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Requires explicit task-private OFOX_PREVIEW_RUNTIME and OFOX_PREVIEW_CASE; never uses installed/user documents"]
 async fn preview_e2e_actual_runtime_renders_pages_one_sixty_one_seventy_and_scale_two_without_keys()

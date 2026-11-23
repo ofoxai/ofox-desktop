@@ -250,6 +250,11 @@ fn add(
             service_host,
             sources: vec![reference(source)],
             matched_resource_ids: vec![],
+            content_verified: matches!(definition, Definition::Skill { .. }).then_some(false),
+            manifest_hash: proofs.iter().find_map(|proof| match proof {
+                Proof::SkillManifest { hash, .. } => Some(hash.clone()),
+                _ => None,
+            }),
             locations: vec![],
             conflict: false,
             variant: None,
@@ -649,47 +654,41 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
         }
     }
 }
-fn skill_size(
-    root: &Path,
-    total: &mut u64,
-    entries: &mut usize,
-    depth: usize,
-) -> Result<(), AppError> {
-    if depth > 32 {
-        return Err(error("inventoryLimit"));
+#[derive(Default)]
+struct SkillScanBudget {
+    // Only metadata bytes and discovery directories count here. Skill payloads
+    // are inspected when selected for import, never while listing candidates.
+    accepted: (u64, usize),
+    rejected: BTreeMap<PathBuf, &'static str>,
+    directories: BTreeSet<PathBuf>,
+}
+fn skill_failure_key(failure: &AppError) -> &'static str {
+    match failure {
+        AppError::Config(key)
+            if matches!(
+                key.as_str(),
+                "library.inventoryLimit" | "library.skillTooLarge"
+            ) =>
+        {
+            "inventoryLimit"
+        }
+        _ => "inventorySourceUnreadable",
     }
-    for entry in fs::read_dir(root).map_err(|_| error("skillUnreadable"))? {
-        let entry = entry.map_err(|_| error("skillUnreadable"))?;
-        *entries += 1;
-        if *entries > 10_000 {
-            return Err(error("inventoryLimit"));
-        }
-        let meta = fs::symlink_metadata(entry.path()).map_err(|_| error("skillUnreadable"))?;
-        if meta.file_type().is_symlink() {
-            return Err(error("skillLinkUnsupported"));
-        }
-        if meta.is_dir() {
-            skill_size(&entry.path(), total, entries, depth + 1)?;
-        } else if meta.is_file() {
-            *total = total.saturating_add(meta.len());
-            if *total > 128 * 1024 * 1024 {
-                return Err(error("inventoryLimit"));
-            }
-        } else {
-            return Err(error("skillUnreadable"));
-        }
+}
+fn fail_skill(source: &mut InventorySource, failure: &AppError) {
+    if source.reason.as_deref() != Some("library.inventoryLimit") {
+        fail(source, skill_failure_key(failure));
     }
-    Ok(())
 }
 fn skill_walk(
     path: &Path,
     source: &mut InventorySource,
     data: &mut ScanData,
     visited: &mut BTreeSet<PathBuf>,
-    budget: &mut (u64, usize),
+    budget: &mut SkillScanBudget,
     depth: usize,
 ) -> Result<(), AppError> {
-    if depth > 8 || data.candidates.len() >= MAX_ENTRIES {
+    if depth > 8 {
         return Err(error("inventoryLimit"));
     }
     let physical = path.canonicalize().map_err(|_| error("skillUnreadable"))?;
@@ -701,33 +700,64 @@ fn skill_walk(
         return Err(error("skillUnreadable"));
     }
     match fs::symlink_metadata(physical.join("SKILL.md")) {
-        Ok(_) => {
+        Ok(metadata) => {
             // Shared reader aliases neither reread bytes nor consume the scan budget again.
-            if let Some(existing) = data.candidates.iter().find(|candidate| candidate.proofs.iter().any(|proof| matches!(proof, Proof::Tree { physical: known, .. } if known == physical.to_string_lossy().as_ref()))).cloned() {
-                let proof = Proof::Tree { path: path.into(), physical: physical.to_string_lossy().into_owned(), hash: existing.hash.clone() };
+            if let Some(existing) = data.candidates.iter().find(|candidate| candidate.proofs.iter().any(|proof| matches!(proof, Proof::SkillManifest { physical: known, .. } if known == physical.to_string_lossy().as_ref()))).cloned() {
+                let proof = Proof::SkillManifest { path: path.into(), physical: physical.to_string_lossy().into_owned(), hash: skills::manifest_hash(&existing).ok_or_else(|| error("invalidSkill"))?.to_owned() };
                 add(data, source, existing.view.name, existing.definition, vec![proof], existing.hash, existing.view.directory);
                 source.count += 1;
                 return Ok(());
             }
-            skill_size(&physical, &mut budget.0, &mut budget.1, 0)?;
-            let hash = skill_artifact::tree_hash(&physical)?;
             let directory = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| error("invalidSkillPath"))?
                 .to_owned();
             skill_artifact::safe_leaf(&directory)?;
-            let (name, description) = crate::services::skill::SkillService::read_skill_name_desc(
-                &physical.join("SKILL.md"),
-                &directory,
-            );
-            if name.trim().is_empty() || name.len() > 512 {
-                return Err(error("invalidSkill"));
+            if let Some(reason) = budget.rejected.get(&physical) {
+                return Err(error(reason));
             }
-            let proof = Proof::Tree {
+            if data.candidates.len() >= MAX_ENTRIES {
+                return Err(error("inventoryLimit"));
+            }
+            let inspected = (|| {
+                if metadata.is_file() && metadata.len() <= skills::MAX_MANIFEST_BYTES {
+                    // Leave room for retained paths/definitions under the ticket's
+                    // separate 64 MiB cap. A file we do not read costs no bytes.
+                    let bytes = budget.accepted.0.saturating_add(metadata.len());
+                    if bytes > 32 * 1024 * 1024 {
+                        return Err(error("inventoryLimit"));
+                    }
+                    budget.accepted.0 = bytes;
+                }
+                let content = skills::read_manifest(&physical)?;
+                let manifest_hash = io::fingerprint(Some(content.as_bytes()));
+                let meta =
+                    crate::services::skill::SkillService::parse_skill_metadata_content(&content);
+                let name = meta.name.unwrap_or_else(|| directory.clone());
+                if name.trim().is_empty() || name.len() > 512 {
+                    return Err(error("invalidSkill"));
+                }
+                Ok((manifest_hash, name, meta.description))
+            })();
+            let (manifest_hash, name, description) = match inspected {
+                Ok(candidate) => candidate,
+                Err(failure) => {
+                    let key = skill_failure_key(&failure);
+                    budget.rejected.insert(physical, key);
+                    return Err(error(key));
+                }
+            };
+            // Separate physical copies remain separate until a full comparison
+            // at import, even if their manifests happen to be identical.
+            let hash = io::fingerprint(Some(
+                &serde_json::to_vec(&(&physical, &manifest_hash))
+                    .map_err(|_| error("invalidSkill"))?,
+            ));
+            let proof = Proof::SkillManifest {
                 path: path.into(),
                 physical: physical.to_string_lossy().into_owned(),
-                hash: hash.clone(),
+                hash: manifest_hash,
             };
             add(
                 data,
@@ -735,7 +765,7 @@ fn skill_walk(
                 name,
                 Definition::Skill {
                     path: path.into(),
-                    hash: hash.clone(),
+                    hash: None,
                     directory: directory.clone(),
                     description,
                 },
@@ -746,10 +776,16 @@ fn skill_walk(
             source.count += 1;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let count_entries = budget.directories.insert(physical.clone());
             let mut children: Vec<_> = fs::read_dir(&physical)
                 .map_err(|_| self::error("skillUnreadable"))?
+                .take(10_001)
                 .collect::<Result<_, _>>()
                 .map_err(|_| self::error("skillUnreadable"))?;
+            if children.len() > 10_000 {
+                fail(source, "inventoryLimit");
+                children.truncate(10_000);
+            }
             children.sort_by_key(|entry| entry.file_name());
             for child in children {
                 if child
@@ -759,16 +795,20 @@ fn skill_walk(
                 {
                     continue;
                 }
-                budget.1 += 1;
-                if budget.1 > 10_000 {
+                if count_entries {
+                    budget.accepted.1 += 1;
+                }
+                if budget.accepted.1 > 10_000 {
                     return Err(self::error("inventoryLimit"));
                 }
                 let meta =
                     fs::metadata(child.path()).map_err(|_| self::error("skillUnreadable"))?;
-                if meta.is_dir()
-                    && skill_walk(&child.path(), source, data, visited, budget, depth + 1).is_err()
-                {
-                    fail(source, "inventorySourceUnreadable");
+                if meta.is_dir() {
+                    if let Err(failure) =
+                        skill_walk(&child.path(), source, data, visited, budget, depth + 1)
+                    {
+                        fail_skill(source, &failure);
+                    }
                 }
             }
         }
@@ -794,23 +834,21 @@ pub(super) fn collect(db: &Database, kind: ResourceKind) -> Result<ScanData, App
         }
         ResourceKind::Mcp => mcp(&routes, &mut data, &uncertain),
         ResourceKind::Skills => {
-            let mut budget = (0, 0);
+            let mut budget = SkillScanBudget::default();
             for route in &routes {
                 let mut source = source(route);
                 if let Location::File(path) = &route.location {
                     match fs::metadata(path) {
                         Ok(_) => {
-                            if skill_walk(
+                            if let Err(failure) = skill_walk(
                                 path,
                                 &mut source,
                                 &mut data,
                                 &mut BTreeSet::new(),
                                 &mut budget,
                                 0,
-                            )
-                            .is_err()
-                            {
-                                fail(&mut source, "inventorySourceUnreadable");
+                            ) {
+                                fail_skill(&mut source, &failure);
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

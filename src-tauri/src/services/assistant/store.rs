@@ -1392,6 +1392,15 @@ fn check_record(record: &SessionRecord, sid: &str) -> Result<(), String> {
         log::warn!("assistant session {sid} has a message with an unknown error code");
         return Err(INVALID_SESSION.into());
     }
+    if record.messages.iter().any(|message| {
+        message
+            .task_progress
+            .as_ref()
+            .is_some_and(|progress| message.role != "assistant" || !progress.valid())
+    }) {
+        log::warn!("assistant session {sid} has invalid task progress metadata");
+        return Err(INVALID_SESSION.into());
+    }
     Ok(())
 }
 
@@ -1483,6 +1492,38 @@ fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_progress_rejects_invalid_imported_snapshots_without_replacing_the_record() {
+        let config = tempfile::tempdir().unwrap();
+        let store = AssistantStore::for_owner(config.path(), &"a".repeat(64)).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let invalid = [
+            json!({"startedAt":-1,"steps":[]}),
+            json!({"startedAt":1,"steps":[{"step":"","status":"pending"}]}),
+            json!({"startedAt":1,"steps":[{"step":"x".repeat(41),"status":"pending"}]}),
+            json!({"startedAt":1,"steps":[{"step":"x","status":"arbitrary"}]}),
+            json!({"startedAt":1,"steps":vec![json!({"step":"x","status":"pending"});13]}),
+            json!({"startedAt":1,"steps":[{"step":"x","status":"in_progress"},{"step":"y","status":"in_progress"}]}),
+        ];
+        let before = store.load_record(&sid).unwrap();
+        for progress in invalid {
+            let input = json!({"id":id(),"role":"assistant","content":"","createdAt":1,"status":"completed","taskProgress":progress});
+            let Ok(message) = serde_json::from_value(input) else {
+                continue;
+            };
+            assert!(store
+                .mutate(&sid, |record| {
+                    record.messages.push(message);
+                    Ok(())
+                })
+                .is_err());
+            assert_eq!(
+                store.load_record(&sid).unwrap().messages.len(),
+                before.messages.len()
+            );
+        }
+    }
     use crate::settings::KeyOwner;
     use std::fs;
 

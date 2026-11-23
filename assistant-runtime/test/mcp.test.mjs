@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { StdioTransport } from "@earendil-works/pi-mcp";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import {
+  isFixtureOpening,
+  withPlanningOpening,
+} from "./fixtures/planning-opening.mjs";
 import { isProcessRunning } from "./fixtures/process-state.mjs";
 const limits = {
   repeatWarning: 3,
@@ -62,18 +66,19 @@ const reply = (
       usage,
     },
   ]);
-async function fixture(t, turns, host, extra = {}) {
+async function fixture(t, turns, host, extra = {}, plan = false) {
   const root = await mkdtemp(path.join(os.tmpdir(), "ofox-mcp-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [],
     events = [],
     calls = [];
+  const scriptedFetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return turns[requests.length - 1]?.() ?? reply();
+  };
   const runtime = new AssistantRuntime({
     retrySleep: async () => {},
-    fetch: async (url, options) => {
-      requests.push(JSON.parse(options.body));
-      return turns[requests.length - 1]?.() ?? reply();
-    },
+    fetch: plan ? withPlanningOpening(scriptedFetch) : scriptedFetch,
     emit: (e) => events.push(e),
     hostCall: async (c) => {
       calls.push(c);
@@ -118,8 +123,12 @@ async function fixture(t, turns, host, extra = {}) {
   };
 }
 
+function plannedFixture(t, turns, host, extra) {
+  return fixture(t, turns, host, extra, true);
+}
+
 test("real Pi discovers deferred MCP and calls it through host admission", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_search", { query: "fixture" }),
@@ -174,7 +183,7 @@ test("real Pi discovers deferred MCP and calls it through host admission", async
 });
 
 test("missing server does not prevent reply and reports unavailable", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [() => call("tool_search", { query: "missing" }), reply],
     () => ({ approved: true }),
@@ -243,9 +252,8 @@ test("MCP configuration filters missing runners, replaces stale files, and prese
   );
 });
 test("configured MCP values are secrets unless plain settings", async () => {
-  const { mcpSecrets, mcpScrubber, sanitizeMcpMessage } = await import(
-    "../src/mcp.mjs"
-  );
+  const { mcpSecrets, mcpScrubber, sanitizeMcpMessage } =
+    await import("../src/mcp.mjs");
   const config = {
     servers: {
       s: {
@@ -325,7 +333,7 @@ test("source boundary scrubs short/long secrets and decoded text blobs, rejects 
 
 test("real MCP clears protocol logs and SDK large-output files before persistence and drains split UTF8 stderr", async (t) => {
   const { stat } = await import("node:fs/promises");
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_search", { query: "fixture" }),
@@ -406,7 +414,7 @@ test("normal and cancelled pending MCP processes stop without unsafe SDK signals
     return kill(pid, ...args);
   });
   for (const scenario of ["normal", "hang", "fail"]) {
-    const f = await fixture(
+    const f = await plannedFixture(
       t,
       [
         () => call("tool_search", { query: "fixture" }),
@@ -481,7 +489,7 @@ test("normal and cancelled pending MCP processes stop without unsafe SDK signals
 });
 
 test("deferred search and resource calls share the same admission and exact tool count", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_search", { query: "resources" }),
@@ -508,7 +516,12 @@ test("deferred search and resource calls share the same admission and exact tool
     f.calls.map((c) => c.args.toolName),
     ["tool_search", "list_mcp_resources", "list_mcp_resource_templates"],
   );
-  assert.equal(f.events.filter((e) => e.type === "tool_start").length, 3);
+  assert.equal(
+    f.events.filter(
+      (e) => e.type === "tool_start" && !isFixtureOpening(e.data.toolCallId),
+    ).length,
+    3,
+  );
 });
 
 test("unknown OFox model cost stops MCP while known model usage permits external tools", async (t) => {
@@ -537,7 +550,7 @@ test("unknown OFox model cost stops MCP while known model usage permits external
 });
 
 test("MCP repeats and configured tool limits stop before extra host admission", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_search", { query: "fixture" }),
@@ -551,7 +564,7 @@ test("MCP repeats and configured tool limits stop before extra host admission", 
     { localConfig: undefined },
   );
   f.params.mcp = {
-    limits: { ...limits, maxToolCalls: 4 },
+    limits: { ...limits, maxToolCalls: 5 }, // opening plan and four substantive calls
     servers: {
       fixture: {
         command: process.execPath,
@@ -634,7 +647,7 @@ test("HTTP authentication stays on the transport and remote failures remain safe
           server.close(resolve);
         }),
     );
-    const f = await fixture(
+    const f = await plannedFixture(
       t,
       [
         () => call("tool_search", { query: "remote" }),
@@ -706,7 +719,7 @@ test("close waits pending setup, is idempotent, and prevents later MCP spawn", a
   await assert.rejects(f.run(), /runtime is closed/);
 });
 
-test("no-local production MCP limits keep exactly twenty mixed wrapped calls", async (t) => {
+test("no-local production MCP limits count planning and operations within twenty calls", async (t) => {
   for (const maxToolCalls of [60, 20]) {
     const turns = [() => call("tool_search", { query: "fixture" })];
     for (let index = 2; index <= 21; index++)
@@ -716,7 +729,7 @@ test("no-local production MCP limits keep exactly twenty mixed wrapped calls", a
           : call("mcp__fixture__read_fixture", { index }),
       );
     turns.push(reply);
-    const f = await fixture(
+    const f = await plannedFixture(
       t,
       turns,
       () => ({ approved: true, body: "Readable skill", files: [] }),
@@ -760,21 +773,23 @@ test("no-local production MCP limits keep exactly twenty mixed wrapped calls", a
     );
     assert.equal(
       started.at(-1).data.name,
-      "use_skill",
-      "twentieth call executes",
+      "mcp__fixture__read_fixture",
+      "nineteenth operation executes after the opening plan",
     );
-    assert.equal(f.calls.length, 20);
+    assert.equal(f.calls.length, 19);
+    assert.equal(started[0].data.name, "updatePlan");
+    assert.equal(started.at(-1).data.args.index, 19);
     assert.equal(
-      f.requests[20].tool_choice,
+      f.requests[19].tool_choice,
       "none",
-      "final answer follows twenty executed tools",
+      "final answer follows twenty total tool calls",
     );
     assert.ok(!started.some((event) => event.data.args?.index === 21));
   }
 });
 
 test("numeric structuredContent is scrubbed before Pi serialization and SDK large-result files", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [
       () => call("tool_search", { query: "fixture" }),
@@ -970,7 +985,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
 });
 
 test("unsafe credential-bearing schema is rejected before tool registration and authorization", async (t) => {
-  const f = await fixture(
+  const f = await plannedFixture(
     t,
     [() => call("tool_search", { query: "fixture" }), reply],
     () => ({ approved: true }),
@@ -1014,7 +1029,7 @@ test("real Pi rejects credential-bearing unknown schema subtrees without trusted
     "root_bool",
   ])
     await t.test(variant, async (t) => {
-      const f = await fixture(
+      const f = await plannedFixture(
         t,
         [() => call("tool_search", { query: "fixture" }), reply],
         () => ({ approved: true }),
@@ -1086,7 +1101,7 @@ test("real Pi rejects credential-bearing unknown schema subtrees without trusted
 test("real Pi retains legitimate boolean subschemas, permission hints and harmless unknown metadata", async (t) => {
   for (const variant of ["legitimate", "safe_metadata"])
     await t.test(variant, async (t) => {
-      const f = await fixture(
+      const f = await plannedFixture(
         t,
         [
           () => call("tool_search", { query: "fixture" }),
@@ -1183,7 +1198,7 @@ test("final resource metadata stays data before real Pi model content and SDK fi
     "read_mcp_resource",
   ]) {
     await t.test(tool, async (t) => {
-      const f = await fixture(
+      const f = await plannedFixture(
         t,
         [
           () => call("tool_search", { query: "fixture resources" }),

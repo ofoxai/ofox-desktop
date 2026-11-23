@@ -24,6 +24,9 @@ const VERSION_CHANGED: &str = "assistant_preview_version_changed";
 const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const MAX_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_XML: u64 = 4 * 1024 * 1024;
+// OfficeCLI inlines slide images as base64. Budget for one workspace page
+// separately from the SVGs saved during generation. Match file-preview-page.mjs.
+const FILE_PAGE_SVG_LIMIT: usize = 12 * 1024 * 1024;
 // A resource limit, not a fabricated document length. The manifest still
 // reports the complete source count and the viewer explains the remainder.
 const MAX_RENDER_PAGE: u32 = 1000;
@@ -602,7 +605,7 @@ impl AssistantHost {
                 &folder,
                 &home,
                 Duration::from_secs(60),
-                super::documents::runner::SVG_OUTPUT_LIMIT,
+                FILE_PAGE_SVG_LIMIT,
             )
             .await?
         } else {
@@ -610,9 +613,7 @@ impl AssistantHost {
             // isolation. Existing generator behavior is unchanged.
             return Err("assistant_preview_sandbox_unavailable".into());
         };
-        if output.status != Some(0)
-            || output.stdout.len() + 4 >= super::documents::runner::SVG_OUTPUT_LIMIT
-        {
+        if output.status != Some(0) || output.stdout.len() + 4 >= FILE_PAGE_SVG_LIMIT {
             return Err(ERROR.into());
         }
         let input = json!({"page":request.page,"scale":request.scale,"svg":output.stdout});

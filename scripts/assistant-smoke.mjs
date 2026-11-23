@@ -260,16 +260,18 @@ async function productionSmoke() {
       fetch: async () => {
         turns++;
         const delta =
-          turns === 1
+          turns <= 2
             ? {
                 tool_calls: [
                   {
                     index: 0,
-                    id: "smoke-search",
+                    id: turns === 1 ? "smoke-prepare" : "smoke-search",
                     type: "function",
                     function: {
-                      name: "web_search",
-                      arguments: JSON.stringify({ query: "smoke" }),
+                      name: turns === 1 ? "beginSingleStep" : "web_search",
+                      arguments: JSON.stringify(
+                        turns === 1 ? {} : { query: "smoke" },
+                      ),
                     },
                   },
                 ],
@@ -283,7 +285,7 @@ async function productionSmoke() {
                 {
                   index: 0,
                   delta: {},
-                  finish_reason: turns === 1 ? "tool_calls" : "stop",
+                  finish_reason: turns <= 2 ? "tool_calls" : "stop",
                 },
               ],
             },
@@ -314,9 +316,12 @@ async function productionSmoke() {
     });
     await searching.close();
     await new Promise((resolve) => gateway.close(resolve));
-    assert.equal(searched.status, "completed");
+    assert.equal(searched.status, "completed", searched.errorCode);
+    assert.equal(turns, 3);
     assert.deepEqual(searches, [`Bearer ${testToken}`]);
-    const tool = searched.entries.find((entry) => entry.role === "tool");
+    const tool = searched.entries.find(
+      (entry) => entry.role === "tool" && entry.toolName === "web_search",
+    );
     assert.equal(tool.toolName, "web_search");
     assert.equal(tool.details.usage.searchCalls, 1);
     assert.deepEqual(tool.details.sources, [

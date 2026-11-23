@@ -16,6 +16,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import {
+  isFixtureOpening,
+  withPlanningOpening,
+} from "./fixtures/planning-opening.mjs";
 
 const token = "search-run-credential-never-persist-0123456789";
 const STUB = fileURLToPath(
@@ -103,6 +107,11 @@ function scriptedModel(...turns) {
   };
 }
 
+function scriptedToolModel(...turns) {
+  const model = scriptedModel(...turns);
+  return { ...model, fetch: withPlanningOpening(model.fetch) };
+}
+
 async function sandbox(t, extra = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ofox-search-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -158,32 +167,44 @@ function runtimeFor(t, fixture, model, options = {}) {
 
 const toolEvents = (events) =>
   events
-    .filter((event) => ["tool_start", "tool_end"].includes(event.type))
+    .filter(
+      (event) =>
+        ["tool_start", "tool_end"].includes(event.type) &&
+        !isFixtureOpening(event.data.toolCallId),
+    )
     .map((event) => ({ type: event.type, ...event.data }));
 const calls = (log) =>
   log
     .filter((entry) => entry.method === "tools/call")
     .map((entry) => [entry.params.name, entry.params.arguments]);
 const toolResults = (body) =>
-  body.messages.filter((message) => message.role === "tool");
+  body.messages.filter(
+    (message) =>
+      message.role === "tool" && !isFixtureOpening(message.tool_call_id),
+  );
 
 test("web tools exist only when the run enables web search, and start nothing until used", async (t) => {
   const prompts = [];
   for (const webSearch of [undefined, false, true]) {
     const fixture = await sandbox(t, { webSearch });
-    const model = scriptedModel(() => reply("no search needed"));
+    const model = (webSearch ? scriptedToolModel : scriptedModel)(() =>
+      reply("no search needed"),
+    );
     const { runtime } = runtimeFor(t, fixture, model);
     assert.equal((await runtime.run(fixture.params)).status, "completed");
     const [body] = model.requests;
     prompts.push(body.messages[0].content.split("\n<cwd>")[0]);
     assert.deepEqual(
-      (body.tools ?? []).map((tool) => tool.function.name),
-      webSearch ? ["web_search", "web_fetch"] : [],
+      (body.tools ?? []).map((tool) => tool.function.name).sort(),
+      webSearch
+        ? ["beginSingleStep", "updatePlan", "web_fetch", "web_search"]
+        : ["beginSingleStep", "updatePlan"],
     );
     assert.deepEqual(await fixture.log(), [], "no server without a call");
   }
   const [, chat, search] = prompts;
-  assert.doesNotMatch(chat, /tool|search|web|cite|URL/i);
+  assert.match(chat, /Use only the provided tools\./);
+  assert.doesNotMatch(chat, /\b(?:search|web|cite|URL)\b/i);
   assert.match(search, /Use only the provided tools\./);
   assert.match(search, /web_search searches the web/);
   assert.match(search, /web_fetch reads/);
@@ -201,7 +222,7 @@ test("web tools exist only when the run enables web search, and start nothing un
 
 test("a search reaches the model, its sources and usage reach the host, and the server stops with the run", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () => callTools(["web_search", { query: "Pi SDK" }]),
     () =>
       reply(
@@ -226,8 +247,9 @@ test("a search reaches the model, its sources and usage reach the host, and the 
     outputTokens: 30,
     model: "openai/gpt-5-nano",
   };
-  const toolCallId = events.find((event) => event.type === "tool_start").data
-    .toolCallId;
+  const toolCallId = toolEvents(events).find(
+    (event) => event.type === "tool_start",
+  ).toolCallId;
   assert.deepEqual(toolEvents(events), [
     {
       type: "tool_start",
@@ -246,7 +268,9 @@ test("a search reaches the model, its sources and usage reach the host, and the 
   const [toolResult] = toolResults(model.requests[1]);
   assert.match(JSON.stringify(toolResult.content), /Summary of Pi SDK\./);
 
-  const entry = result.entries.find((item) => item.role === "tool");
+  const entry = result.entries.find(
+    (item) => item.role === "tool" && !isFixtureOpening(item.toolCallId),
+  );
   assert.equal(entry.toolName, "web_search");
   assert.equal(entry.toolCallId, toolCallId);
   assert.equal(entry.isError, false);
@@ -255,7 +279,7 @@ test("a search reaches the model, its sources and usage reach the host, and the 
   assert.equal(result.usageCoverage, "complete");
   assert.deepEqual(
     (await runtime.load(fixture.params)).entries.find(
-      (item) => item.role === "tool",
+      (item) => item.role === "tool" && !isFixtureOpening(item.toolCallId),
     ),
     entry,
   );
@@ -285,7 +309,7 @@ test("the server gets the key and gateway only through its own environment", asy
     },
   ]) {
     const fixture = await sandbox(t, extra);
-    const model = scriptedModel(() =>
+    const model = scriptedToolModel(() =>
       callTools(["web_search", { query: "environment" }]),
     );
     const { runtime } = runtimeFor(t, fixture, model);
@@ -328,7 +352,7 @@ test("search and fetch failures reach the model as errors and the run goes on", 
   const fixture = await sandbox(t, {
     allowedWebUrls: ["https://example.com/missing"],
   });
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ["web_search", { query: "rate limited" }],
@@ -368,7 +392,9 @@ test("search and fetch failures reach the model as errors and the run goes on", 
   const results = toolResults(model.requests[1]);
   assert.equal(results.length, 4);
   assert.match(JSON.stringify(results[0].content), /rate-limited/);
-  const tools = result.entries.filter((entry) => entry.role === "tool");
+  const tools = result.entries.filter(
+    (entry) => entry.role === "tool" && !isFixtureOpening(entry.toolCallId),
+  );
   assert.deepEqual(
     tools.map((entry) => [entry.toolName, entry.isError, entry.usageCoverage]),
     [
@@ -383,7 +409,7 @@ test("search and fetch failures reach the model as errors and the run goes on", 
 
 test("a search with an unknown outcome is never repeated and ends the run", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(() =>
+  const model = scriptedToolModel(() =>
     callTools(
       ["web_search", { query: "unknown outcome" }],
       ["web_search", { query: "second search" }],
@@ -400,7 +426,9 @@ test("a search with an unknown outcome is never repeated and ends the run", asyn
   const [end] = toolEvents(events).filter((event) => event.type === "tool_end");
   assert.equal(end.success, false);
   assert.deepEqual(end.details, { code: "search_outcome_unknown" });
-  const [entry] = result.entries.filter((item) => item.role === "tool");
+  const [entry] = result.entries.filter(
+    (item) => item.role === "tool" && !isFixtureOpening(item.toolCallId),
+  );
   assert.equal(entry.toolName, "web_search");
   assert.deepEqual(entry.details.error, { code: "search_outcome_unknown" });
   assert.equal(entry.usageCoverage, "incomplete");
@@ -410,7 +438,7 @@ test("a search with an unknown outcome is never repeated and ends the run", asyn
 test("a search the server does not answer in time, crashes during or answers malformed has an unknown outcome", async (t) => {
   for (const query of ["hang", "crash", "malformed answer"]) {
     const fixture = await sandbox(t);
-    const model = scriptedModel(() => callTools(["web_search", { query }]));
+    const model = scriptedToolModel(() => callTools(["web_search", { query }]));
     const { runtime, events } = runtimeFor(t, fixture, model, {
       searchTimeoutMs: 300,
     });
@@ -425,7 +453,7 @@ test("a search the server does not answer in time, crashes during or answers mal
 
 test("a repeated query in one run is answered once, without a second charge", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ["web_search", { query: "Tauri release" }],
@@ -452,7 +480,7 @@ test("a repeated query in one run is answered once, without a second charge", as
 
 test("a run sends at most 6 searches: a sent failure counts, repeats and unsent failures do not", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ["web_search", { query: "rate limited" }],
@@ -517,7 +545,9 @@ test("a run sends at most 6 searches: a sent failure counts, repeats and unsent 
   assert.equal(ends[10].details.deduplicated, true);
   const [limited] = toolResults(model.requests[1]).slice(9);
   assert.match(JSON.stringify(limited.content), /search_limit_reached/);
-  const entry = result.entries.filter((item) => item.role === "tool")[9];
+  const entry = result.entries.filter(
+    (item) => item.role === "tool" && !isFixtureOpening(item.toolCallId),
+  )[9];
   assert.equal(entry.isError, true);
   assert.equal(entry.usageCoverage, "complete");
 });
@@ -545,7 +575,7 @@ const PLAIN_QUERIES = [
 
 test("a query with a URL is refused unsent and does not count toward the search limit", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ...URL_QUERIES.map((query) => ["web_search", { query }]),
@@ -598,9 +628,8 @@ test("a query with a URL is refused unsent and does not count toward the search 
 
 test("the runtime refuses the same queries as the search server", async () => {
   const { queryHasUrl } = await import("../src/search.mjs");
-  const { queryHasUrl: serverCheck } = await import(
-    "../search-mcp/src/search.mjs"
-  );
+  const { queryHasUrl: serverCheck } =
+    await import("../search-mcp/src/search.mjs");
   for (const query of URL_QUERIES) {
     assert.equal(queryHasUrl(query), true, query);
     assert.equal(serverCheck(query), true, query);
@@ -619,7 +648,7 @@ test("after 3 failed page reads in a run, web_fetch refuses every page unsent", 
       "https://example.com/guide",
     ],
   });
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ["web_fetch", { url: "https://example.com/missing-1" }],
@@ -667,7 +696,7 @@ test("web_fetch reads only pages the host allows or this run's searches returned
   const fixture = await sandbox(t, {
     allowedWebUrls: ["https://Docs.Example.net/guide#install", "not a url"],
   });
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(
         ["web_fetch", { url: "https://example.com/pi-sdk" }],
@@ -718,7 +747,7 @@ test("a read page's links on its own site become readable, at most 3 reads of th
     "web_fetch",
     { url: `https://example.com/linked-${index}` },
   ];
-  const model = scriptedModel(
+  const model = scriptedToolModel(
     () =>
       callTools(linked(1), ["web_fetch", { url: "https://example.com/hub" }]),
     () =>
@@ -761,7 +790,7 @@ test("a read page's links on its own site become readable, at most 3 reads of th
 
 test("stopping a run during a search ends it as stopped and stops the server", async (t) => {
   const fixture = await sandbox(t);
-  const model = scriptedModel(() =>
+  const model = scriptedToolModel(() =>
     callTools(["web_search", { query: "hang" }]),
   );
   const { runtime, events } = runtimeFor(t, fixture, model);
@@ -795,7 +824,7 @@ process.exit(2);`,
     [refusing, /unavailable \(OFOX_BASE_URL must be exactly/],
   ]) {
     // More calls than the search limit: nothing was sent, none counts.
-    const model = scriptedModel(
+    const model = scriptedToolModel(
       () =>
         callTools(
           ["web_search", { query: "anything" }],
@@ -843,7 +872,7 @@ writeFileSync(${JSON.stringify(started)}, String(process.pid));
 process.stdin.resume();
 setInterval(() => {}, 1000);`,
   );
-  const model = scriptedModel(() =>
+  const model = scriptedToolModel(() =>
     callTools(["web_search", { query: "slow start" }]),
   );
   const { runtime, events } = runtimeFor(t, fixture, model, {
@@ -878,7 +907,7 @@ setInterval(() => {}, 1000);`,
 
 test("with Exa the model is told searches are free; an unknown provider rejects the run", async (t) => {
   const fixture = await sandbox(t, { searchProvider: "exa" });
-  const model = scriptedModel(() => reply("No search needed."));
+  const model = scriptedToolModel(() => reply("No search needed."));
   const { runtime } = runtimeFor(t, fixture, model);
   assert.equal((await runtime.run(fixture.params)).status, "completed");
   const [request] = model.requests;

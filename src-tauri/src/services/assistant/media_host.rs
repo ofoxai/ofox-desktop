@@ -205,6 +205,7 @@ impl AssistantHost {
                         )?;
                         let message = record.messages.last_mut().expect("published reply");
                         message.role = "media".into();
+                        message.task_progress = None;
                         message.media = Some(media.clone());
                         record
                             .operations

@@ -570,7 +570,19 @@ export interface AssistantFileReference {
   page: number | null;
 }
 
+export interface AssistantTaskStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** Host-kept presentation only, never proof of execution or a permission. */
+export interface AssistantTaskProgress {
+  startedAt: number;
+  steps: AssistantTaskStep[];
+}
+
 export interface AssistantMessage {
+  taskProgress?: AssistantTaskProgress;
   fileReferences?: AssistantFileReference[];
   presentationPlan?: {
     planId?: string;
@@ -1102,10 +1114,9 @@ export type AssistantRunEvent =
   | {
       type: "task_plan";
       data: {
-        steps: {
-          step: string;
-          status: "pending" | "in_progress" | "completed";
-        }[];
+        steps: AssistantTaskStep[];
+        messageId?: string;
+        startedAt?: number;
       };
     }
   | { type: "task_status"; data: { cost?: number; warning?: string } }
@@ -1703,6 +1714,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_verification_required: "localVerificationRequired",
   assistant_verification_target_limit: "localVerificationTargetLimit",
   assistant_invalid_plan: "localInvalidPlan",
+  assistant_plan_required: "planRequired",
   assistant_operation_denied: "operationDenied",
   assistant_file_unreadable: "localFileUnreadable",
   assistant_file_too_large: "localFileTooLarge",
@@ -1712,6 +1724,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_local_unavailable: "localUnavailable",
   assistant_local_scope_changed: "localScopeChanged",
   assistant_command_outcome_unknown: "localCommandUnknown",
+  assistant_local_task_in_progress: "localTaskInProgress",
   assistant_mutation_outcome_unknown: "localMutationUnknown",
   assistant_local_partial_change: "localPartialChange",
   assistant_journal_unavailable: "localJournalUnavailable",

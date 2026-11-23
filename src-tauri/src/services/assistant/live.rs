@@ -106,11 +106,12 @@ impl AssistantHost {
             if user.status != "queued" { return Err(STATE.into()); }
             user.status="completed".into();
             let user=user.clone();
+            let at=now();
             let old=record.messages.iter_mut().find(|m|m.id==previous).ok_or(STATE)?;
             old.native_entry_id=Some(previous_entry);
-            old.status="completed".into(); old.completed_at=Some(now());
+            old.status="completed".into(); old.completed_at=Some(at);
             let old=old.clone();
-            let next:Message=serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":now(),"status":"streaming","runId":rid,"modelId":record.session.model_id})).map_err(|_|STATE)?;
+            let next:Message=serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":at,"status":"streaming","runId":rid,"modelId":record.session.model_id,"taskProgress":{"startedAt":at,"steps":[]}})).map_err(|_|STATE)?;
             record.messages.push(next.clone());
             Ok(json!({"messageId":mid,"messages":[old,user,next]}))
         })).await?;

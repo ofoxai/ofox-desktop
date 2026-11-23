@@ -216,9 +216,85 @@ pub struct FileReference {
     pub page: Option<u32>,
 }
 
+/// A model-reported checklist is presentation, never permission or proof of
+/// execution. The host's start survives native message timestamp rewrites.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProgress {
+    pub started_at: i64,
+    pub steps: Vec<TaskStep>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TaskStep {
+    pub step: String,
+    pub status: String,
+}
+
+/// Redaction can expand a valid label. Bound its safe presentation afterwards,
+/// keeping a redaction marker whole when it crosses the display boundary.
+pub(super) fn scrub_task_step(text: &str) -> String {
+    const LIMIT: usize = 40;
+    let safe = crate::redact::scrub(text);
+    let end = safe
+        .char_indices()
+        .nth(LIMIT)
+        .map_or(safe.len(), |(at, _)| at);
+    let marker = crate::redact::REDACTED;
+    if let Some((start, _)) = safe
+        .match_indices(marker)
+        .find(|(start, _)| *start < end && start + marker.len() > end)
+    {
+        let prefix = &safe[..start];
+        let mut prefix_end = prefix
+            .char_indices()
+            .nth(LIMIT - marker.chars().count())
+            .map_or(prefix.len(), |(at, _)| at);
+        if let Some((start, _)) = prefix
+            .match_indices(marker)
+            .find(|(start, _)| *start < prefix_end && start + marker.len() > prefix_end)
+        {
+            prefix_end = start;
+        }
+        format!("{}{marker}", &prefix[..prefix_end])
+    } else {
+        safe[..end].to_owned()
+    }
+}
+
+impl TaskProgress {
+    pub(super) fn new(started_at: i64) -> Self {
+        Self {
+            started_at,
+            steps: vec![],
+        }
+    }
+
+    pub(super) fn valid(&self) -> bool {
+        (0..=9_007_199_254_740_991).contains(&self.started_at)
+            && self.steps.len() <= 12
+            && self.steps.iter().all(|step| {
+                !step.step.trim().is_empty()
+                    && step.step.chars().count() <= 40
+                    && matches!(
+                        step.status.as_str(),
+                        "pending" | "in_progress" | "completed"
+                    )
+            })
+            && self
+                .steps
+                .iter()
+                .filter(|step| step.status == "in_progress")
+                .count()
+                <= 1
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_progress: Option<TaskProgress>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_references: Vec<FileReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -790,6 +866,29 @@ mod tests {
         value["reasoningMs"] = json!(8200);
         let message: Message = serde_json::from_value(value).unwrap();
         assert_eq!(message.reasoning_ms, Some(8200));
+    }
+
+    #[test]
+    fn task_progress_message_metadata_round_trips_and_older_messages_omit_it() {
+        let mut saved = json!({
+            "id":id(),"role":"assistant","content":"answer","createdAt":99,
+            "status":"completed","completedAt":101
+        });
+        let old: Message = serde_json::from_value(saved.clone()).unwrap();
+        assert!(serde_json::to_value(old)
+            .unwrap()
+            .get("taskProgress")
+            .is_none());
+        let progress = json!({"startedAt":10,"steps":[
+            {"step":"Inspect","status":"completed"},
+            {"step":"Check output","status":"pending"}
+        ]});
+        saved["taskProgress"] = progress.clone();
+        let message: Message = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            serde_json::to_value(message).unwrap()["taskProgress"],
+            progress
+        );
     }
 
     #[test]

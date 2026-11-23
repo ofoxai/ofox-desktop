@@ -241,6 +241,7 @@ pub struct RunControl {
     /// the language its documents are set in.
     pub(super) ui_language: String,
     pub(super) local_enabled: bool,
+    pub(super) local_task: Option<(super::tools::task::Task, PathBuf)>,
     /// Physical home captured when this run's local capability was admitted.
     pub(super) local_home: Option<PathBuf>,
     pub identity: Identity,
@@ -286,6 +287,7 @@ impl RunControl {
             artifact: None,
             ui_language: "zh".into(),
             local_enabled: false,
+            local_task: None,
             local_home: None,
             identity,
             session_id: request.session_id.clone(),
@@ -1150,6 +1152,17 @@ impl AssistantHost {
     /// Explicit document work shares the background proof; ordinary chat does
     /// not wait. A failed proof is retried by a later operation, never a loop.
     pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+        // A completed preparation can lose its native proof during a later
+        // cleanup/recheck. Explicit document work may reprove it, while an
+        // actual runner failure remains disabled for this process.
+        if !self.python_broken.load(Ordering::Relaxed) && !self.python_offered() {
+            let _ = self.document_preparation.compare_exchange(
+                2,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
         self.start_document_preparation();
         loop {
             let finished = self.document_preparation_finished.notified();
@@ -1696,7 +1709,10 @@ impl AssistantHost {
             log::warn!("[Assistant] refused unsafe MCP event payload");
             return;
         }
-        scrub_secrets_in(&mut data, &run.secrets());
+        if super::progress::scrub_event(kind, &mut data, &run.mcp, &run.secrets()).is_err() {
+            log::warn!("[Assistant] refused invalid task progress event metadata");
+            return;
+        }
         self.env.emit(Event {
             session_id: run.session_id.clone(),
             run_id: run.run_id.clone(),
@@ -1843,6 +1859,9 @@ impl AssistantHost {
             return Err(IDENTITY_CHANGED.into());
         }
         self.validate_run(&run)?;
+        if run.local_enabled || super::tools::task::Task::from_user_text(&request.text).is_some() {
+            return Err("assistant_local_task_in_progress".into());
+        }
         if request.id == run.run_id || request.id == run.operation_id {
             return Err("assistant_stale_operation".into());
         }
@@ -2197,7 +2216,12 @@ impl AssistantHost {
                     .store(kind == "compaction_start", Ordering::SeqCst);
                 self.emit(control, kind, data);
             }
-            "task_plan" | "task_status" if control.local_enabled => {
+            "task_plan"
+                if !control.compact_only && !control.audio_only && control.artifact.is_none() =>
+            {
+                self.save_task_plan(control, data).await?;
+            }
+            "task_status" if control.local_enabled => {
                 scrub_secrets_in(&mut data, &control.secrets());
                 let shown = super::tools::events::task_event(kind, &data)?;
                 self.emit(control, kind, shown);
@@ -2807,6 +2831,289 @@ mod tests {
     use super::*;
 
     include!("host/local_interruption_tests.rs");
+
+    #[tokio::test]
+    async fn task_progress_persists_without_local_access_before_publication() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_config, env, host) = fixture_with_env();
+            *env.apex.lock().unwrap() = apex.into();
+            let store = host.store(&identity().owner).unwrap();
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().identity.apex = apex.into();
+            assert!(!run.local_enabled);
+            store
+                .mutate(&sid, |record| {
+                    record.messages.push(
+                        serde_json::from_value(json!({
+                            "id":run.message_id,"role":"assistant","content":"","createdAt":99,
+                            "status":"streaming","runId":run.run_id,
+                            "taskProgress":{"startedAt":10,"steps":[]}
+                        }))
+                        .unwrap(),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let steps = json!([
+                {"step":"Inspect test-opaque-run-key","status":"completed"},
+                {"step":"Generate document","status":"in_progress"}
+            ]);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+                "type":"task_plan","data":{"steps":steps}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            assert_eq!(saved["taskProgress"]["startedAt"], 10);
+            assert_eq!(saved["taskProgress"]["steps"][1], steps[1]);
+            assert!(!saved.to_string().contains("test-opaque-run-key"));
+            {
+                let events = env.events.lock().unwrap();
+                let shown = events
+                    .iter()
+                    .find(|event| event.r#type == "task_plan")
+                    .unwrap();
+                assert_eq!(shown.data["messageId"], run.message_id);
+                assert_eq!(shown.data["startedAt"], 10);
+                assert_eq!(shown.data["steps"], saved["taskProgress"]["steps"]);
+            }
+            let mut stale = event.clone();
+            stale["operationId"] = json!(id());
+            assert!(host
+                .on_event(&run, &stale, &mut Attempt::default())
+                .await
+                .is_err());
+            let mut invalid = event.clone();
+            invalid["data"]["steps"] = json!([{"step":"x".repeat(41),"status":"pending"}]);
+            assert!(host
+                .on_event(&run, &invalid, &mut Attempt::default())
+                .await
+                .is_err());
+            store
+                .mutate(&sid, |record| {
+                    record.messages[0].status = "completed".into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(host
+                .on_event(&run, &event, &mut Attempt::default())
+                .await
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap()
+                    ["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_does_not_enable_special_runs_or_local_task_status() {
+        for special in ["compact", "audio", "artifact", "status"] {
+            let (_config, env, host) = fixture_with_env();
+            let sid = host
+                .store(&identity().owner)
+                .unwrap()
+                .create("test/model", false)
+                .unwrap()
+                .session
+                .id;
+            let mut run = control(&sid);
+            let config = Arc::get_mut(&mut run).unwrap();
+            match special {
+                "compact" => config.compact_only = true,
+                "audio" => config.audio_only = true,
+                "artifact" => config.artifact = Some("artifact".into()),
+                _ => {}
+            }
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":if special=="status" {"task_status"} else {"task_plan"},"data":{"steps":[],"warning":"repeat_warning"}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            assert!(env.events.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_bounds_unicode_after_secret_redaction() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let secret = "12345678";
+        run.add_secret(secret);
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        for label in [
+            format!("api_key=x {}", "字".repeat(30)),
+            format!("{} api_key=x", "字".repeat(30)),
+            format!("{}{secret}", "字".repeat(32)),
+            format!("api_key=x {}{secret}", "字".repeat(22)),
+        ] {
+            assert!(label.chars().count() <= 40);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":label,"status":"in_progress"}]}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+            assert!(label.chars().count() <= 40);
+            assert!(label.contains(crate::redact::REDACTED));
+            assert!(!label.contains("api_key=x") && !label.contains(&secret[..2]));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["steps"],
+                saved["taskProgress"]["steps"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_scrubs_short_captured_mcp_credentials_only_from_labels() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp = json!({"servers":{"fixture":{"url":"https://fixture.invalid/mcp","headers":{"X-API-Key":"xy7"},"env":{"PIN":"4187","PASSWORD":"pending","LONG_PASSWORD":"completed"}}}});
+        for secret in super::super::mcp::secrets(&run.mcp) {
+            run.add_secret(&secret);
+        }
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Review pending completed 4187 xy7","status":"pending"},{"step":"Finish","status":"completed"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let mut saved =
+            serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+        let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+        for secret in ["xy7", "4187", "pending", "completed"] {
+            assert!(!label.contains(secret));
+        }
+        assert!(label.contains("Review"));
+        assert_eq!(saved["taskProgress"]["steps"][0]["status"], "pending");
+        assert_eq!(saved["taskProgress"]["steps"][1]["status"], "completed");
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["steps"],
+            saved["taskProgress"]["steps"]
+        );
+        saved["status"] = json!("completed");
+        host.emit(&run, "message", json!({"message":saved}));
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "message");
+            assert_eq!(event.data["message"]["status"], "completed");
+            assert_eq!(event.data["message"]["taskProgress"], saved["taskProgress"]);
+        }
+        let mut next = saved.clone();
+        next["status"] = json!("streaming");
+        host.emit(
+            &run,
+            "steer_applied",
+            json!({"messages":[saved,{"id":"user","role":"user","status":"completed"},next,{"id":"queued","role":"user","status":"queued"}]}),
+        );
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "steer_applied");
+            assert_eq!(event.data["messages"][0]["status"], "completed");
+            assert_eq!(event.data["messages"][1]["status"], "completed");
+            assert_eq!(event.data["messages"][2]["status"], "streaming");
+            assert_eq!(event.data["messages"][3]["status"], "queued");
+            assert_eq!(
+                event.data["messages"][0]["taskProgress"],
+                saved["taskProgress"]
+            );
+            assert_eq!(
+                event.data["messages"][2]["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+        // A lookalike object on an unrelated event is not typed metadata.
+        host.emit(
+            &run,
+            "error",
+            json!({"taskProgress":saved["taskProgress"],"status":"completed"}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["taskProgress"]["steps"][1]["status"],
+            crate::redact::REDACTED
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            crate::redact::REDACTED
+        );
+        for status in ["completed", "stopped", "error"] {
+            host.emit(&run, "run_end", json!({"status":status}));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["status"],
+                status
+            );
+        }
+        host.emit(&run, "run_end", json!({"status":"debug completed"}));
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+        host.emit(
+            &run,
+            "message",
+            json!({"message":{"role":"assistant","status":"debug completed"}}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["message"]["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_progress_steering_uses_a_new_reply_snapshot_and_keeps_the_previous_one() {
+        let (_config, _env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let input = id();
+        run.live_runs.lock().unwrap().insert(input.clone());
+        let old_progress =
+            json!({"startedAt":10,"steps":[{"step":"First task","status":"in_progress"}]});
+        store.mutate(&sid,|record|{
+            record.messages=serde_json::from_value(json!([
+                {"id":run.message_id,"role":"assistant","content":"","createdAt":99,"status":"streaming","runId":run.run_id,"taskProgress":old_progress},
+                {"id":input,"role":"user","content":"Next task","createdAt":100,"status":"queued","runId":input}
+            ])).unwrap();
+            Ok(())
+        }).unwrap();
+        let shown = host
+            .apply_live_input(
+                &run,
+                &json!({"id":input,"previousEntryId":"previous-entry"}),
+            )
+            .await
+            .unwrap();
+        let fresh = &shown["messages"][2];
+        assert_eq!(fresh["taskProgress"]["startedAt"], fresh["createdAt"]);
+        assert_eq!(fresh["taskProgress"]["steps"], json!([]));
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Second task","status":"pending"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let saved = store.load_detail(&sid).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved.messages[0]).unwrap()["taskProgress"],
+            old_progress
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.messages[2]).unwrap()["taskProgress"]["steps"][0]["step"],
+            "Second task"
+        );
+    }
 
     #[tokio::test]
     async fn local_write_journals_and_restores_only_after_the_run_ends() {
@@ -4082,12 +4389,12 @@ mod tests {
         let pending =
             json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":false}]});
         host.keep_local_task(&run, &json!({"localTaskState":pending}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         // A run that ends without reporting keeps the debt; one that verified clears it.
         host.keep_local_task(&run, &json!({"status":"error"}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         host.keep_local_task(&run, &json!({"localTaskState":null}));
-        assert_eq!(host.local_task_state(&owner, &sid), Value::Null);
+        assert_eq!(host.local_task_state(&owner, &sid, None), Value::Null);
         host.release_run(&run);
     }
 
@@ -7671,6 +7978,135 @@ while read line; do :; done"#,
                 .await
                 .is_err(),
             "the probe is single flight"
+        );
+    }
+    #[tokio::test]
+    async fn legacy_full_auto_question_with_a_generated_deck_does_not_wait_for_document_preparation(
+    ) {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store
+            .create_with_capabilities(
+                "tool/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(
+                    serde_json::from_value(json!({
+                        "id": id(),
+                        "name": "earlier-deck.pptx",
+                        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "sizeBytes": 0,
+                        "status": "ready",
+                        "origin": "generated"
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        host.set_permission(super::local::PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        host.start_document_preparation();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let send = serde_json::from_value(json!({
+            "sessionId": sid,
+            "runId": id(),
+            "operationId": id(),
+            "text": "Are you using the hosted or self-hosted version?\n1. Hosted (app.fizzy.do)\n2. Self-hosted\n哪个是global？",
+            "presentationWorkflowVersion": 1
+        }))
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), host.send(send)).await;
+        let pending = host.document_preparation.load(Ordering::SeqCst) == 1;
+        release.notify_one();
+        assert!(
+            pending,
+            "the optional proof was not released by the question"
+        );
+        result
+            .expect("a historical generated deck must not make a plain Full Auto question wait")
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn explicit_document_preparation_retries_a_revoked_proof_but_not_a_broken_runner() {
+        let (_config, _env, host) = fixture_with_env();
+        // A completed preparation is not a permanent capability grant. This
+        // inert runtime has no current Python proof, as after invalidation.
+        host.document_preparation.store(2, Ordering::SeqCst);
+        assert!(!host.python_offered());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let mut preparing = tokio::spawn({
+            let host = host.clone();
+            async move { host.wait_document_preparation().await }
+        });
+        let started = tokio::time::timeout(Duration::from_secs(1), entered.notified()).await;
+        if started.is_err() {
+            release.notify_one();
+        }
+        started.expect("explicit document work must reprove a revoked capability");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut preparing)
+                .await
+                .is_err(),
+            "the retry waits for the same single-flight proof"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), preparing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !host.python_offered(),
+            "a wait cannot grant unproven Python"
+        );
+
+        host.python_broken.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(1), host.wait_document_preparation())
+            .await
+            .expect("a broken runner stays disabled without another probe");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "a permanently broken runner must not repeat the native proof"
         );
     }
     #[cfg(windows)]

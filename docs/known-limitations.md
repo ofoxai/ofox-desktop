@@ -142,6 +142,94 @@ opened Terminal installer or every platform-specific descendant has stopped.
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+The local Mac/Windows assistant integration preserves task-scoped admission,
+plan progress and Host verification debt together. Its Mac checks do not certify
+the combined Windows installation or LPAC behavior. The native Windows gate and
+installed Windows acceptance remain pending. Subsequent local Mac installation
+acceptance is recorded below; it makes no additional live model call. See the
+[integration contract](mac-windows-assistant-integration.md).
+
+## Assistant task progress after a model rejection
+
+An installed macOS run retained its last checklist when a Chat Completions
+request returned HTTP 400 after seven successful plan updates. The earlier
+requests and the rejection have gateway correlation IDs. The actual upstream
+resource for each request remains unverified. The synthetic replay and Host
+persistence tests cover the failure behavior on both apexes. See the
+[task progress evidence](assistant-progress.md#follow-up-on-the-rejected-model-request).
+
+An isolated DeepSeek V4.1 Flash 1017 run emitted its initial checklist and
+lost the continuation before the test forwarder received an HTTP status.
+The account request detail includes the first request. Attribution of the
+disconnect remains open pending production ingress evidence. See the
+[continuation investigation](assistant-progress.md#continuation-investigation).
+
+The explicit PPTX workflow now requires a model-authored initial checklist.
+The isolated DeepSeek 1017 acceptance delivered three slides and displayed
+all four steps checked. One final visual-plan discrepancy was reported.
+General tool execution now uses the same per-turn task preparation boundary.
+Multi-operation work needs a visible plan; single-step preparation permits one
+operation. The semantic choice for a purely textual answer remains model-owned;
+answer length alone is not a reliable complexity classifier. Checklist completion
+is model-reported and is never inferred from a successful run. A provider declining
+the initial PPT checklist currently receives the standard model-failure UI. See the
+[native checklist acceptance](assistant-progress.md#automatic-checklist-native-acceptance-2026-11-19).
+
+Task preparation consumes the existing shared tool budget. A caller with a
+one-call execution limit can exhaust it on preparation before performing its
+requested operation; the installed Host currently supplies the normal twenty-call
+MCP budget. This change does not expand a caller's configured budget.
+
+The general non-PPT DeepSeek acceptance verified the actual production Host,
+packaged runtime, persisted 5/5 plan and generated CSV amounts. Its report still
+contains five recorded semantic defects, including a mistaken identifier and a
+reversed signed expression; a checked plan does not certify document correctness.
+The final isolated native window could not be attached after restart, so final
+GUI verification remains open. Earlier GUI checks cover progress and a direct
+simple answer before the last automatic-promotion correction. See the
+[general task verification](assistant-progress.md#general-task-promotion-and-final-verification).
+
+## Assistant task progress (2026-11-16)
+
+Task checklists are model-reported presentation. The shared plan tool and prompt
+guidance make multi-stage planning available without local configuration. The
+generic execution gate now requires a plan before multiple tool operations; a
+model may still omit one for purely textual work or leave it incomplete. The UI
+preserves those reported
+states rather than inferring success from tool returns or run completion.
+Historical summaries require new optional message metadata; older messages are
+not reconstructed into invented plans, and interrupted runs without an observed
+end time have no computed duration. Routine local operation records are live-only.
+See [the progress contract](assistant-progress.md) for persistence and validation.
+Browser verification uses actual components with synthetic data, and bundled
+runtime verification uses local mock gateways. An installed Mac build using
+GPT-6.1 Sol passed manual stop and conversation reopen. A separate run ended
+with HTTP 400 after several plan updates. Native Windows acceptance is pending.
+
+## Assistant local task scope
+
+The first version identifies direct, single-target diagnostic requests in
+Chinese, English and Japanese and the Tools page's predefined repair prompts.
+Open-ended local requests can still receive a conversational answer and a
+supported example. Repairs require the local configuration capability and a new
+explicit request after an uncertain outcome. Live input during a scoped local
+task enters the regular message queue for independent admission.
+
+Assistant configuration actions currently cover structured read-only
+diagnostics and repair via the managed launcher and binding writers. Generic
+terminal, directory search, skill scripts and arbitrary config writes are
+outside the model's tool set. A selected skill can read references inside its
+verified directory. The prior shell verification entry below describes the
+older tool surface and the underlying executors.
+
+The macOS host regression uses the original Fizzy question and an existing
+capability record in Full Auto. It exercises both apexes with a loopback
+provider, and the same test can assert the installed Codex version through
+the real native probe. This change was verified with Codex CLI 0.166.0.
+The timeout regression injects an unknown tool outcome and verifies an
+additional tool-free reply with the operation error retained. Live provider
+answer quality and the native Windows build are outside that evidence.
+
 ## Assistant command verification scope (2026-11-14)
 
 Host-confirmed changes (`changed: true`) always require verification, including
@@ -638,8 +726,11 @@ What the files and previews are:
   checked against.
 - The file workspace previews owned input/generated PPTX by its actual OPC page
   order/count. It renders pages on demand through sandboxed OfficeCLI and a
-  bounded raster worker. At most page 1000 is renderable; a larger real total is
-  shown with the unrendered range. Persisted batches remain at most 60 JPEGs,
+  bounded raster worker. The on-demand path accepts up to 12 MiB of SVG per
+  page to accommodate embedded images and returns JPEGs up to 2 MiB. The
+  SVG budget for generation previews is 4 MiB per page. At most page 1000
+  is renderable, and the viewer shows the unrendered range for longer decks.
+  Persisted batches remain at most 60 JPEGs,
   while selected source page numbers can reach 1000. HTML uses an opaque scripted
   iframe on a token-scoped loopback endpoint, with external dependencies blocked
   and reported. Native WebView attack and Windows execution acceptance remain
@@ -653,6 +744,27 @@ What the files and previews are:
   OfficeCLI charts whose axis and tick geometry it recognizes. This applies to
   file-workspace pages, generated previews and model overviews. Native chart
   layout and editing are verified with the exported presentation in Office.
+- Fizzy #1733 was reproduced with the original 13-page deck. On macOS 26.5.1
+  arm64, the Host regression first failed on page 1, then rendered distinct
+  JPEGs for pages 1, 2 and 3 with the fix. The 1.5.2 acceptance installation
+  built from `9c7e4803` and bundled OfficeCLI 1.0.160 displayed all three
+  pages in the file workspace, including the embedded pictures on pages 1
+  and 3. The source file hash matched before and after. The original deck
+  stays outside Git in the task-private fixture used by the opt-in Host test.
+  On the same Mac, typecheck, formatting and all-targets Clippy passed.
+  The full Rust suite passed 4,526 tests with 28 ignored, the frontend
+  passed 3,344 with one skipped, and runtime and search passed 805 and 102.
+  The #1733 Host fixture passed in a separate opt-in run. Windows native
+  verification is pending.
+- The 2026-11-21 local Mac integration retains the large-page preview fix and
+  metadata-first Skills discovery while incorporating background document
+  preparation. Portable barrier regressions cover plain Full Auto questions
+  after a generated deck, explicit document waiting and recovery of an
+  invalidated proof. They do not establish Windows LPAC recovery behavior;
+  native Windows acceptance is being continued separately. Failed preparation
+  may be retried in the background on a later ordinary turn, whose reply does
+  not wait for it; broken Python runners remain disabled for the process.
+  See [the incremental Mac receipt](mac-windows-assistant-integration.md#incremental-mac-integration-2026-11-21).
 - OfficeCLI does not faithfully render native OMML. Math preview uses a temporary
   copy selecting the equation's existing compatibility fallback; the delivered
   PPTX retains native OMML. A preview of a fallback cannot establish editable
@@ -1793,3 +1905,54 @@ OMML script runs. Both inner and outer summands still need explicit braces;
 unsupported macros and double-escaped commands remain refused. Offline native
 generation and preview evidence does not certify a real-model deck or its
 PowerPoint graph/equation editing and save-reopen behavior.
+
+## Native skill discovery reads metadata before payload validation
+
+Native discovery now reads a bounded regular `SKILL.md` (at most 1 MiB) and stops
+descending once it finds a skill. Attached icons, scripts and other resources do
+not consume the discovery entry budget. Physical reader aliases reuse metadata;
+independent copies stay separate until full comparison on import. Metadata-only
+entries do not claim full content matches or payload differences. Different
+manifest bytes can establish a difference without reading attached resources.
+
+Discovery retains its 2,000-candidate, 10,000-discovery-entry and depth limits,
+with a 32 MiB aggregate metadata allowance. These are accounting limits, not a
+promise to bound every filesystem operation. Truncated/unreadable roots remain
+explicitly partial; oversized or unreadable manifests do not become empty roots.
+The former eight-failed-payload allowance is no longer relevant because payloads
+are not read during discovery. Existing managed-resource and receipt status
+checks may still inspect their payloads separately from native discovery.
+
+Import verifies manifest bytes, the canonical root target, routing, ticket and epoch, then
+freezes the selected current payload and retains the immutable artifact's full
+validation and checked publication. Resource edits after discovery are captured
+at import; manifest edits or canonical link-target changes invalidate the old selection. Replacing
+a directory at the same canonical path with the same manifest is captured as
+the current payload at import; discovery does not bind root inode identity. Large
+skills can therefore appear in discovery while still exceeding the separate
+artifact import limits. Removal validates the current selected payload before
+moving folders into backups; it does not promise an atomic hash CAS over all
+locations. No dependency or script is executed by discovery or import.
+
+Earlier installed macOS acceptance on 2026-11-20 verified both shared writing skills in
+the real resource library after replacing the local 1.5.2 App with the preceding
+rejected-payload isolation fix. It did not test this metadata-only change. The
+original signing identity and entitlements were retained. All 62 Assistant
+sessions, native history, attachments and user configuration were preserved;
+only the normal pricing, account-balance and usage-health caches refreshed. A
+full data snapshot and one rollback App were retained, and the duplicate build
+package was removed. No skill was imported or enabled during acceptance. Native
+Windows behavior and the exact-commit Windows gate remain unverified.
+
+The subsequent metadata-first 1.5.2 build (main executable digest prefix
+`19b95751`) was also installed locally. Native computer-use inspection confirmed
+both writing skills and the formerly rejected `ppt-master`, with neither old
+Claude Code nor OpenCode scan-limit warning. Discovery was verified; importing
+or executing these live skills was not attempted. In particular, listing
+`ppt-master` does not bypass the artifact's 10,000-entry/64 MiB import limits.
+The 106 ms / 100-entry native probe covered the real Claude and shared Agents
+roots under temporary application state, not full GUI startup. Session bytes
+and user settings were preserved, with only checked derived-cache refreshes;
+existing skill files were unchanged. A new writing-skill Python bytecode cache
+was retained without attributing its creator. Detailed checks and preservation
+scope are recorded in [the integration acceptance](mac-windows-assistant-integration.md#metadata-first-skills-installation-2026-11-20).

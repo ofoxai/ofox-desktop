@@ -24,6 +24,19 @@ pub(super) struct LocalState {
     grants: HashSet<String>,
     // A repair still waiting for verification, carried into the next run of
     // the conversation. Memory only: a restart does not resume tasks.
+    tasks: HashMap<LocalTaskKey, LocalTaskState>,
+}
+
+type LocalTaskKey = Option<(crate::app_config::BindableTool, PathBuf)>;
+
+fn local_task_key(run: &RunControl) -> LocalTaskKey {
+    run.local_task
+        .as_ref()
+        .map(|(task, folder)| (task.tool, folder.clone()))
+}
+
+#[derive(Default)]
+struct LocalTaskState {
     task: Option<Value>,
     verification: VerificationTargets,
     // Host evidence can outlive a cancelled callback. Only an actual matching
@@ -123,6 +136,8 @@ impl VerificationTargets {
 struct TargetReservation<'a> {
     host: &'a AssistantHost,
     session: String,
+    task: LocalTaskKey,
+    generation: u64,
     run_id: String,
     key: (String, String),
     retained: bool,
@@ -131,7 +146,13 @@ struct TargetReservation<'a> {
 impl Drop for TargetReservation<'_> {
     fn drop(&mut self) {
         if let Ok(mut states) = self.host.local_states.lock() {
-            if let Some(state) = states.get_mut(&self.session) {
+            if self.host.generation() != self.generation {
+                return;
+            }
+            if let Some(state) = states
+                .get_mut(&self.session)
+                .and_then(|state| state.tasks.get_mut(&self.task))
+            {
                 state
                     .verification
                     .finish(&self.run_id, &self.key, self.retained);
@@ -145,6 +166,8 @@ impl Drop for TargetReservation<'_> {
 struct MutationDebt<'a> {
     host: &'a AssistantHost,
     session: String,
+    task: LocalTaskKey,
+    generation: u64,
     run_id: &'a str,
     tool: &'static str,
     folder: &'a Path,
@@ -159,7 +182,13 @@ impl Drop for MutationDebt<'_> {
         let Ok(mut states) = self.host.local_states.lock() else {
             return;
         };
-        let Some(state) = states.get_mut(&self.session) else {
+        if self.host.generation() != self.generation {
+            return;
+        }
+        let Some(state) = states
+            .get_mut(&self.session)
+            .and_then(|state| state.tasks.get_mut(&self.task))
+        else {
             return;
         };
         let mut scopes = state.verification_debt.clone();
@@ -196,7 +225,7 @@ impl Drop for MutationDebt<'_> {
     }
 }
 
-impl LocalState {
+impl LocalTaskState {
     fn verified(&mut self, tool: &str, folder: &str) {
         self.verification_debt.remove(&(tool.into(), folder.into()));
         if let Some(targets) = self
@@ -306,7 +335,11 @@ fn rebind_overwrites(status: &Value) -> Option<Vec<String>> {
 }
 
 fn check_local_home(run: &RunControl, paths: &LocalPaths) -> Result<(), String> {
-    if let Some(admitted) = &run.local_home {
+    if let Some(admitted) = run
+        .local_home
+        .as_ref()
+        .or_else(|| run.local_task.as_ref().map(|(_, folder)| folder))
+    {
         if crate::services::assistant::tools::scope::resolve(&paths.home)? != *admitted {
             return Err("assistant_local_scope_changed".into());
         }
@@ -368,7 +401,15 @@ impl AssistantHost {
         let session = session_key(&run.identity.owner, &run.session_id);
         let key = {
             let mut states = self.local_states.lock().map_err(|_| STATE)?;
-            let state = states.entry(session.clone()).or_default();
+            if self.generation() != run.mcp_generation {
+                return Err(IDENTITY_CHANGED.into());
+            }
+            let state = states
+                .entry(session.clone())
+                .or_default()
+                .tasks
+                .entry(local_task_key(run))
+                .or_default();
             state.verification.reserve(
                 &run.run_id,
                 state.task.as_ref(),
@@ -380,6 +421,8 @@ impl AssistantHost {
         Ok(key.map(|key| TargetReservation {
             host: self,
             session,
+            task: local_task_key(run),
+            generation: run.mcp_generation,
             run_id: run.run_id.clone(),
             key,
             retained: false,
@@ -420,17 +463,31 @@ impl AssistantHost {
             .local_states
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // Stop keeps actual effects, while a revoked admission cannot recreate
+        // state after logout/account replacement.
+        if self.generation() != run.mcp_generation {
+            return;
+        }
         let state = states
             .entry(session_key(&run.identity.owner, &run.session_id))
+            .or_default()
+            .tasks
+            .entry(local_task_key(run))
             .or_default();
         state.task = merge_verification_debt(task_state(reported), &state.verification_debt);
     }
 
-    pub(crate) fn local_task_state(&self, owner: &str, sid: &str) -> Value {
+    pub(crate) fn local_task_state(
+        &self,
+        owner: &str,
+        sid: &str,
+        target: Option<&(crate::app_config::BindableTool, PathBuf)>,
+    ) -> Value {
         self.local_states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&session_key(owner, sid))
+            .and_then(|state| state.tasks.get(&target.cloned()))
             .and_then(|state| state.task.clone())
             .unwrap_or(Value::Null)
     }
@@ -697,13 +754,34 @@ impl AssistantHost {
         })
         .await?;
         capabilities::validate(&record.session.assistant_id, &record.session.capabilities)?;
-        if (tool.name != "use_skill"
-            && !super::super::skill_tools::is_tool(tool.name)
-            && (!run.local_enabled || !capabilities::enabled(&record.session.capabilities)))
-            || record.session.deleted_at.is_some()
-            || run.compact_only
-        {
+        if record.session.deleted_at.is_some() || run.compact_only {
             return Err("assistant_capability_disabled".into());
+        }
+        let read_selected =
+            tool.name == "read" && run.skills.lock().map_err(|_| STATE)?.has_selected();
+        if !read_selected
+            && tool.name != "use_skill"
+            && !super::super::skill_tools::is_tool(tool.name)
+        {
+            let read_scope = run.local_task.as_ref().is_some_and(|(task, _)| {
+                task.access == super::super::tools::task::Access::Diagnose
+            });
+            if !run.local_enabled
+                || (!read_scope && !capabilities::enabled(&record.session.capabilities))
+            {
+                return Err("assistant_capability_disabled".into());
+            }
+            match &run.local_task {
+                Some((task, folder))
+                    if task.allows(tool.name, &call.args)
+                        && (!matches!(tool.name, "diagnose_in_folder" | "verify_in_folder")
+                            || call.args["folder"].as_str().map(Path::new)
+                                == Some(folder.as_path())) => {}
+                // The internal command, path and transaction tests exercise
+                // low-level executors using controls they create directly.
+                None if cfg!(test) => {}
+                _ => return Err("assistant_operation_denied".into()),
+            }
         }
         let fingerprint = format!(
             "{:x}",
@@ -729,7 +807,21 @@ impl AssistantHost {
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
         }
-        let result = if super::super::skill_tools::is_tool(tool.name) {
+        let result = if read_selected {
+            async {
+                let args: registry::PathArgs = registry::decode(&call.args)?;
+                let mut result = self
+                    .read_selected_skill_reference(run, Path::new(&args.path))
+                    .await?;
+                self.validate_run(run)?;
+                if self.identity().await? != run.identity {
+                    return Err(IDENTITY_CHANGED.into());
+                }
+                scrub_secrets_in(&mut result, &self.known_keys());
+                Ok(result)
+            }
+            .await
+        } else if super::super::skill_tools::is_tool(tool.name) {
             self.dispatch_skill_tool(run, &call).await
         } else if tool.name == "use_skill" {
             self.load_run_skill(
@@ -869,6 +961,8 @@ impl AssistantHost {
             Some(MutationDebt {
                 host: self,
                 session: session_key(&run.identity.owner, &run.session_id),
+                task: local_task_key(run),
+                generation: run.mcp_generation,
                 run_id: &run.run_id,
                 tool: registry::supported_tool(
                     args["tool"].as_str().ok_or("assistant_invalid_tool")?,
@@ -1143,13 +1237,16 @@ impl AssistantHost {
             let selected =
                 registry::supported_tool(args["tool"].as_str().ok_or("assistant_invalid_tool")?)?;
             if let Some(folder) = verification_folder.to_str() {
-                if let Some(state) = self
-                    .local_states
-                    .lock()
-                    .map_err(|_| STATE)?
-                    .get_mut(&session_key(&run.identity.owner, &run.session_id))
+                let mut states = self.local_states.lock().map_err(|_| STATE)?;
+                if self.generation() != run.mcp_generation {
+                    return Err(IDENTITY_CHANGED.into());
+                }
+                if let Some(state) =
+                    states.get_mut(&session_key(&run.identity.owner, &run.session_id))
                 {
-                    state.verified(selected.as_str(), folder);
+                    if let Some(task) = state.tasks.get_mut(&local_task_key(run)) {
+                        task.verified(selected.as_str(), folder);
+                    }
                 }
             }
         }
@@ -1475,7 +1572,7 @@ mod tests {
     #[test]
     fn host_debt_survives_empty_reports_until_the_matching_scope_verifies() {
         let debt = std::collections::HashSet::from([("codex".into(), "/original".into())]);
-        let mut state = super::LocalState {
+        let mut state = super::LocalTaskState {
             task: super::merge_verification_debt(None, &debt),
             verification_debt: debt,
             ..Default::default()

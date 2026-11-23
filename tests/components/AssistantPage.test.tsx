@@ -25,6 +25,7 @@ import type {
   AssistantEvent,
   AssistantMessage,
   AssistantModel,
+  AssistantRunEvent,
   AssistantRunRef,
   AssistantSession,
   AssistantSessionDetail,
@@ -839,12 +840,12 @@ describe("the empty state", () => {
     ).toEqual(["h2", "div", "p"]);
   });
 
-  it("says in one line what the assistant reads, and nothing else about starting", async () => {
+  it("introduces the assistant's file, web and local tool options in one line", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
     expect(
       await screen.findByText(
-        "The assistant only reads files you attach, and searches the web only when web search is on.",
+        "Attach files for the assistant to read, turn on web search for current information, or ask it to check an AI tool on this computer.",
       ),
     ).toBeVisible();
     expect(screen.queryByText(/Start a new conversation/)).toBeNull();
@@ -854,12 +855,15 @@ describe("the empty state", () => {
   it.each([
     [
       "en",
-      "The assistant only reads files you attach, and searches the web only when web search is on.",
+      "Attach files for the assistant to read, turn on web search for current information, or ask it to check an AI tool on this computer.",
     ],
-    ["zh", "助手只读取你附加的文件；开启联网后才会搜索网页。"],
+    [
+      "zh",
+      "你可以添加文件、开启联网搜索最新信息，也可以请助手检查这台电脑上的 AI 工具。",
+    ],
     [
       "ja",
-      "アシスタントが読むのは添付したファイルだけです。Web 検索をオンにしたときだけ Web を検索します。",
+      "ファイルを添付したり、Web 検索をオンにして最新情報を探したり、このコンピュータの AI ツールの確認をアシスタントに頼んだりできます。",
     ],
   ])("says it in %s", async (language, line) => {
     i18n.addResourceBundle("zh", "translation", zh, true, true);
@@ -1495,6 +1499,183 @@ describe("internal records", () => {
 });
 
 describe("running a reply", () => {
+  it("keeps Full auto questions compact before and after a PPT checklist in the same conversation", async () => {
+    current.permissionMode = "fullAuto";
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.send.mockImplementation(async (request) => ({
+      runId: request.runId,
+      operationId: request.operationId,
+    }));
+    await openConversation();
+    expect(
+      screen.getByRole("combobox", { name: "Permission" }),
+    ).toHaveTextContent("Full auto");
+
+    const taskProgress = () =>
+      screen.queryAllByRole("region", { name: "Task progress" });
+    const startTurn = async (prompt: string, messageId: string) => {
+      fireEvent.change(composer(), { target: { value: prompt } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await screen.findByRole("button", { name: "Stop" });
+      const { runId, operationId, sessionId } = mocks.send.mock.lastCall![0];
+      expect(sessionId).toBe(session.id);
+      const emit = (event: AssistantRunEvent) =>
+        act(() =>
+          mocks.listener?.({ sessionId, runId, operationId, ...event }),
+        );
+      emit({ type: "run_start", data: { messageId, webSearch: false } });
+      const finish = async (
+        content: string,
+        progress?: AssistantMessage["taskProgress"],
+      ) => {
+        const reply: AssistantMessage = {
+          id: messageId,
+          role: "assistant",
+          content,
+          createdAt: 1_000,
+          completedAt: 7_000,
+          status: "completed",
+          runId,
+          ...(progress ? { taskProgress: progress } : {}),
+        };
+        current.messages.push(reply);
+        emit({ type: "message", data: { message: reply } });
+        emit({
+          type: "run_end",
+          data: { stopped: false, status: "completed" },
+        });
+        await screen.findByRole("button", { name: "Send" });
+      };
+      return { emit, finish };
+    };
+
+    const simple = await startTurn(
+      "Which is the official hosted version?",
+      "simple",
+    );
+    expect(taskProgress()).toHaveLength(0);
+    expect(screen.getByText("Working on your request")).toBeVisible();
+    simple.emit({
+      type: "text_delta",
+      data: { messageId: "simple", delta: "Choose Hosted." },
+    });
+    expect(await screen.findByText("Choose Hosted.")).toBeVisible();
+    expect(screen.queryByText("Working on your request")).toBeNull();
+    expect(taskProgress()).toHaveLength(0);
+    await simple.finish("Choose Hosted.");
+
+    await choosePlus("PPT styles");
+    const style = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(style).getByRole("radio", { name: "Cartesian" }),
+    );
+    await userEvent.click(
+      within(style).getByRole("button", { name: "Use this style" }),
+    );
+    const deck = await startTurn("Make a three-slide deck about Fizzy", "deck");
+    expect(mocks.send.mock.lastCall![0]).toMatchObject({
+      presentationStyleId: "cartesian",
+    });
+    deck.emit({
+      type: "task_plan",
+      data: {
+        steps: [
+          { step: "Organize the slides", status: "in_progress" },
+          { step: "Build and review the deck", status: "pending" },
+        ],
+      },
+    });
+    expect(
+      within(taskProgress()[0]).getByRole("list", { name: "Task steps" }),
+    ).toHaveTextContent("Organize the slides");
+    expect(taskProgress()[0]).toHaveTextContent("0/2");
+    const steps = [
+      { step: "Organize the slides", status: "completed" },
+      { step: "Build and review the deck", status: "completed" },
+    ] as const;
+    deck.emit({ type: "task_plan", data: { steps: [...steps] } });
+    expect(taskProgress()[0]).toHaveTextContent("2/2");
+    await deck.finish("The deck is ready.", {
+      startedAt: 1_000,
+      steps: [...steps],
+    });
+    const [summary] = taskProgress();
+    expect(summary).toHaveTextContent("2/2");
+    expect(
+      within(summary).queryByRole("list", { name: "Task steps" }),
+    ).toBeNull();
+
+    const date = await startTurn("What is today's date?", "date");
+    expect(taskProgress()).toEqual([summary]);
+    expect(screen.getByText("Working on your request")).toBeVisible();
+    date.emit({
+      type: "text_delta",
+      data: { messageId: "date", delta: "Today is November 19." },
+    });
+    expect(await screen.findByText("Today is November 19.")).toBeVisible();
+    expect(screen.queryByText("Working on your request")).toBeNull();
+    expect(taskProgress()).toEqual([summary]);
+  });
+
+  it("reopens a saved plan as a folded summary with its original elapsed time", async () => {
+    current.messages = [
+      {
+        id: "saved-plan",
+        role: "assistant",
+        content: "The draft is ready.",
+        createdAt: 89_000,
+        completedAt: 91_000,
+        status: "completed",
+        taskProgress: {
+          startedAt: 1_000,
+          steps: [
+            { step: "Create draft", status: "completed" },
+            { step: "Review draft", status: "pending" },
+          ],
+        },
+      },
+    ];
+    await openConversation();
+    const progress = screen.getByRole("region", { name: "Task progress" });
+    expect(progress).toHaveTextContent("1/2");
+    expect(progress).toHaveTextContent("Elapsed 1m 30s");
+    expect(
+      within(progress).queryByRole("list", { name: "Task steps" }),
+    ).toBeNull();
+    await userEvent.click(within(progress).getByRole("button"));
+    expect(
+      within(progress).getByRole("list", { name: "Task steps" }),
+    ).toHaveTextContent("Review draft");
+    expect(progress.querySelector(".animate-spin")).toBeNull();
+    expect(
+      screen
+        .getByText("The draft is ready.")
+        .compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("omits historical progress for a simple chat with an empty plan", async () => {
+    current.messages = [
+      {
+        id: "greeting",
+        role: "assistant",
+        content: "Hello!",
+        createdAt: 1,
+        completedAt: 2,
+        status: "completed",
+        taskProgress: { startedAt: 1, steps: [] },
+      },
+    ];
+    await openConversation();
+    expect(screen.getByText("Hello!")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Task progress" })).toBeNull();
+  });
+
   it("sends with Enter, keeps focus in the composer, and returns focus after Stop", async () => {
     await openConversation();
     await userEvent.click(composer());
@@ -6591,14 +6772,24 @@ describe("scrolling to the end of a conversation", () => {
           }),
         );
       startRead("first-read");
+      expect(
+        screen.queryByRole("button", { name: "Execution details" }),
+      ).toBeNull();
+      startRead("second-read");
+      expect(
+        screen.queryByRole("list", { name: "Recent operations" }),
+      ).toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Execution details" }),
+      );
       const activity = screen.getByRole("list", { name: "Recent operations" });
-      expect(within(activity).getAllByRole("listitem")).toHaveLength(1);
+      expect(within(activity).getByText("2 recent calls")).toBeVisible();
       scrollToTop(area, following ? 2500 : 1000);
       expect(screen.queryByTestId("scroll-to-end-dot")).toBeNull();
       geometry.height = 3400;
-      startRead("second-read");
+      startRead("third-read");
       expect(within(activity).getAllByRole("listitem")).toHaveLength(1);
-      expect(within(activity).getByText("2 recent calls")).toBeVisible();
+      expect(within(activity).getByText("3 recent calls")).toBeVisible();
       if (following) {
         expect(geometry.top).toBe(3400);
         expect(toEnd()).toBeNull();
@@ -7060,6 +7251,10 @@ describe("thinking", () => {
 
   describe("the live timer", () => {
     afterEach(() => vi.useRealTimers());
+    const steps = [
+      { step: "Draft the answer", status: "in_progress" },
+      { step: "Check the examples", status: "pending" },
+    ];
 
     it("shows one task timer while reasoning stays secondary, then restores the saved reasoning duration", async () => {
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
@@ -7069,6 +7264,8 @@ describe("thinking", () => {
       expect(within(reply()).getByRole("status")).toHaveTextContent(
         "Working on your request",
       );
+      emit("run_start", { messageId: "reply", webSearch: false });
+      emit("task_plan", { messageId: "reply", startedAt: Date.now(), steps });
       emit("thinking_start", { messageId: "reply" });
       const progress = within(reply()).getByRole("region", {
         name: "Task progress",
@@ -7078,16 +7275,16 @@ describe("thinking", () => {
       );
       expect(within(progress).getByRole("status")).not.toHaveClass("sr-only");
       expect(screen.queryByText(/Thinking for/)).toBeNull();
-      expect(screen.getByText("Elapsed 00:00")).toBeVisible();
+      expect(screen.getByText("Elapsed 0s")).toBeVisible();
       act(() => void vi.advanceTimersByTime(3000));
-      expect(screen.getByText("Elapsed 00:03")).toBeVisible();
+      expect(screen.getByText("Elapsed 3s")).toBeVisible();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(1000));
-      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Elapsed 4s")).toBeVisible();
       expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("text_delta", { messageId: "reply", delta: "Answer" });
       act(() => void vi.advanceTimersByTime(10_000));
-      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      expect(screen.getByText("Elapsed 14s")).toBeVisible();
       emit("message", {
         message: {
           id: "reply",
@@ -7095,13 +7292,19 @@ describe("thinking", () => {
           content: "Answer",
           reasoning: "Hmm",
           reasoningMs: 4000,
+          completedAt: Date.now(),
           status: "completed",
           createdAt: 2,
         },
       });
       expect(screen.getByText("Thought for 4 seconds")).toBeVisible();
+      const summary = within(reply()).getByRole("region", {
+        name: "Task progress",
+      });
+      expect(summary).toHaveTextContent("0/2 steps");
+      expect(summary).toHaveTextContent("Elapsed 14s");
       expect(
-        screen.queryByRole("region", { name: "Task progress" }),
+        within(summary).queryByRole("list", { name: "Task steps" }),
       ).toBeNull();
       expect(screen.queryByText(/Thinking for/)).toBeNull();
     });
@@ -7110,14 +7313,16 @@ describe("thinking", () => {
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       await openConversation();
       const emit = emitFor(await startRun());
+      emit("run_start", { messageId: "reply", webSearch: false });
+      emit("task_plan", { messageId: "reply", startedAt: Date.now(), steps });
       emit("thinking_start", { messageId: "reply" });
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(4600));
-      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Elapsed 4s")).toBeVisible();
       expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("thinking_end", { messageId: "reply" });
       act(() => void vi.advanceTimersByTime(10_000));
-      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      expect(screen.getByText("Elapsed 14s")).toBeVisible();
       emit("message", {
         message: {
           id: "reply",
@@ -7137,7 +7342,10 @@ describe("thinking", () => {
       const emit = emitFor(await startRun());
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       emit("thinking_start", { messageId: "reply" });
-      expect(screen.getByText("Organizing the next steps")).toBeVisible();
+      expect(screen.getByText(i18n.t("assistant.typing"))).toBeVisible();
+      expect(
+        screen.queryByRole("region", { name: "Task progress" }),
+      ).toBeNull();
       expect(document.querySelector("[data-reasoning]")).toBeNull();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       // A non-delta event flushes the animation-frame batch first.
@@ -9322,7 +9530,7 @@ describe("local configuration capability", () => {
       }),
     );
   });
-  it("switches an unsuitable model only when the configured recommendation exists in the catalog", async () => {
+  it("keeps the general assistant model when local configuration becomes available", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
       localConfigDefinition: {
@@ -9337,7 +9545,7 @@ describe("local configuration capability", () => {
     await act(async () => {
       await hook.result.current.setLocalConfig(true);
     });
-    expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
+    expect(hook.result.current.newModelId).toBe(capabilities.defaultModelId);
   });
 });
 
@@ -9392,7 +9600,16 @@ it("local permission display uses host memory after a renderer remount and appro
   );
   expect(hook.result.current.localApprovals).toHaveLength(0);
 });
-it("tool-page entry creates a separate enabled conversation with tool context, without sending a model request", async () => {
+it("tool-page entry drafts a local task in a general conversation with the current model", async () => {
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    localConfigDefinition: {
+      id: "local_config",
+      version: 1,
+      recommendedModel: capabilities.models[1].id,
+      suitableModels: [],
+    },
+  });
   const hook = renderHook(() => useAssistant(true));
   await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
   await act(async () => {
@@ -9402,12 +9619,74 @@ it("tool-page entry creates a separate enabled conversation with tool context, w
   });
   expect(mocks.createSession).toHaveBeenCalledWith(
     expect.objectContaining({
+      modelId: capabilities.defaultModelId,
       capabilities: [{ id: "local_config", version: 1 }],
     }),
   );
   expect(mocks.updateSession).toHaveBeenCalledWith(
     expect.objectContaining({ draft: "Diagnose codex in the problem folder" }),
   );
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["a chat model without tools", { tools: false }],
+  ["an image model with tools", { kind: "image", tools: true }],
+  ["a video model without tool metadata", { kind: "video" }],
+] as const)(
+  "uses a compatible model for the tool-page shortcut when the preference is %s",
+  async (_label, preferred) => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        { ...capabilities.models[0], ...preferred },
+        capabilities.models[1],
+      ],
+      localConfigDefinition: {
+        id: "local_config",
+        version: 1,
+        recommendedModel: capabilities.models[1].id,
+        suitableModels: [capabilities.models[1].id],
+      },
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.startLocalConfig("Diagnose codex");
+    });
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: capabilities.models[1].id }),
+    );
+    expect(hook.result.current.newModelId).toBe(capabilities.defaultModelId);
+    expect(mocks.send).not.toHaveBeenCalled();
+  },
+);
+
+it("shows a chat model notice without drafting a local task in a media conversation", async () => {
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    models: [{ ...capabilities.models[0], kind: "image", tools: true }],
+  });
+  function ToolShortcut() {
+    const { locateAssistant } = useShell();
+    return (
+      <button onClick={() => locateAssistant("codex")}>Diagnose Codex</button>
+    );
+  }
+  render(
+    <ShellProvider openSettings={() => undefined}>
+      <ToolShortcut />
+      <AssistantPage />
+    </ShellProvider>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Diagnose Codex" }));
+  await waitFor(() =>
+    expect(toasts.warning).toHaveBeenCalledWith(
+      "Choose a chat model that supports tools to diagnose this computer.",
+    ),
+  );
+  expect(mocks.createSession).not.toHaveBeenCalled();
+  expect(mocks.updateSession).not.toHaveBeenCalled();
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
@@ -9452,7 +9731,7 @@ describe("local configuration in the conversation", () => {
     expect(screen.queryByText(/This round/)).toBeNull();
     expect(
       screen.getByText(
-        "The assistant can check and repair the AI tools on this computer and reads the files you attach; it searches the web only with web search on.",
+        "Attach files for the assistant to read, turn on web search for current information, or ask it to check an AI tool on this computer.",
       ),
     ).toBeVisible();
   });
@@ -9525,6 +9804,10 @@ describe("local configuration in the conversation", () => {
         recipeId: "context7",
       },
     });
+    expect(screen.queryByRole("list", { name: "MCP tool steps" })).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Execution details" }),
+    );
     expect(
       screen.getByRole("list", { name: "MCP tool steps" }),
     ).toHaveTextContent("Running");
@@ -9564,23 +9847,24 @@ describe("local configuration in the conversation", () => {
     ).toBeVisible();
   });
 
-  it("shows a useful task surface before a plan and separates waiting for approval from execution", async () => {
+  it("shows compact tool activity and opens task progress when approval is needed", async () => {
     localSession();
     await openConversation();
     const emit = await startRun();
-    const progress = screen.getByRole("region", { name: "Task progress" });
-    expect(progress).toHaveTextContent("Working on your request");
-    expect(within(progress).queryByRole("progressbar")).toBeNull();
+    const taskProgress = () =>
+      screen.queryByRole("region", { name: "Task progress" });
+    expect(taskProgress()).toBeNull();
+    expect(screen.getByText("Working on your request")).toBeVisible();
     emit("tool_start", {
       messageId: "reply",
       name: "read",
       toolCallId: "read-guidance",
-      intent: "Inspect content_slide/panel_slide internals",
     });
-    expect(
-      screen.getByText("Inspect content_slide/panel_slide internals"),
-    ).not.toBeVisible();
+    expect(taskProgress()).toBeNull();
+    expect(screen.getByText("Reading a file…")).toBeVisible();
     emit("approval", approval);
+    const progress = screen.getByRole("region", { name: "Task progress" });
+    expect(within(progress).queryByRole("progressbar")).toBeNull();
     expect(within(progress).getByRole("status")).toHaveTextContent(
       "Waiting for your approval",
     );
@@ -9588,9 +9872,8 @@ describe("local configuration in the conversation", () => {
       "Review the operation below to continue.",
     );
     emit("approval_end", { approvalId: approval.approvalId });
-    expect(within(progress).getByRole("status")).not.toHaveTextContent(
-      "Waiting for your approval",
-    );
+    expect(taskProgress()).toBeNull();
+    expect(screen.getByText("Reading a file…")).toBeVisible();
   });
 
   it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {

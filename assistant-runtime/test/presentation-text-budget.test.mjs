@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { withPlanningOpening } from "./fixtures/planning-opening.mjs";
 
 const limits = {
   repeatWarning: 3,
@@ -29,7 +30,7 @@ async function runCostOnly(
       hostCalls++;
       throw new Error("No local or MCP operation is authorized");
     },
-    fetch: async (_url, options) => {
+    fetch: withPlanningOpening(async (_url, options) => {
       requests.push(JSON.parse(options.body));
       const first = requests.length === 1;
       const chunks = [
@@ -80,7 +81,7 @@ async function runCostOnly(
           "data: [DONE]\n\n",
         { headers: { "content-type": "text/event-stream" } },
       );
-    },
+    }, "single"),
   });
   t.after(() => runtime.close());
   const result = await runtime.run({
