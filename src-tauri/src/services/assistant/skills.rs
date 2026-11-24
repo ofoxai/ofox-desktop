@@ -121,6 +121,9 @@ impl SkillRunState {
             )
             .collect()
     }
+    pub fn has_selected(&self) -> bool {
+        !self.selected.is_empty()
+    }
     /// A bundled skill no user skill shadows.
     pub fn bundled_skill(&self, name: &str) -> Option<&bundled::BundledSkill> {
         if self.entries.contains_key(name) {
@@ -220,7 +223,7 @@ impl AssistantHost {
             return Err("assistant_identity_changed".into());
         }
         let mut result = result.map_err(|_| "assistant_skill_unavailable")?;
-        result["scriptsUnavailable"] = json!(!run.local_enabled);
+        result["scriptsUnavailable"] = json!(true);
         Ok(Some(result))
     }
 
@@ -283,6 +286,44 @@ impl AssistantHost {
     ) -> Result<Value, String> {
         self.load_run_skill(run, name, true).await
     }
+    pub(super) async fn read_selected_skill_reference(
+        &self,
+        run: &Arc<RunControl>,
+        path: &Path,
+    ) -> Result<Value, String> {
+        let selected: Vec<_> = run
+            .skills
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .selected
+            .values()
+            .cloned()
+            .collect();
+        let env = self.env.clone();
+        let path = path.to_owned();
+        blocking(move || {
+            let path = scope::resolve(&path)?;
+            for proof in selected {
+                let root = scope::resolve(proof.canonical_dir())?;
+                if !path.starts_with(&root) {
+                    continue;
+                }
+                return env.skill_read(
+                    &proof,
+                    SkillAccess::UserSelected,
+                    Box::new(move |_| {
+                        let scope =
+                            Scope::new(root.clone(), vec![root], vec![]).map_err(unavailable)?;
+                        files::read(&scope, &path, false)
+                            .map(|text| json!(text))
+                            .map_err(unavailable)
+                    }),
+                );
+            }
+            Err("assistant_path_denied".into())
+        })
+        .await
+    }
     pub(super) async fn load_run_skill(
         &self,
         run: &Arc<RunControl>,
@@ -340,7 +381,7 @@ impl AssistantHost {
             state.selected.insert(name.into(), expected);
         }
         result["name"] = json!(name);
-        result["scriptsUnavailable"] = json!(!run.local_enabled);
+        result["scriptsUnavailable"] = json!(true);
         Ok(result)
     }
     /// A bundled skill is the app's own file: no proof, no library read.
@@ -361,7 +402,7 @@ impl AssistantHost {
             return Err("assistant_identity_changed".into());
         }
         result["name"] = json!(name);
-        result["scriptsUnavailable"] = json!(!run.local_enabled);
+        result["scriptsUnavailable"] = json!(true);
         Ok(result)
     }
     pub(super) async fn skill_scope(

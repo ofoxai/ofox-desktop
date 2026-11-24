@@ -33,6 +33,7 @@ import { createCanvas, Image } from "@napi-rs/canvas";
 import { loadPyodide, version as pyodideVersion } from "pyodide";
 import { checkedPresentationAssets } from "../presentation-planning.mjs";
 import { SVG_TEXT_FONTS } from "../thumbnails.mjs";
+import { writeDeckModule } from "./virtual-files.mjs";
 
 const TRACEBACK_CHARS = 1800;
 
@@ -97,7 +98,7 @@ deck._validate_panel_regions(prs)
 deck._validate_density(prs)
 deck._validate_title_cover(prs)
 deck._plan_receipt(prs)
-prs.save("/tmp/out.pptx")
+deck._save(prs, "/tmp/out.pptx")
 json.dumps(list(deck.LINT))
 `;
 
@@ -115,7 +116,11 @@ const SERIF_FAMILY =
   /(^|[\s,'"])(serif|georgia|times|garamond|playfair|merriweather|lora|baskerville|didot|bodoni|song|simsun|mincho|ming|serif cjk)/i;
 const withCjkFirst = (list) => {
   const family = list.trim();
-  if (/^(['"]?)(PingFang|Hiragino|Songti|STSong|Noto (Sans|Serif) CJK)/i.test(family))
+  if (
+    /^(['"]?)(PingFang|Hiragino|Songti|STSong|Noto (Sans|Serif) CJK)/i.test(
+      family,
+    )
+  )
     return family;
   const serif = SERIF_FAMILY.test(family) && !/sans-serif/i.test(family);
   return `${serif ? CJK_SERIF : CJK_SANS}, ${family}`;
@@ -385,8 +390,9 @@ async function run({
     py.unpackArchive(readBytes(path.join(assets, "wheels", file)), "wheel");
 
   const site = py.runPython("import sysconfig; sysconfig.get_path('purelib')");
-  py.FS.writeFile(
-    path.join(site, "deck.py"),
+  writeDeckModule(
+    py.FS,
+    site,
     readFileSync(new URL("./deck.py", import.meta.url)),
   );
   py.FS.writeFile(

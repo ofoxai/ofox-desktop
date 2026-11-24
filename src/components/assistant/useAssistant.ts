@@ -26,6 +26,7 @@ import {
   type AssistantCatalogSnapshot,
   type AssistantEvent,
   type AssistantMessage,
+  type AssistantTaskStep,
   type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
@@ -82,10 +83,7 @@ function catalogPatch(catalog: AssistantCatalogSnapshot) {
   };
 }
 type ApprovalEvent = Extract<AssistantEvent, { type: "approval" }>;
-type PlanStep = {
-  step: string;
-  status: "pending" | "in_progress" | "completed";
-};
+type PlanStep = AssistantTaskStep;
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backup or restore refused because a reply or a file import is going on. */
@@ -320,7 +318,6 @@ export function useAssistant(enabled: boolean) {
   const [localIntent, setLocalIntent] = useState<string | null>(null);
   const localIntentCall = useRef<string | null>(null);
   const [localWarning, setLocalWarning] = useState<string | null>(null);
-  const [localModelNotice, setLocalModelNotice] = useState<string | null>(null);
   // Thinking for the conversation the first message creates: it belongs to
   // the model chosen for it, so choosing another model clears it.
   const [newThinkingLevel, setNewThinkingState] =
@@ -435,6 +432,10 @@ export function useAssistant(enabled: boolean) {
   const [runProgress, setRunProgress] =
     useState<AssistantRunProgressState | null>(null);
   const progressScope = useRef<RunProgressScope | null>(null);
+  // Bind plan snapshots to the actual reply, including synchronous steer/event
+  // bursts before React has committed the new streaming message.
+  const progressMessageId = useRef<string | null>(null);
+  const progressSettled = useRef(false);
   const [tools, setTools] = useState<RunningTool[]>([]);
   const [preparingTools, setPreparingTools] = useState<string[]>([]);
   const observedPreparations = useRef(new Set<string>());
@@ -469,6 +470,13 @@ export function useAssistant(enabled: boolean) {
   if (!listenerReady.current) listenerReady.current = subscriptionReadiness();
   const bootstrapSequence = useRef(0);
   const catalogEvents = useRef(new Map<string, AssistantCatalogSnapshot>());
+  const runtimeEventSequence = useRef(0);
+  const runtimeEvents = useRef(
+    new Map<
+      string,
+      { sequence: number; runtime: AssistantBootstrap["runtime"] }
+    >(),
+  );
   const audioFinished = useRef(new Set<string>());
   const audioPreferenceTime = useRef<{
     identity: string;
@@ -641,6 +649,8 @@ export function useAssistant(enabled: boolean) {
         scope.authority === identity?.authorityGeneration;
       // Another run, or none: the tools the last one started are not followed.
       if (!same) {
+        progressMessageId.current = null;
+        progressSettled.current = false;
         setRetryAttempt(null);
         setTools([]);
         setPreparingTools([]);
@@ -832,6 +842,7 @@ export function useAssistant(enabled: boolean) {
     async (refreshCatalog = false) => {
       const generation = epoch.current;
       const sequence = ++bootstrapSequence.current;
+      const runtimeSequence = runtimeEventSequence.current;
       const audioRevision = audioPreferenceTime.current.revision;
       await listenerReady.current!.promise;
       if (
@@ -852,6 +863,16 @@ export function useAssistant(enabled: boolean) {
           )
             return null;
           const previous = bootstrapRef.current;
+          const runtimeUpdate = runtimeEvents.current.get(
+            `${value.owner}:${value.authorityGeneration}`,
+          );
+          if (
+            runtimeUpdate &&
+            (runtimeUpdate.sequence > runtimeSequence ||
+              previous?.owner !== value.owner ||
+              previous.authorityGeneration !== value.authorityGeneration)
+          )
+            value.runtime = runtimeUpdate.runtime;
           const pending = catalogEvents.current.get(
             `${value.owner}:${value.authorityGeneration}`,
           );
@@ -1180,7 +1201,14 @@ export function useAssistant(enabled: boolean) {
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) {
-          setRun(value.session.activeRun, resumed?.createdAt);
+          setRun(
+            value.session.activeRun,
+            resumed?.taskProgress?.startedAt ?? resumed?.createdAt,
+          );
+          if (resumed && !alreadyFollowing) {
+            progressMessageId.current = resumed.id;
+            setLocalPlan(resumed.taskProgress?.steps ?? []);
+          }
           setLocalApprovals(value.pendingApprovals ?? []);
         }
         setCompacting(
@@ -1272,6 +1300,7 @@ export function useAssistant(enabled: boolean) {
       setBootstrap(null);
       bootstrapRef.current = null;
       catalogEvents.current.clear();
+      runtimeEvents.current.clear();
       videoProgress.current.clear();
       videoNotices.current.clear();
       setChosenModel(null);
@@ -1282,7 +1311,6 @@ export function useAssistant(enabled: boolean) {
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
-      setLocalModelNotice(null);
       setNewWebSearch(false);
       setNewThinking(null);
       setRunSearch(null);
@@ -1454,6 +1482,33 @@ export function useAssistant(enabled: boolean) {
         // asks for is fenced on it.
         const generation = epoch.current;
         observeProgress(event);
+        if (event.type === "runtime_state") {
+          const { owner, generation: authority, runtime } = event.data;
+          const current = bootstrapRef.current;
+          if (
+            signedOut.current ||
+            typeof runtime?.available !== "boolean" ||
+            (current &&
+              (owner !== current.owner ||
+                authority !== current.authorityGeneration))
+          )
+            return;
+          const key = `${owner}:${authority}`;
+          runtimeEvents.current.set(key, {
+            sequence: ++runtimeEventSequence.current,
+            runtime,
+          });
+          if (runtimeEvents.current.size > 8)
+            runtimeEvents.current.delete(
+              runtimeEvents.current.keys().next().value!,
+            );
+          if (current) {
+            const next = { ...current, runtime };
+            bootstrapRef.current = next;
+            setBootstrap(next);
+          }
+          return;
+        }
         if (event.type === "catalog_state") {
           const { owner, generation: authority, catalog } = event.data;
           const current = bootstrapRef.current;
@@ -1877,9 +1932,66 @@ export function useAssistant(enabled: boolean) {
               old.filter((a) => a.data.approvalId !== event.data.approvalId),
             );
             return;
-          case "task_plan":
-            setLocalPlan(event.data.steps);
+          case "task_plan": {
+            if (progressSettled.current || preparationClosed.current) return;
+            const { steps, startedAt } = event.data;
+            const messageId = event.data.messageId ?? progressMessageId.current;
+            if (
+              !messageId ||
+              (progressMessageId.current !== null &&
+                messageId !== progressMessageId.current) ||
+              !Array.isArray(steps) ||
+              steps.length > 12 ||
+              steps.some(
+                (step) =>
+                  !step ||
+                  typeof step.step !== "string" ||
+                  !step.step.trim() ||
+                  [...step.step].length > 40 ||
+                  !["pending", "in_progress", "completed"].includes(
+                    step.status,
+                  ),
+              ) ||
+              steps.filter((step) => step.status === "in_progress").length > 1
+            )
+              return;
+            const validStart =
+              typeof startedAt === "number" &&
+              Number.isFinite(startedAt) &&
+              startedAt >= 0 &&
+              startedAt <= Date.now();
+            progressMessageId.current = messageId;
+            setLocalPlan(steps);
+            const apply = (message: AssistantMessage): AssistantMessage => ({
+              ...message,
+              taskProgress: {
+                startedAt:
+                  message.taskProgress?.startedAt ??
+                  (validStart ? startedAt : message.createdAt),
+                steps,
+              },
+            });
+            setStream((previous) =>
+              previous?.id === messageId && previous.status === "streaming"
+                ? apply(previous)
+                : previous,
+            );
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId && message.status === "streaming"
+                        ? apply(message)
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            if (validStart)
+              setRunProgress((old) => (old ? { ...old, startedAt } : old));
             return;
+          }
           // The run's cost is shown with its reply, once saved.
           case "task_status":
             if (event.data.warning) setLocalWarning(event.data.warning);
@@ -1893,6 +2005,8 @@ export function useAssistant(enabled: boolean) {
             const { messageId, webSearch } = event.data;
             if (typeof messageId !== "string" || typeof webSearch !== "boolean")
               return;
+            progressMessageId.current = messageId;
+            progressSettled.current = false;
             const sent = runSearchRef.current;
             const requested =
               sent?.runId === event.runId ? sent.requested : webSearch;
@@ -1912,6 +2026,29 @@ export function useAssistant(enabled: boolean) {
             endThinking(event.runId);
             writeThinking(null);
             const { messages, messageId } = event.data;
+            const nextReply = messages.find(
+              (message) => message.id === messageId,
+            );
+            progressMessageId.current = messageId;
+            progressSettled.current = false;
+            localIntentCall.current = null;
+            setLocalIntent(null);
+            setLocalPlan(nextReply?.taskProgress?.steps ?? []);
+            setLocalWarning(null);
+            setTools([]);
+            setRunProgress((old) =>
+              old
+                ? {
+                    ...old,
+                    startedAt:
+                      nextReply?.taskProgress?.startedAt ??
+                      nextReply?.createdAt ??
+                      Date.now(),
+                    lastEventAt: Date.now(),
+                    activities: [],
+                  }
+                : old,
+            );
             setDetail((old) =>
               old && old.session.id === event.sessionId
                 ? {
@@ -1925,7 +2062,9 @@ export function useAssistant(enabled: boolean) {
                   }
                 : old,
             );
-            setStream({ ...blankReply(event.runId), id: messageId });
+            setStream(
+              nextReply ?? { ...blankReply(event.runId), id: messageId },
+            );
             return;
           }
           case "thinking_start":
@@ -2144,6 +2283,7 @@ export function useAssistant(enabled: boolean) {
             ) {
               // The saved reply carries how long it thought.
               writeThinking(null);
+              progressSettled.current = message.status !== "streaming";
               setStream(message);
             }
             return;
@@ -2250,7 +2390,6 @@ export function useAssistant(enabled: boolean) {
       setFileReferences([]);
       newLocalConfigRef.current = false;
       setNewLocalConfig(false);
-      setLocalModelNotice(null);
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
@@ -3048,44 +3187,19 @@ export function useAssistant(enabled: boolean) {
   const setLocalConfig = useCallback(
     async (on: boolean) => {
       if (busy || loading || runRef.current) return false;
-      const definition = bootstrapRef.current?.localConfigDefinition;
-      const currentModel = detailRef.current?.session.modelId ?? newModelId;
-      const recommended =
-        on && !definition?.suitableModels.includes(currentModel)
-          ? bootstrapRef.current?.models.find(
-              (m) =>
-                m.id === definition?.recommendedModel &&
-                (m.kind ?? "chat") === "chat" &&
-                m.tools !== false,
-            )
-          : undefined;
       if (!selectedRef.current) {
         newLocalConfigRef.current = on;
         setNewLocalConfig(on);
-        if (recommended) {
-          setChosenModel(recommended.id);
-          setNewThinking(null);
-        }
       } else {
         const saved = await update({
           capabilities: on ? [{ id: "local_config", version: 1 }] : [],
-          ...(recommended ? { modelId: recommended.id } : {}),
         });
         if (!saved) return false;
         setLocalModes((old) => ({ ...old, [saved.id]: "default" }));
       }
-      setLocalModelNotice(
-        on
-          ? recommended
-            ? "modelSwitched"
-            : !definition?.suitableModels.includes(currentModel)
-              ? "modelUnconfigured"
-              : null
-          : null,
-      );
       return true;
     },
-    [busy, loading, newModelId, update, setNewThinking],
+    [busy, loading, update],
   );
 
   const localConfig =
@@ -3192,17 +3306,26 @@ export function useAssistant(enabled: boolean) {
     async (prompt: string) => {
       if (busy || loading || transferInFlight.current) return false;
       const generation = epoch.current;
-      const identity = requireIdentity(bootstrapRef.current);
-      const definition = bootstrapRef.current?.localConfigDefinition;
-      const recommended = bootstrapRef.current?.models.find(
-        (m) =>
-          m.id === definition?.recommendedModel &&
-          (m.kind ?? "chat") === "chat" &&
-          m.tools !== false,
-      );
+      const catalog = bootstrapRef.current;
+      const identity = requireIdentity(catalog);
+      const { models = [], localConfigDefinition } = catalog ?? {};
+      const preferred = models.find(({ id }) => id === newModelId);
+      const nonChat = (preferred?.kind ?? "chat") !== "chat";
+      const needsTools = nonChat || preferred?.tools === false;
+      const compatible = needsTools
+        ? models.filter(
+            (model) =>
+              (model.kind ?? "chat") === "chat" && model.tools !== false,
+          )
+        : [];
+      const alternative =
+        compatible.find(
+          ({ id }) => id === localConfigDefinition?.recommendedModel,
+        ) ?? compatible[0];
+      if (nonChat && !alternative) return { needsToolModel: true };
       try {
         const session = await assistantApi.createSession({
-          modelId: recommended?.id ?? newModelId,
+          modelId: alternative?.id ?? (newModelId || undefined),
           webSearch: false,
           capabilities: [{ id: "local_config", version: 1 }],
         });
@@ -3214,7 +3337,10 @@ export function useAssistant(enabled: boolean) {
         if (generation !== epoch.current) return false;
         drafts.current.set(session.id, prompt);
         select(session.id);
-        return true;
+        return {
+          modelName: alternative?.name,
+          needsToolModel: needsTools && !alternative,
+        };
       } catch (reason) {
         if (generation === epoch.current) showError(reason);
         return false;
@@ -3785,6 +3911,14 @@ export function useAssistant(enabled: boolean) {
     const generation = epoch.current;
     const selection = selectionSequence.current;
     const draftVersion = draftSequence.current;
+    const visualPolicy = visualPolicyRef.current;
+    const currentDraft = () =>
+      mounted.current &&
+      generation === epoch.current &&
+      selection === selectionSequence.current &&
+      sid === selectedRef.current &&
+      draftRef.current === text &&
+      draftVersion === draftSequence.current;
     steerSending.current = true;
     try {
       const authority = requireIdentity(bootstrapRef.current);
@@ -3795,24 +3929,32 @@ export function useAssistant(enabled: boolean) {
         id: crypto.randomUUID(),
         text,
       });
-      if (
-        mounted.current &&
-        generation === epoch.current &&
-        selection === selectionSequence.current &&
-        sid === selectedRef.current &&
-        draftRef.current === text &&
-        draftVersion === draftSequence.current
-      )
-        setDraft("");
+      if (currentDraft()) setDraft("");
       return true;
     } catch (reason) {
+      if (assistantErrorCode(reason) === "assistant_local_task_in_progress") {
+        const current = runRef.current;
+        // The host refused to apply the text to the old local scope. Only the
+        // untouched draft can become a separate turn in the ordinary queue.
+        return (
+          currentDraft() &&
+          activeRef.current &&
+          current?.runId === active.runId &&
+          current.operationId === active.operationId &&
+          !skillRef.current &&
+          !presentationStyleRef.current &&
+          !fileReferencesRef.current.length &&
+          visualPolicyRef.current === visualPolicy &&
+          enqueue()
+        );
+      }
       if (generation === epoch.current && sid === selectedRef.current)
         showError(reason);
       return false;
     } finally {
       steerSending.current = false;
     }
-  }, [queueAvailable, compacting, setDraft, showError]);
+  }, [queueAvailable, compacting, setDraft, showError, enqueue]);
 
   /** An explicit resume rechecks the saved conversation before any send. */
   const resumeQueue = useCallback(async () => {
@@ -4479,7 +4621,6 @@ export function useAssistant(enabled: boolean) {
     localConfig,
     setLocalConfig,
     startLocalConfig,
-    localModelNotice,
     localMode: selectedId ? (localModes[selectedId] ?? "default") : "default",
     localApprovals: localApprovals.map((e) => e.data),
     localChanges,

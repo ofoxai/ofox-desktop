@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutBox, slideText } from "../src/slide-text.mjs";
+import { drawSlideText, layoutBox, slideText } from "../src/slide-text.mjs";
 
 // A text box the way officecli's `view svg` writes one: a foreignObject in
 // a translated group, a flex container, then one div per paragraph.
@@ -254,4 +254,40 @@ test("a box's lines sit at its top, middle or bottom", () => {
 test("a hard line break starts a new line", () => {
   const lines = layoutBox(box(["一\n二"]), measure);
   assert.deepEqual(lineTexts(lines), ["一", "二"]);
+});
+
+test("CJK font fallback uses the same face for wrapping and drawing while retaining Latin faces", () => {
+  const measured = [],
+    drawn = [];
+  const context = {
+    font: "",
+    save() {},
+    restore() {},
+    beginPath() {},
+    rect() {},
+    clip() {},
+    measureText(text) {
+      measured.push({ text, font: this.font });
+      return { width: 10, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 };
+    },
+    fillText(text) {
+      drawn.push({ text, font: this.font });
+    },
+  };
+  const input = slide(
+    textBox('<div><span style="font-family:Arial">中文 Title</span></div>'),
+  );
+  drawSlideText(context, slideText(input).boxes);
+  const latin = drawn.find((item) => item.text === "Title");
+  const chinese = drawn.find((item) => item.text === "中");
+  assert.ok(latin && chinese);
+  assert.match(latin.font, /px Arial, sans-serif$/);
+  assert.notEqual(chinese.font, latin.font);
+  for (const item of drawn)
+    assert.ok(
+      measured.some(
+        (sample) => sample.text === item.text && sample.font === item.font,
+      ),
+      "drawn text uses the face used to measure its position",
+    );
 });

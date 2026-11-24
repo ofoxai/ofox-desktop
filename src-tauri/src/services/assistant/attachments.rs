@@ -871,33 +871,43 @@ pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
 /// either) and the file is opened without blocking: a link, pipe or device
 /// left in its place is refused instead of read or waited on.
 pub(super) fn open_written(page: &Path, max: u64) -> Result<(fs::File, u64), String> {
-    let real = |path: &Path, dir: bool| {
-        fs::symlink_metadata(path).is_ok_and(
-            |meta| {
-                if dir {
-                    meta.is_dir()
-                } else {
-                    meta.is_file()
-                }
-            },
-        )
-    };
-    if !page.parent().is_some_and(|folder| real(folder, true)) || !real(page, false) {
-        return Err(UNREADABLE.into());
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let root = page.parent().ok_or(UNREADABLE)?;
+        let file = super::documents::windows_sandbox::open_regular(root, page, max)
+            .map_err(|_| UNREADABLE)?;
+        let size = file.metadata().map_err(|_| UNREADABLE)?.len();
+        Ok((file, size))
     }
-    let file = options.open(page).map_err(|_| UNREADABLE)?;
-    let meta = file.metadata().map_err(|_| UNREADABLE)?;
-    if !meta.is_file() || meta.len() > max {
-        return Err(UNREADABLE.into());
+    #[cfg(not(windows))]
+    {
+        let real =
+            |path: &Path, dir: bool| {
+                fs::symlink_metadata(path).is_ok_and(|meta| {
+                    if dir {
+                        meta.is_dir()
+                    } else {
+                        meta.is_file()
+                    }
+                })
+            };
+        if !page.parent().is_some_and(|folder| real(folder, true)) || !real(page, false) {
+            return Err(UNREADABLE.into());
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(page).map_err(|_| UNREADABLE)?;
+        let meta = file.metadata().map_err(|_| UNREADABLE)?;
+        if !meta.is_file() || meta.len() > max {
+            return Err(UNREADABLE.into());
+        }
+        Ok((file, meta.len()))
     }
-    Ok((file, meta.len()))
 }
 
 /// The MIME type of `source`, by its extension.
@@ -2163,6 +2173,98 @@ mod tests {
             ),
             [70]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn document_preview_backup_roundtrips_long_paths_and_still_rejects_hardlinks() {
+        use std::{io::Write, os::windows::ffi::OsStrExt};
+        let (_config, store, sid) = fixture();
+        let (mid, aid) = (id(), id());
+        store.mutate(&sid, |record| {
+            record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed"})).unwrap());
+            Ok(())
+        }).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source
+            .write_all(b"PK\x03\x04 synthetic long-path deck")
+            .unwrap();
+        let mut media = MediaRecord {
+            tool_call_id: Some(id()),
+            kind: "document".into(),
+            params: json!({"name":"long-path.pptx","format":"pptx","slides":70}),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        generated_file(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &mut source,
+            "long-path.pptx",
+            media.clone(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9".to_vec();
+        media.params["documentPreview"] = json!({"mimeType":"image/jpeg","pages":[70]});
+        media.outputs = vec![aid.clone()];
+        keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &[(70, jpeg.clone())],
+            &media,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let archive = tempfile::tempdir().unwrap();
+        let backup = archive.path().join("preview-backup.zip");
+        assert_eq!(store.backup(&backup, &[], || Ok(())).unwrap().sessions, 1);
+
+        // Restore staging adds another UUID directory to each attachment path.
+        // Force the native opener past MAX_PATH independently of the CI user's
+        // temporary-directory spelling; std filesystem writes already support it.
+        let destination = tempfile::tempdir().unwrap();
+        let mut config = destination.path().join("预览-restore");
+        while config.as_os_str().encode_wide().count() < 280 {
+            config.push("bounded-long-path-segment");
+        }
+        fs::create_dir_all(&config).unwrap();
+        let restored = AssistantStore::for_owner(&config, &"ef".repeat(32)).unwrap();
+        assert_eq!(
+            restored.restore(&backup, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            restored.restore(&backup, &[], || Ok(())).unwrap().skipped,
+            1
+        );
+        let page = restored
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages/70.jpg"));
+        assert!(page.as_os_str().encode_wide().count() > 260);
+        assert_eq!(
+            super::super::documents::preview::read_jpeg(&page).unwrap(),
+            jpeg
+        );
+        assert_eq!(
+            super::super::documents::preview::pages(
+                &restored.load_record(&sid).unwrap().attachments[0]
+            ),
+            [70]
+        );
+
+        // Long-path compatibility must keep the engine-output hardlink check.
+        let outside = destination.path().join("outside-jpeg");
+        fs::write(&outside, &jpeg).unwrap();
+        fs::remove_file(&page).unwrap();
+        fs::hard_link(&outside, &page).unwrap();
+        assert!(super::super::documents::preview::read_jpeg(&page).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), jpeg);
     }
 
     #[test]

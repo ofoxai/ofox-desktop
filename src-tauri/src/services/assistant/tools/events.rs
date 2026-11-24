@@ -130,7 +130,7 @@ pub(crate) fn task_event(kind: &str, data: &Value) -> Result<Value, String> {
                 return Err(PROTOCOL.into());
             }
             active += usize::from(status == "in_progress");
-            shown.push(json!({"step":crate::redact::scrub(text),"status":status}));
+            shown.push(json!({"step":super::super::types::scrub_task_step(text),"status":status}));
         }
         if active > 1 {
             return Err(PROTOCOL.into());

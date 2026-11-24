@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { withPlanningOpening } from "./fixtures/planning-opening.mjs";
 const main = fileURLToPath(
   new URL("../resources/runtime/src/main.mjs", import.meta.url),
 );
@@ -71,8 +72,19 @@ test("real main signals and EOF confirm MCP cleanup before ordinary exit; failed
       childFile = path.join(root, "child"),
       ready = path.join(root, "ready");
     let requests = 0;
+    const prepare = withPlanningOpening(async () => null, "single");
+    let prepared = false;
     const gateway = createServer(async (req, res) => {
-      for await (const _ of req) {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (!prepared && requests === 0) {
+        const opening = await prepare(req.url, { body });
+        if (opening) {
+          prepared = true;
+          res.writeHead(opening.status, Object.fromEntries(opening.headers));
+          res.end(await opening.text());
+          return;
+        }
       }
       requests++;
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -280,6 +292,7 @@ test("real main signals and EOF confirm MCP cleanup before ordinary exit; failed
     assert.ok(alive(sentinel.pid), "unrelated sentinel survives");
     t.diagnostic(
       JSON.stringify({
+        descendant,
         signal,
         scenario,
         dropStop,

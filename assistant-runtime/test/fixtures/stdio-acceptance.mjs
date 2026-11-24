@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { withPlanningOpening } from "./planning-opening.mjs";
 
 const bundledNode = fileURLToPath(
   new URL(
@@ -225,7 +226,11 @@ function environmentNode() {
   return node;
 }
 
-export async function createStdioAcceptance(t, handleModel, { node } = {}) {
+export async function createStdioAcceptance(
+  t,
+  handleModel,
+  { node, openFirstTool = false } = {},
+) {
   const sidecarNode = requireBundledNode(node ?? environmentNode());
   const root = await mkdtemp(path.join(tmpdir(), "ofox private stdio "));
   const emptyPath = path.join(root, "empty path");
@@ -238,6 +243,10 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
   );
   const children = [];
   const requests = [];
+  const prepareFirstTool = openFirstTool
+    ? withPlanningOpening(async () => null, "single")
+    : null;
+  let preparationSent = false;
   const serverErrors = [];
   let server;
   let port;
@@ -260,6 +269,18 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
           body: JSON.parse(bytes),
           authorization: request.headers.authorization,
         };
+        if (prepareFirstTool && !preparationSent && !requests.length) {
+          const opening = await prepareFirstTool(request.url, { body: bytes });
+          if (opening) {
+            preparationSent = true;
+            response.writeHead(
+              opening.status,
+              Object.fromEntries(opening.headers),
+            );
+            response.end(await opening.text());
+            return;
+          }
+        }
         requests.push(entry);
         await handleModel(entry, response, requests.length);
       } catch (error) {
@@ -273,7 +294,10 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
     port = server.address().port;
   }
 
-  const spawnSidecar = (pathMode = "empty", { probeTool = false } = {}) => {
+  const spawnSidecar = (
+    pathMode = "empty",
+    { probeTool = false, diagnostics = false } = {},
+  ) => {
     const environment = {
       PATH: pathMode === "empty" ? "" : emptyPath,
       HOME: root,
@@ -284,6 +308,7 @@ export async function createStdioAcceptance(t, handleModel, { node } = {}) {
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
     };
     const args = probeTool ? ["--import", probeToolPreload.href, main] : [main];
+    if (diagnostics) args.push("--ofox-runtime-diagnostics");
     const child = spawn(sidecarNode, args, {
       cwd: root,
       env: environment,

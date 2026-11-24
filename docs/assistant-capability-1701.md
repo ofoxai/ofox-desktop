@@ -1,0 +1,969 @@
+# 桌面助手稳定性与跨平台验收记录
+
+跟踪：[Fizzy #1701](https://app.fizzy.do/6179973/cards/1701)。基线
+`b84a4d574b057bb73972b4f6adb502f830ef3208`，版本保持 1.5.2。
+本轮处理卡片前两批，不发布版本、不迁移数据库、不改真实用户配置。
+
+## 稳定性修复
+
+- 工具修改后的验收按 `(tool, canonical folder)` 记录。修改 Codex 后验证 Claude
+  不再清除待验收状态；新修改令旧验证失效。Host 在副作用前检查 32 个目标容量，
+  确定无副作用的失败释放预留。不完整快照保留 `scopeIncomplete`，不猜测身份。
+  仅内存延续，不声称重启后恢复任务；保留现有 shell-only 意图与执行配额政策。
+- runtime 的 home 在任务开始前规范化，覆盖部分修改异常没有结构化结果的情况。
+- 附件自动保存失败后，回复不再显示完成。保留成功附件、正文、原模型错误及费用
+  证据；停止时不自动交付。同一 run 的 `fromPreview` 重试复用原字节，不重新运行
+  Python；没有增加跨 run 的预览恢复存储。
+
+RED 证据：跨工具误放行、附件落盘失败仍 completed、Stop 未置取消通道时仍交付、
+home 别名及新错误码缺少文案均取得失败断言，再实施修复。
+
+## 历史样例
+
+只读取历史错误类别，测试使用合成公开内容，不提交原会话或用户文件。
+
+| 样例                   | 当前结论                      | 验证                             |
+| ---------------------- | ----------------------------- | -------------------------------- |
+| 历史公式 `\sin` 不支持 | 现有实现已覆盖，不重复修改    | `python-deck-sincos.test.mjs`    |
+| 历史缺少冻结计划       | 当前契约正确拒绝              | `presentation-planning.test.mjs` |
+| 正常公式生成对照       | 核对真实 OPC、lint、OfficeCLI | 同一公式测试                     |
+| 正常冻结计划对照       | 合法规划可生成，陈旧规划拒绝  | 同一规划测试                     |
+
+两文件本机合计 46/46 通过。历史“有输出”不等于质量或安装版验收通过。
+
+## Windows 与真实模型验收
+
+资源打包不代表允许执行。LPAC/Job 适配器需证明文件、网络、子进程及低完整性
+映像限制；公开 runner 必须匹配完整运行时摘要的成功探测证明，资源改变重新验证。
+原生 CI、安装版和真实模型结果分开记录，入口见[一键验收说明](document-engine-client-acceptance.md)。
+Windows 10 22H2、Windows 11 客户端结果均为完整验收必要条件；Server CI 和
+deck 降级成功不能代替 Python 客户端验收。
+长路径回归覆盖资源、备份恢复、读取与发布；不声称支持任意超过 MAX_PATH 的
+进程工作目录，系统无法启动时仍拒绝 Python。
+
+本机 Node 22.23.4、Codex CLI 0.166.0、Claude Code 2.1.317；版本命令只读。
+Codex 原生配置检查使用临时 HOME；Claude 仅核对版本，不能声称其连通性已验证。
+
+真实模型为两模型、三场景、macOS/Windows 11 共 12 项任务，Windows 10 另作
+六份冻结输入原生重放。总预算 US$10、单任务 US$1；共享账本及主机额度、请求前
+预留、未知费用停止。入口默认离线，不借日常账户 key；专用测试 key 缺失时保持
+pending，尚未执行付费请求。
+
+## 本机检查结果
+
+macOS 26.5.1（25F80），Rust 1.95.0；以下均未调用付费模型：
+
+- TypeScript、Prettier、renderer 构建、Rust fmt 和全目标 Clippy 通过。
+- 前端：3372 通过、1 原有跳过；sidecar：828 通过；搜索服务：102 通过。
+- Rust 默认全量：4555 通过、28 忽略。随后显式运行三个真实引擎用例，3/3
+  通过，包含 OfficeCLI/Typst 生成、布局修复、Python 仅修改第 70 页并预览。
+  Python 用例使用当前公共资源的私有副本，没有改动安装版或真实用户文件。
+- 跨工具、取消/超时、裸未知结果归一、目录在 callback 前或等待 key 期间换向
+  的真实 Host 回归全部通过；安装的 Codex 只在临时配置目录做原生配置验收。
+- Windows 首轮修正三个编译错误，第二轮修正附件读取分支的 Clippy 问题。
+  第三轮（`6edc4cb4`，Windows Probe 43872249231 attempt 2）进入原生功能测试：
+  3994 通过、11 失败、12 忽略。失败暴露 raw Win32 超长路径、缓存 ACL generic
+  权限映射和目录句柄发布契约问题；包含两项备份恢复失败，不能算作验收通过。
+  修复保留 reparse/hardlink 拒绝、精确 ACL 和按目录句柄发布，需再次原生运行。
+- macOS 验收包已由干净提交 `1cb01fd3` 构建，版本 1.5.2，ad-hoc 签名校验通过；
+  尚未替换 `/Applications` 安装版，也未完成界面验收。
+  Windows 客户端界面及真实模型验收仍待各自结果，不能用以上 macOS 数字代替。
+  原开发提交均保留，主目录另一批进行中的改动未被本任务修改。
+
+后续原生诊断（Windows Probe 43882483572，`12ebb621`）：Server 2022
+build 20348 的八组实测中，Win32 相对目录句柄发布均报错 87，native
+`NtSetInformationFile` 四组均成功且目标字节一致。实现据此保留目录锚定并改用
+native class 10，调用和完成状态都必须为零；产品原生回归仍待新运行。
+该轮 sidecar 因测试快照误用 POSIX 根相对路径而失败（730 通过、1 失败、97
+跳过），未进入 Rust。测试已改为临时目录下的真实绝对路径，未放宽生产验证范围。
+
+macOS 复跑还发现测试用例漏关 OfficeCLI 自更新，固定资源从 1.0.160 漂移到
+1.0.161，引发并发读取 bundle 失败；已补齐兄弟用例的跳过更新参数和临时 HOME。
+生产 runner、prepare 和 smoke 原已有这些限制。保留的 `1cb01fd3` 验收包仍为
+固定 1.0.160，二进制摘要与下载 pin 一致；不是安装版验收通过的替代证据。
+
+`329edf85` 的后续 macOS 全量结果：前端 3372 通过、1 跳过，Rust 4555
+通过、28 忽略，Clippy/类型/格式检查通过。sidecar 出现一次退出清理观测失败
+（827 通过、1 失败），原 trace 只有布尔值，不能据此断言是实际存活或观测降级。
+保持生产清理与所有断言不变，增加仅测试用的 PID/ps 状态诊断后，工作稿全量
+833 通过，搜索 102 通过；原偶发失败仍未定因，不声称已经修复。
+
+Branch Packages 已补充独立的 Windows release Host driver artifact：编译前后
+核对干净源码，从 Cargo JSON 绑定唯一测试 exe 和实际编译 SHA/clean，再记录
+二进制摘要。六项打包回归及十二项 campaign 回归合计 18/18 通过，独立审查通过。
+完整 installer、离线探针、开发 Host driver 与安装版 UI 是不同证据；详见
+[客户端说明](document-engine-client-acceptance.md)。原生 artifact 构建仍待 CI。
+
+Windows Probe 43885065018（`329edf85`）已完成：库测试 4008 通过、14 失败、
+12 忽略。长路径附件恢复及目录句柄新建/替换发布实测通过，原 302/87 错误已消失；
+缓存 ACL 前置检查仍拒绝，连带隔离、取消和证明用例尚未进入有效路径。另一个
+中断用例的失败是测试入场用了 Windows verbatim spelling，而生产 admission 使用
+`scope::resolve`；夹具与精确预期已统一，macOS 针对用例通过，Windows 待复跑。
+未放宽 ACL 验收或中断债务断言，Windows Python 能力继续关闭。
+
+为缩短原生定位，新增独立 Document Engine Development Checks：先精确运行
+ACL 前置，失败即停；通过后运行完整 sandbox 及指定附件、Host 回归，拒绝零测试
+与跳过。权限诊断只保留数值控制位和脱敏 ACE 形状，不记录 SID 或原始 SDDL。
+该开发入口不提供发布证明；最终仍须完整 Windows Probe 和两种客户端验收。
+
+开发运行 43895706755（`c8003270`）的精确 ACL 用例取得原生 RED：实际控制位
+`0x9814`，模板 `0x9014`，四个 ACE 形状相同，仅相差
+`SE_SACL_AUTO_INHERITED (0x0800)`。现只在自有描述符副本的比较键中归一化该
+记账标记，真实对象、原始快照、完整 SID/权限条目、保护位、标签和其他控制位
+保持严格校验；增加实际 FW/Low 标签/无保护/错 capability/额外 ACE 等拒绝用例。
+双独立审查及模块/测试的 Windows 目标 Clippy 通过（macOS 交叉检查）；产品原生
+GREEN 仍待下一运行。
+开发入口另加精确的功能隔离前置，再运行整个 sandbox，避免同一前置失败反复
+消耗测试时间；九个命令均需真实执行且不得跳过。
+
+开发运行 43899245981（`dfe5a835`）的精确 ACL 用例已原生通过（含真实权限
+负例）。紧接的功能用例仍失败，148.55 秒仅有通用 unavailable，不能据此判断
+某个子进程超时或 LPAC 不支持；后续按门禁停止。现增加仅可信固定探针的阶段、
+耗时、退出码、超时、输出字节数及固定检查点诊断，不回传原始输出或改变成功条件。
+
+同时独立复现并修复 Windows Python 模块路径缺陷：Pyodide 的 POSIX MEMFS
+误用 native `path.join`，会写入带反斜杠的字面文件名，随后 `import deck` 失败。
+实际写入改为 POSIX join，真实 OS 路径保持 native。真实 MEMFS Windows/POSIX/
+当前主机回归 4/4、既有真实 PPTX 生成 1/1 通过；尚不能把该缺陷认定为上次
+原生失败的根因。资源已重新准备，双独立审查及模块/测试 Windows 目标 Clippy
+通过，下一次原生功能验证仍 pending。
+
+开发运行 43906191942（`8d1573f4`）再次确认精确 ACL 用例原生通过；功能
+用例的首个失败阶段为 `node_isolation`，未取得 EngineOutput 或具体原生错误，
+Python 和 Office 阶段尚未执行。运行前资源验证耗时 76,346 ms，Node 阶段
+32,098 ms；后者包含缓存与资源摘要核验，不能据此认定子进程或管道超时。
+下一次只沿用开发入口的精确前置用例，补充可信固定探针的底层闭集阶段及数值、
+布尔证据以定位错误出口；隔离判断、错误码、时限、权限和能力开关保持不变。
+专用 env 已就绪，尚未验证 API 授权，也未执行付费模型任务。
+
+开发运行 43913114420（`440649cb`）的底层证据将失败锁定在 Resume 前的
+`token_container`：普通 AppContainer 标志为 1；class 29 长度查询返回 4 字节，
+class 46 的 NULL/0 查询返回长度 0，因此尚未取得 LPAC 标志的值。缓存所有权、
+profile 路径/标签、进程创建和 Job 分配均已完成，task/profile 清理均成功；
+失败不属于 Python、Office、进程执行超时或管道排空。下一次仅在相同 suspended
+token 上增加固定缓冲查询及数值错误码对照，原来的失败关闭判定保持不变。
+
+开发运行 43916502977（`1e009434`）完成同 token 对照，确认当前 Server 2022
+build 20348 不接受 class 46 的用户态查询：Win32 NULL/4/8 字节均返回
+`0x80070057`；同样的 Nt 查询均返回 `0xc0000003 (STATUS_INVALID_INFO_CLASS)`，
+长度与缓冲均未写入。class 29 的正控长度为 4，固定 4/8 字节查询均成功且值为 1。
+因此当前根因为使用了该系统不支持的 token 查询项，不能靠增大缓冲解决，也不能
+把查询失败当成 LPAC=false。修复使用同一未恢复进程的 token 授权行为进行验证：
+仅 Everyone、AAP、foreign capability 拒绝，exact runtime capability 允许；
+API 失败、权限输出不完整或任一矩阵不符都拒绝。原有包/capability/完整性级别、
+Job 和 mitigation 检查保留；普通 AppContainer 成对反控前置到原功能用例，均不
+恢复执行。Windows 目标交叉 Clippy、observer 状态回归 4/4、格式及双独立审查
+通过；实际原生成对控制和后续完整功能探针仍待验证，Windows 能力保持关闭。
+该行为证明依据 [LPAC 语义](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class)
+与 [AccessCheck](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-accesscheck)
+组合，不声称微软提供了专用的 IsLPAC Win32 查询契约。
+
+开发运行 43921430351（`2de81c59`）中，前置的真实 suspended LPAC/普通
+AppContainer 成对控制均已通过，随后 bundled Node 的全部 token/mitigation
+校验与四项 AccessCheck 矩阵也通过。Node 恢复后约 2 ms 以 `0xc0000142
+(STATUS_DLL_INIT_FAILED)` 退出，尚未输出任何 JavaScript 检查点；不是此前的
+token 查询失败，也没有进程超时或管道排空失败。Job active=0、task/profile
+清理成功。当前仅能确认启动初始化失败，具体 DLL/系统资源原因待最小原生诊断；
+Python、Office 和其余回归仍未进入，Windows 能力继续关闭。
+
+下一次定位保留原样启动与安全条件，只添加可信 PID/TID 观察及开发 CI 的私有、
+有界 ETW。以文档化 XML 解码 THREAD、ImageLoad、FileIO/OpEnd、Registry，
+不捕获 PROCESS 的 SID/命令行，也不导出原始 trace。独立审查发现的 opaque IRP、
+跨进程 TID 归属和采集超时清理竞态均已补回归，pinned Node 下针对测试 29/29
+通过。此结果验证采集逻辑与脱敏，不代表 PowerShell/ETW 原生已运行；下一次
+原生证据仍 pending。未调整 capability、资源 ACL、mitigation 或引擎超时。
+
+开发运行 43932638031（`f97e97fb`）确认原样 Node 仍以 `0xc0000142` 退出。
+私有 ETW 会话启动与 owned stop 原生成功，临时原始文件已删除且没有强杀采集器；
+但后续解码失败，只能报告 inconclusive，尚无具体失败操作可据以修权限。实际
+工具清单确认已有 Microsoft 签名 CDB/gflags 10.0.26100.4202；controller 位于
+session 2 且 UserInteractive=true，不能将故障归因于非交互 session 0。
+下一步仅用已有 CDB 为同一可信 suspended Node 捕获进程内 loader snaps，完整
+验证 token 后、核对目标与标志读回后才允许原 Resume；调试器结果不作为功能验收。
+
+CDB 接线仅在 test cfg 的首个固定 Node 使用：原挂起线程计数必须为 1，配对
+探测恢复后由原 Host Resume 返回 1，再发送普通 `g`。取消、配置不符或未知文案
+均拒绝；原 Job 停止后先等待 owned debugger 退出，再排空标准流。私有 raw
+日志保留至读取和 CLEAN 确认，失败阶段与 cleanup 状态分别保存。调试执行即使
+成功也强制停止，不写 admission。pinned Node 的控制器／投影组合测试 27/27、
+旧 ETW 投影回归 13/13、纯 Rust fence 4/4、observer 4/4、Windows 目标模块及
+测试 all-targets Clippy 和格式检查通过。合成日志不证明 CDB 原生文案兼容，
+`-pb` 下首次 Resume 前的真实握手及本轮原生结果仍 pending。
+
+运行 [43943128991](https://github.com/ofoxai/ofox-desktop/actions/runs/43943128991)
+（`d40e36df`）的完整日志和诊断产物已核对：ACL 1/1 通过，原 Node 的 token
+与四项 AccessCheck 仍通过；随后 `cdb_handshake` 约 30 秒、`cdb_stop` 约 30 秒
+超时，配置、flags 和 Resume 全部为空。控制器最终在取消后启动 CDB，stdout、
+stderr 均 0 行；Node 侧确认 owned debugger 退出及 raw 删除。这次没有恢复原
+Node，不能据此判断其 DLL 初始化故障。Python/Office 和后续回归尚未进入。
+
+控制通道存在已复现的同步阻塞：Microsoft 文档明确 `Console.In.ReadLineAsync()`
+同步执行。原调用在返回 Task 之前等待 Node 的 STOP，而 STOP 要等 Cargo 完成后
+才发送；此前的超时和晚启动时间线与此一致。改为持久的普通 StreamReader 读取
+自有 stdin，保留预读的 STOP/CLEAN，并在已有 target 和实际启动前检查取消。
+同样的 ETW 控制通道共用该 reader。参见
+[API 合同](https://learn.microsoft.com/en-us/dotnet/api/system.io.textreader.readlineasync)。
+
+macOS ARM64 的官方 portable PowerShell 7.7.0／.NET 11.0.0 实进程回归先得到
+3 fail／1 pass，修复后 4/4 通过；包括静默 stdin 下取消与 deadline、合并发送的
+STOP/CLEAN/EOF。专用预检还强制校验唯一完整 TAP、4 pass、0 skip／fail／cancel，
+避免零项真实检查退出 0；该门禁回归 2/2 通过。相关 Node 测试合计 46/46、PS
+语法检查和独立复核通过。以上不是 Windows 证据。下一次只验证 Windows 控制
+reader、同一 suspended Node 的实际 CDB 握手与 loader 失败记录，不改隔离条件。
+
+运行 [43998374426](https://github.com/ofoxai/ofox-desktop/actions/runs/43998374426)
+（`cc42947e`）确认 Windows 实进程控制预检 4/4、0 skip，ACL 1/1；CDB 握手约
+15.2 秒后拒绝，清理等待降为 11 ms。控制器报告 `target_not_seen`，stdout
+50 行／2554 字节、stderr 0 行；配置和原 Resume 仍为空，owned debugger 和 raw
+清理成功。worker 的 `target_exited` 可能来自调试器清理导致附属进程退出，不能
+当作未恢复 Node 的真实 DLL 失败证据。原握手标记尚未得到认可，Node 原因仍未知。
+
+下一次只定位 CDB 启动协议：将启动选项置于 `-p PID` 目标之前，符合
+[官方语法](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/cdb-command-line-options)。
+这并未单凭文档证明旧顺序必错。新增的固定形态计数仅区分 prompt、标记提及、
+数值 TARGET、gflag 值和 NUL；另保留最多 8 个显式 Win32 uint32 错误码。它们
+不含原文、不参与 READY 或根因认定。失败记录先于 kill 发布，关闭确认仍须
+等实际完成。真实 PowerShell AST 执行生产行解析器，证明 prompt／回显不能置
+targetSeen，完整严格序列才配置；两项回归由 RED 修至 2/2 GREEN，独立复核通过。
+不扩大权限、不提前 Resume；新原生问题是命令文件是否执行，以及原握手为何
+未匹配。尚未取得 Node loader 失败的具体模块或操作。
+
+运行 [44003216099](https://github.com/ofoxai/ofox-desktop/actions/runs/44003216099)
+（`94f47bf3`）仍为 control 4/4、ACL 1/1，配置未完成且原 Resume 为空。
+CDB 40 行／1952 字节，但 prompt、标记提及、数值 TARGET、gflag、NUL 全部为
+0，已识别格式的 Win32 错误码为空；不能把这解释成没有错误。握手约 15.1 秒，
+清理 22 ms，owned debugger 和 raw 清理成功。启动选项规范化没有解决命令
+不执行的问题，不能将旧参数位置认定为原因。首失败已正确保留 `target_not_seen`。
+
+下一步只改变调试器停止事件：`-pb` 保留，增加 `-xe ld:ntdll.dll`，请求在
+attach 回放已有 ntdll 的加载事件时停止，使 CF 有机会在原线程仍挂起时执行。
+[DebugActiveProcess](https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-debugactiveprocess)
+记录已有 DLL 事件回放；[事件筛选](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/controlling-exceptions-and-events)
+支持 `ld[:Module]`，其默认只输出消息。这不保证当前 CDB 的组合行为，仍须
+原生确认。未加入 `-pr`、`-g`、`-o`、`gh`，不改变 token、权限或异常 handled；
+原完整身份、flags、尾标记和挂起计数门禁保持。目标仅为验证能否在 Suspend=1
+时完成 CF，成功后才读取实际 Node 启动记录；不是功能验收或权限修复。
+
+运行 [44006150325](https://github.com/ofoxai/ofox-desktop/actions/runs/44006150325)
+（`84bf8551`）首次执行了 CF：数值 TARGET 1 行、prompt 5 行，握手约 1.8 秒后
+明确拒绝为 `gflag_before_unreadable`，不再等待 15 秒。control 4/4、ACL 1/1、
+token/AccessCheck 仍通过；flags、配置、原 Resume 均为空，Python/Office 未进入。
+owned debugger 与 raw 清理确认，stop 72 ms。TARGET 被解析不等于整套身份门禁
+已通过；没有原 Node loader 故障证据。
+
+解析器另有回归已复现：原来只接受八位 flags，合法短 DWORD（`0`、`2`）会被
+拒绝。改为整行匹配一至八位十六进制，仍拒绝溢出、负数、尾随文本，并保留
+before/after 差值与全部身份/挂起计数门禁。这只是兼容性修复，尚不能归因为本次
+原生失败。两固定 gflag 块另记录 symbols/types/PEB/globalFlags/failure/extension
+六项词法布尔值，不含原文，不参与 READY，不据此单独认定原因。下一次定点
+原生检查只回答 flags 能否读回，或明确读回阻塞的类别；不增加超时、不降低隔离。
+真实 PS 解析回归先失败、修复后相关 Node 48/48、0 skip；另覆盖
+`GetExpression: not found: ntdll!NtGlobalFlag` 的词法观察，独立复核通过。
+
+运行 [44010319498](https://github.com/ofoxai/ofox-desktop/actions/runs/44010319498)
+（`395dcb83`）仍拒绝 gflag 读回，握手 1.43 秒、清理 72 ms；control 4/4、ACL
+1/1、token/AccessCheck 通过。六项提示中 symbols/types/PEB/globalFlags/failure
+为 true、extension 为 false，未识别任何数值 flags；短 DWORD 不是此处阻塞的
+解释。原 Resume 仍为空，owned debugger/raw 清理成功，没有 Node loader 原因。
+
+后续只检验匹配的 ntdll 符号是否影响实际读回：在 controller-ready 与任何 target
+创建前，Microsoft 签名 SDK SymChk 对固定 System32/ntdll.dll 从微软公开库准备
+私有缓存，`/pt`、单文件 PASSED、唯一完整汇总及退出码均须成立。参见
+[官方选项](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/symchk-command-line-options)
+与[完整匹配下载说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/using-symchk)。
+含类型信息不保证所需字段可读，更不是 Node 根因结论。
+
+SymChk 与 CDB 同属自有 Job，环境清空；准备有 30 秒/取消界限，双流按小块读取，
+行 4 KiB、总 64 KiB 上限覆盖无换行输出。只取唯一普通、单链接、64 MiB 内的
+ntdll.pdb，拒绝 reparse 祖先，再用稳定只读句柄复制到私有平坦目录。CDB 仍禁用
+网络符号、正常匹配 PDB，完整身份/flags/挂起计数与 READY 门禁不变；准备失败
+不启动探针。所有原生符号准备及读回结果待定。真实 portable PS 子进程负例、
+C# 声明编译和布局检查、脱敏投影等相关回归 50/50、0 skip。
+
+运行 [44012886591](https://github.com/ofoxai/ofox-desktop/actions/runs/44012886591)
+（`97c8e1dc`）control 4/4、ACL 1/1；签名 SymChk 10.0.26100.4202 实际启动、
+退出码 0、关闭确认，但未满足严格输出校验，拒绝为 `symbol_check_incomplete`。
+本次未启动功能 Cargo 或 Node，准备约 6 秒、owned stop/raw 删除确认；不能把
+退出 0 当成符号准备通过，也不能推断下载或类型失败。旧摘要仅在完整通过后保存
+汇总，因此无法分辨编码、输出通道或单项/汇总行差异。
+
+下一次只补实际格式证据：两流的字节/BOM/NUL/换行统计、严格行计数与唯一汇总值。
+最多八行固定词表 token，普通数字、路径、SID、未知文字均替成 `?`；不导出原文。
+形态统计不改变 UTF-8/stdout 严格验证或任何通过条件。真实 UTF-8 与 UTF-16 字节
+夹具证明 BOM/NUL 只能被观察、不能授予成功；相关 51/51、0 skip。
+
+运行 [44014718403](https://github.com/ofoxai/ofox-desktop/actions/runs/44014718403)
+（`67179adc`）实际 stdout 130 字节，BOM/NUL 均无，CR/LF 各 4；stderr 为空。
+两个汇总行唯一且为 failed=0、passed+ignored=1；单项行具有精确 ntdll.dll 与
+PASSED 状态，后面附带详情，因此旧状态行尾假设未匹配。问题在本次新增准备
+验证器的行格式，并非已证明的下载、编码或类型失败；Node 未启动。
+
+现共享的单项模式保留精确记录前缀、目标与 PASSED 词，允许其后同一行详情；
+详情不作为证明。唯一单项、完整汇总、exit0、PDB 文件/匹配与实际 gflag/挂起
+门禁均保留。实际详情形态回归先 RED 后 GREEN，伪状态、外来模块、前缀回显、
+重复单项仍拒绝；17 种实进程模式及相关回归 51/51、0 skip。
+
+运行 [44015969522](https://github.com/ofoxai/ofox-desktop/actions/runs/44015969522)
+（`2cb13cde`）符号准备与私有 PDB 复制通过，实际 PID/TID、flags `0→2` 及 CF
+尾标记首次全部确认。随后 `cdb_hold` 测得 SuspendThread previous=2，旧门禁
+预期 1 而拒绝；没有配对 Resume 或原 Host Resume。握手约 2.04 秒、清理 61 ms，
+control 4/4、ACL 1/1、owned stop/raw 删除均确认。调试停止时测得 2，不足以
+单独证明该额外计数的来源，更不能直接把 2 当作放行条件；原 Node 根因仍未知。
+
+测试诊断改为分开证明两种暂停：在 target/attach 前实测原 hold `1→配对2`；
+身份和 flags 确认后只发送一次普通 g 释放调试停止，保留原手动 hold。依据
+[ResumeThread 文档](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread)，
+手动挂起的线程不因调试 continue 而恢复。随后在同一 30 秒总界限内重新测到
+`1→配对2` 才允许原 Host Resume1；中间的 2 只允许撤回本次探测增量，不能授权。
+异常计数、非配对返回、取消和过期均拒绝，产品 token/capability/权限不变。
+
+GO 现在只确认实际原 Resume，不再发送第二个 g；严格整数身份和实际 final hold
+一同确认。它可能晚于 Node 的 2 ms 失败、CDB 退出或清理 abort 被观察到，故
+持续有界 drain，并以完整 V2 全局证明加 continue 区段归因；缺少原 Resume1
+的 READY 或输出不能归因。包含该竞态、布尔/字符串计数拒绝、伪造/重复证明的
+相关 Node 56/56、0 skip，纯 fence 7/7、observer 4/4；模块及测试的 Windows
+目标 Clippy、全仓 Rust fmt、PS 解析及 Prettier 通过。交叉检查不是原生证明，
+新暂停流程和原 Node loader 失败仍待定点原生确认。
+
+运行 [44020847288](https://github.com/ofoxai/ofox-desktop/actions/runs/44020847288)
+（`42f2edbb`）已原生证明整条诊断链：pre-attach `1/2`、flags `0→2`、5 次
+release 探测后 fresh `1/2`、原 Host Resume1；握手 1.36 秒、释放等待 40 ms，
+Node 实际运行后以 `0xc0000142` 退出，等待 95 ms、清理 52 ms。完整 V2 同
+PID/TID 明确记录 kernelbase.dll 在 DLL_PROCESS_ATTACH 初始化失败，继而
+kernel32.dll 子系统加载返回 `0xc0000142`；CDB、Job 与 raw 清理全部确认。
+这定位了失败模块，尚未识别导致初始化失败的具体系统操作。
+
+下一次仅做固定测试诊断 A-B-A：同一临时 profile/task/home、缓存 Node、固定打印
+样例与环境，只比较 runtime capability 和额外 registryRead。候选依据是
+[Chromium 共同添加该能力](https://chromium.googlesource.com/chromium/src/+/lkgr/sandbox/policy/win/sandbox_win.cc)
+及[其注册表读说明](https://chromium.googlesource.com/chromium/src/+/lkgr/docs/design/sandbox.md)，
+不能把 Chromium 的 broker/启动方式当成本项目的安全或因果证明。
+
+A1 无 CDB 且完整验证后仍为 0142 才派 B；每组 fresh Job、精确 SID 集合、四项
+LPAC AccessCheck、原 mitigation 与 Resume1 均须通过并确认 stop/wait/drain。
+A2 须再次 0142，B 只有 exit0 和精确固定 marker、运行时字节稳定且全部清理
+通过才记 supports-candidate；否则 inconclusive。两成员仅测试构造器可生成，
+发布构造器与 token 校验仍固定 runtime 单成员。原用例保留失败、不开 admission，
+不执行用户/模型代码，不导出 PID、SID、路径或输出正文。将来采用前仍须私有
+注册表及完整隔离负例、默认功能门禁和 Win10/11 客户端验收；当前没有产品授权
+能力变化或 A-B-A 原生结果。
+
+运行 [44027445443](https://github.com/ofoxai/ofox-desktop/actions/runs/44027445443)
+（`97a91cb7`）原生 control 4/4、ACL 1/1，原 CDB 完整 V2 与 KernelBase 初始化
+失败继续复现。无调试器 A1/B/A2 的 capability 数为 1/2/1，token/LPAC/IL/策略、
+Resume1、运行时 hash、stop/wait/drain 与全部清理均通过，但三个 exit 都为
+`0xc0000142`、零 stdout/stderr。registryRead 单独不足，产品权限不变；候选
+比较改为显式 opt-in，默认不重复。
+
+下一轮沿已验证链路观察 14 个固定 Nt 入口和返回：实际 PDB 布局、线程映射和
+`bl /L` 安装先核验，持久 owned 返回断点匹配同 TID、RSP+8 和返回地址后才记录
+EAX，并清除自身。访问掩码只读 EDX；端口/值名接口不套用文件参数。名字有界且
+只在私有目录，收据只含闭集别名。完整原 Host Resume1 仍为归因前置，缺失配对、
+嵌套或超限保持 inconclusive；实际失败操作与 DLL 失败分别记事实，不自动因果。
+本地合成/实际 PowerShell 协议测试不能替代待执行的 Windows 原生验证。
+
+运行 [44034826154](https://github.com/ofoxai/ofox-desktop/actions/runs/44034826154)
+（`ef5fef70`）control 4/4、ACL 1/1、原实际 token/LPAC 矩阵通过；新增观察器在
+`operation_layout_unverified` 拒绝，尚无 CF 尾确认、continue 或原 Host Resume。
+因此没有系统调用结果，也不能用于解释原始 0142；调试器、raw、task/profile
+清理确认。此前基线调试链原生通过的事实保持，新增类型求值依赖尚未成立。
+
+修正仅针对诊断：移除新增的 PDB sizeof/空指针字段取址依赖，按
+[公开结构](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes)
+与 Windows x64 ABI 使用固定偏移，先对同一实际进程句柄取得
+[IsWow64Process2](https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process2)
+成功的 UNKNOWN/AMD64 组合，并核对原生绑定 size/offset。每次 OA.Length 和可读
+范围再核对；可选名字未知不阻断真实状态配对。原符号/gflag/断点安装及完整
+V2/HostResume 门禁保留。另修正本轮发现的 MASM/C++ 逻辑运算符混用，显式使用
+MASM and/or。回归先 RED 后 GREEN；这些修正的原生运行尚待执行，不作 0142 修复。
+
+接手复核（本地，`ef5fef70` 之上，尚未取得新原生结果）：
+
+- 编译阻塞：临时 Windows 检查工程的特性列表与正式 Cargo.toml 一致，二者都缺
+  `Wdk_Foundation`，所以这是正式代码在 Windows test 构建中的真实错误。链接
+  工作区源码的 Windows 目标镜像先复现 E0432，仅出现在 lib test（`cdb.rs` 只在
+  test cfg 编译）。修正为 Windows dev-dependency 的同一 pinned `windows`
+  0.62.2 追加该特性；`cargo tree` 核对发布依赖边不含它，Cargo.lock 不变。
+  修正后镜像 lib 与 lib test 的 Clippy `-D warnings` 通过，属交叉检查。
+- 已有产物再核对：44034826154 的 promptLines=10、markerMentionLines=12，
+  恰为 `-cf` 前十条命令各带 `0:000>` 回显（六条标记命令的回显加输出）；
+  LAYOUT 行确有输出但数值不符，与已移除的类型求值依赖一致，不另作推断。
+  据此，断点区段紧接的 `bl /L 10-23` 回显会被旧解析当作非法行，下次原生
+  运行将必然在 `operation_install_unverified` 拒绝。现跳过提示符回显，带提示符
+  的伪断点行仍不计数，14 行、启用、地址和线程要求不变。
+- 微软 [bl 示例](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/getting-started-with-windbg)
+  显示当前输出为 `e Disable Clear  <地址> ... 0:****`。入口与返回断点解析均接受
+  这段 DML 文字和线程列 `~` 前缀；线程限定列的确切形态没有文档示例，待原生确认。
+- 失败观测原超过 32 条即整体 inconclusive，正常启动的注册表缺失可能借此
+  掩盖最后的失败操作；现与调试器 256 次调用上限一致并全部保留。
+
+回归均先 RED 后 GREEN：portable PowerShell 7.7.0、Node 24.21.0 下 CDB 相关
+九个测试文件 69/69、0 skip。夹具改用生产形态的 `ConvertFrom-Json` 收据
+（Int64），浮点、字符串、WOW64 与缺失均拒绝，删去 Int64 分支的变异会失败；
+另覆盖 operation 阶段白名单、256/257 调用边界和非属性接口的 `root=2` 拒绝。
+`cdb_protocol` 独立单测 8/8；独立审查未发现严重或重要问题。以上都不是 Windows
+原生证据，不改变 token、capability、ACL、mitigation、超时或 admission，
+不作 0142 修复。
+
+运行 [44049635186](https://github.com/ofoxai/ofox-desktop/actions/runs/44049635186)
+（`10bc4f72`）首次通过新增观察器的全部安装门禁：architecture/ABI、实际线程
+匹配、14 行已解析且启用的线程限定断点均为 true；完整 V2、flags `0→2`、
+pre-attach 与 final hold `1/2`、原 Host Resume1 成立。control 4/4、ACL 1/1，
+Node 在 Resume 后 154 ms 以 `0xc0000142` 退出，未超时、未被 Job 强杀；
+KernelBase DLL_PROCESS_ATTACH 失败及 kernel32 子系统加载 0142 再次复现，
+CDB/raw/task/profile 清理确认，没有任何 `Win32 error` 文案。
+
+但操作投影为 `completedCalls=0`、inconclusive，尚无失败操作或返回码。形态
+计数给出原因：本次与 44020847288 都恰好比 `-cf` 命令多一条提示符行（34/33、
+11/10）。CDB 在 `-cf` 后打印不换行的 `0:000> ` 等待 `g`，`g` 之后的第一行
+输出接在其后；加载器最早的 IFEO `NtOpenKey(Ex)` 早于任何 loader snaps，因此
+首条 ENTER 很可能被粘在提示符后而漏读，序号停在 1，之后每条调用都被拒绝。
+stdout 比 44020847288 多 137 行，扣除安装区段约 90 行属继续后的观察输出，
+说明入口断点确实命中；是否还存在返回断点等第二个问题，现有产物无法区分。
+
+修正只在投影：主循环中提示符后紧接 `OFOX_NT_RAW_V1 ` 时去掉该提示符，计数
+`promptJoined`；回显的命令仍不能成为标记，bl 列表内不剥离且带提示符的行仍不
+计数；多重提示符或其他大小写的残留标记一律拒绝。独立审查以 20 万条随机变异
+日志对比，除单个粘连标记外未接受基线拒绝的输入，观测结果无差异。
+另增闭集 `firstRejection`（enter-order/identity/arguments、name、listing、
+return、invalid-*、marker-unknown、unterminated、no-calls），不含原文。
+RED 复现与原生相同的整体拒绝，修正后相关九个文件 71/71、0 skip。下一次定点
+运行只回答：去掉粘连后能否配对出失败操作及 NTSTATUS；若仍不完整，由
+`firstRejection` 和 `promptJoined` 指出下一处断点，不改隔离、权限或超时。
+
+运行 [44055154306](https://github.com/ofoxai/ofox-desktop/actions/runs/44055154306)
+（`9ea2b34e`）首次取得原生系统调用配对：安装门禁、完整 V2、hold `1/2` 和原
+Host Resume1 均成立；`promptJoined=1` 证实首条 ENTER 粘在等待提示符后，
+`firstRejection` 为空，固定集合覆盖完整，14 次调用全部配对。三项失败依次为：
+NtOpenKey `0xc0000022`（GENERIC_READ）、NtOpenKey `0xc0000022`
+（KEY_QUERY_VALUE）、NtOpenKey `0xc0000034`（KEY_QUERY_VALUE），对象均只能
+归为 `machine-registry`；其后 11 次被观察调用均成功，Node 随后仍以
+KernelBase 初始化失败、0142 退出。control 4/4、ACL 1/1，清理全部确认。
+
+这是第一份失败操作证据，但不足以归因：被拒绝的具体 HKLM 键、成功调用的顺序
+及 KernelBase 初始化期间最后完成的操作都没有输出。registryRead 的 A-B-A 已证明
+单独不足，因此不据此调整 capability 或 ACL。
+
+下一步仅补可见性，不改观察范围或任何隔离条件：报告新增按序的全部配对调用
+`calls`（含成功），对象名按固定公开 Windows 词表投影为形态：首个词表外组件
+（SID、盘符、镜像名等）之后全部为 `?`，纯数字只遮蔽自身，仍属闭集，不上传原文。
+独立隐私审查以 18 个对抗性名字核对无原文外泄，并据其意见收紧遮蔽与 ASCII 匹配。下一次定点运行只回答：两次
+ACCESS_DENIED 的 HKLM 键是什么，以及 KernelBase 初始化失败前最后完成的被观察
+操作是哪些；若最后操作只是映射 KernelBase，则说明其 DllMain 的失败点不在当前
+14 个 API 内，需要另行扩大观察集合。相关九个文件 74/74、0 skip。
+
+运行 [44058284863](https://github.com/ofoxai/ofox-desktop/actions/runs/44058284863)
+（`7faf49e6`）再次完整配对 14 次调用，`firstRejection` 为空，按序为：
+`\Registry\Machine\SYSTEM\CurrentControlSet\Control\Nls\CodePage`（GENERIC_READ）
+及 `…\Control\Session Manager`（KEY_QUERY_VALUE）的 NtOpenKey 均 `0xc0000022`；
+`…\Session Manager\Segment Heap` 为 `0xc0000034`；随后 `\KnownDlls`、程序目录、
+kernel32/kernelbase 的 section 打开与映射、`\Sessions\?\Windows\?` section、
+NtConnectPort 及映射均成功；最后两项为 `\Device\ConDrv\Server` 与相对的
+`\Reference` 的 NtCreateFile，均成功。此后 KernelBase DLL_PROCESS_ATTACH 失败。
+
+两次注册表拒绝发生在 ntdll 早期且加载随即正常推进，不按原因处理。最后的被观察
+操作是为新控制台创建 ConDrv Server/Reference。Node 以 `CREATE_NO_WINDOW` 创建，
+需要新控制台；自 Windows 8 起控制台宿主 conhost.exe 由客户端在初始化期间作为
+自身子进程启动，而沙箱以 `PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` 限制子进程。
+当前推断：KernelBase 的控制台初始化无法创建 conhost 而失败。该创建调用不在
+14 个观察 API 内，因此尚属推断，未直接观测；产品创建标志暂不修改。
+
+为直接观测该推断，观察集合增加第 15 个固定入口 NtCreateUserProcess，按状态-only
+记录（不解释参数、不上传映像名）；断点范围、安装行数、`INSTALLED count` 与
+上传状态的行数上界都改为由同一定义表推导，范围外 ID 拒绝。下一次定点运行只回答：
+在 ConDrv Server/Reference 之后是否出现进程创建及其 NTSTATUS（预期子进程被
+策略阻止时为 `0xc000049d`）。若成立，再针对性修复启动标志；若未出现，则失败点在
+控制台初始化的其他步骤，继续缩小。相关九个文件 74/74、0 skip。
+
+运行 [44062635550](https://github.com/ofoxai/ofox-desktop/actions/runs/44062635550)
+（`fcb87187`）15 个入口断点全部安装核验通过，覆盖完整、`firstRejection` 为空；
+配对的 14 次调用与 44058284863 完全一致，ConDrv `\Reference` 之后**没有**任何
+NtCreateUserProcess 调用，KernelBase 随即初始化失败、0142 退出。因此“conhost
+创建被子进程策略阻止”的具体推断被否定：失败点仍在创建 ConDrv 句柄之后、任何
+进程创建之前，具体操作不在当前 15 个观察 API 内。启动标志与隔离条件均未修改；
+下一步需在扩大观察或无调试器的控制台模式对照之间选择。
+
+按用户选择，下一次定点运行做无调试器的控制台模式 A-B-A：A1/A2 与产品相同使用
+`CREATE_NO_WINDOW`，B 只改为 `DETACHED_PROCESS`（不分配控制台，因而不初始化
+ConDrv/conhost），capability、LPAC/token、子进程与映像策略、Job、输入和 profile
+均相同；A1 不能重现 0142 则不派 B。只有 A1/A2 均 0142、B exit0 且精确 marker、
+全部隔离证明与清理通过才记 supports-candidate，否则 inconclusive。`Detached`
+仅在 test cfg 存在，产品启动标志未改；开发工作流显式设置
+`OFOX_DOCUMENT_STARTUP_COMPARISON=detachedConsole`，并有测试固定该拼写及所在步骤。
+回执记录传给 CreateProcessW 的实际标志，A1/A2 须为 `0x08080404`、B 须为
+`0x0008040c`，Windows 单测将其绑定到 windows crate 常量；独立审查未发现严重问题。
+协议单测 5/5、相关 Node 九个文件 74/74 与工作流测试 19/19、0 skip；Windows 目标
+lib/test Clippy 交叉检查通过。原 CDB 观察与 registryRead 候选行为不变。
+
+运行 [44068121826](https://github.com/ofoxai/ofox-desktop/actions/runs/44068121826)
+（`ff5621b6`，推送工作流文件自动触发）调试器部分与上一轮一致，随后执行无调试器
+A-B-A：三组同一 profile/输入、token、LPAC AccessCheck、子进程/映像策略、完整性
+级别、Resume1 与清理全部核验一致，运行时摘要稳定。A1/A2 实际标志 `0x08080404`，
+均 `0xc0000142`、无输出；B 实际标志 `0x0008040c`，退出 `0x80000003`
+（STATUS_BREAKPOINT），stdout 0、stderr 48 字节。协议正确记为 inconclusive。
+
+由此以干预证实：0142 由 `CREATE_NO_WINDOW` 的控制台初始化路径引起，仅去掉控制台
+即越过 KernelBase 初始化。B 暴露第二层故障：Node 写出 48 字节 stderr 后以
+STATUS_BREAKPOINT 中止，这与 libuv/Node 致命错误调用 `DebugBreak()` 的表现
+一致，但内容未上传，尚不能定因。产品启动标志暂不修改：仅换标志仍不能让 Node
+运行，且调试器下的首个 Node 若触发断点异常会改变现有诊断的停止行为。
+
+下一次定点运行只补第二层故障的可见性：对照各组回执新增闭集 `stderrShape`，
+只给类别（empty/libuv-fatal/node-assertion/node-fatal/v8-fatal/icu/openssl/
+unknown）；libuv 致命错误仅在调用名属于固定 Win32/libuv 词表时附带该名和数字
+Win32 错误码，否则为 `?`/null，路径、PID 与消息原文均不上传。问题是：B 的
+48 字节 stderr 属于哪一类，若为 libuv 致命错误则是哪个调用、哪个错误码。独立
+隐私审查未发现泄露，据其意见改为逐行查找致命行、错误码限 i32 且无前导零。协议
+单测 6/6（含 RED→GREEN 的未知调用遮蔽与逐行查找），Windows 目标 lib/test Clippy 通过；
+A-B-A 判定、产品启动标志和隔离条件均未改。
+
+运行 [44071671054](https://github.com/ofoxai/ofox-desktop/actions/runs/44071671054)
+（`ec902a2e`）重复了上一轮的全部结果：调试器部分一致；A-B-A 三组隔离证明与清理
+一致，A1/A2 为 0142、stderr 为空；B（`DETACHED_PROCESS`）以 `0x80000003` 退出，
+`stderrShape` 为 libuv 致命错误 `WSAStartup`、错误码 10107（WSASYSCALLFAILURE）。
+内置 Node v22.23.4 的 libuv 1.51 在初始化时无条件调用 `WSAStartup`，失败即
+`uv_fatal_error` 写 stderr 并 `DebugBreak()`，与退出码一致。`WSAStartup` 不建立
+连接，只加载本地 Winsock 目录；此前观测到 LPAC 读取多处 HKLM 键被拒，但目录读取
+是否即为原因尚未验证。registryRead 的 A-B-A（44027445443）在 0142 处即失败、
+从未到达 `WSAStartup`，因此它对第二层故障的作用仍未知。产品标志与能力均未修改。
+
+下一次定点运行只回答：不分配控制台时，registryRead 能否让 `WSAStartup` 成功并使
+Node 正常运行。新增 test-only 候选 `detachedRegistryRead`：A1/A2 以
+`DETACHED_PROCESS` 和产品单一 runtime capability 启动，须精确复现 `0x80000003` 与
+`WSAStartup` 10107；B 只追加 registryRead。对照协议改为由候选声明基线启动与预期
+失败，stderr 检查按结果精确约束（0142 组为空、WSAStartup 组须为该分类、成功组
+为空，WSAStartup 组字节数须小于 1024 的读取上限以排除截断）。工作流候选切换为
+`detachedRegistryRead`；独立审查对全部 A/B 行组合核对未发现放宽，协议单测 9/9
+（含每个计划只改一个条件），Windows 目标 lib/test Clippy 通过。产品标志与能力均未修改；即使 B 成功，也只说明候选有效，
+采用前仍需评估 registryRead 的授权范围并通过无调试器功能门禁。
+
+运行 [44076224990](https://github.com/ofoxai/ofox-desktop/actions/runs/44076224990)
+（`eb41eab5`）调试器部分与此前一致；无调试器 A-B-A 记为 **supports-candidate**：
+A1/A2 以 `DETACHED_PROCESS` 和单一 runtime capability 启动，均精确复现
+`0x80000003` 与 `WSAStartup` 10107；B 只追加 registryRead，exit 0、stdout 为精确
+19 字节标记、stderr 为空。三组 token、LPAC AccessCheck、子进程/映像策略、Low
+完整性、Resume1、清理与运行时摘要均一致，profile/task 清理确认。
+
+至此两层根因均由干预证实：`CREATE_NO_WINDOW` 的控制台初始化使 KernelBase 失败
+（0142）；去掉控制台后，libuv 初始化必调的 `WSAStartup` 在 LPAC 下返回 10107，
+追加 registryRead 后 Node 正常运行。二者缺一不可（44027445443 单加 registryRead、
+44068121826 单去控制台均不足）。这是诊断结论，产品启动标志与能力尚未修改：采用
+registryRead 会扩大 LPAC 的注册表读取范围，须先由用户确认，并补私有注册表等隔离
+负例、Python/OfficeCLI 同标志验证、无调试器功能门禁与 Win10/11 客户端验收。
+
+## 产品修复（2026-11-17 用户批准）
+
+按已证实的两层根因修改产品沙箱，不调整版本、不发版：
+
+- 启动改为 `DETACHED_PROCESS`，stdio 仍为显式继承的管道；`CREATE_NO_WINDOW` 只
+  保留在 test cfg 供历史对照使用。不分配控制台不放宽任何权限。
+- 产品 capability 改为私有 runtime 加 Windows `registryRead`。令牌校验要求恰好
+  这两项、实际均启用且互不相同，并在校验时独立派生；runtime 单项只允许测试对照基线。
+- 新增每次启动的注册表隔离门禁：在挂起的实际 token 上先做正向对照（Winsock 目录键
+  可读当且仅当持有 registryRead，保证判定不是恒拒），再对 `HKCU\Environment`、
+  `HKCU\Software` 的真实 DACL 做 MAXIMUM_ALLOWED AccessCheck，任一授予查询或
+  枚举即拒绝启动；读取失败同样拒绝。证据只含固定键名与布尔值。
+- 新增原生测试：生产校验只接受生产集合；生产集合可读 Winsock 目录键，仅 runtime
+  不可读，两者用户键都拒绝；并遍历整个 HKCU，逐键比较两种 token 的读权限，要求
+  registryRead 不新增任何可读键。原 LPAC 控制测试改为两项 capability 并断言门禁证据。
+- 独立审查发现镜像交叉检查的全局 `allow(dead_code)` 掩盖了 release 构建的死代码
+  警告；已移除并复现、修复，同时补上 capability 实际启用校验与门禁正向对照。
+- 复审后：HKCU 遍历在键被删除时停止枚举并单独计数，按读权限位比较两种 token，
+  每次输出闭集计数；另以原始 token 证明正向对照在预期错误时必然拒绝。历史 A-B-A
+  工具保留，但其触发条件（生产路径 0142）在修复后不再成立，默认不会运行。
+- 调试器诊断改为显式 `OFOX_DOCUMENT_STARTUP_TRACE=1` 才启用，工作流移除对照设置，
+  使功能前置与完整 `windows_sandbox` 在无调试器下运行。
+
+本地验证：Windows 目标 lib/test Clippy（交叉检查）、rustfmt、Prettier 通过，CDB
+与开发检查相关 Node 测试 74/74、0 skip。上述都不是 Windows 原生证据；原生功能
+门禁、Python/OfficeCLI、完整 sandbox 套件、Windows Probe 与 Win10/11 客户端验收
+均待执行，Windows Python 能力保持关闭。
+
+运行 [44122597628](https://github.com/ofoxai/ofox-desktop/actions/runs/44122597628)
+（`26dee61c`，推送自动触发，无调试器）：ACL 1/1 通过；功能前置在任何引擎恢复
+之前被新门禁拒绝。LPAC 矩阵匹配、capability 恰为 2 项且启用、Winsock 目录键
+正向对照可读，但 `HKCU\Environment` 对实际 token 可读，门禁按设计拒绝启动，Node
+未被恢复。门禁拦下的是用户环境变量这一私有数据面，结论正确；但尚不知该读权限
+来自 registryRead 还是基础 LPAC，二者处理不同。
+
+下一次定点运行只回答这一点：开发检查在 ACL 与功能前置之间新增精确的“注册表隔离
+前置”，运行原生注册表测试，并在断言前输出闭集证据：生产集合与仅 runtime 集合
+对三个固定键的读取结果、两者的 verify_token 与门禁结果，以及整个 HKCU 遍历中
+基础 LPAC 可读、生产可读和 registryRead 新增的键数。不改产品逻辑；Windows
+Python 能力保持关闭。
+
+运行 [44133006077](https://github.com/ofoxai/ofox-desktop/actions/runs/44133006077)
+（`f3529780`）回答了上一轮的问题：读权限**来自 registryRead**。三个固定键
+（Winsock 目录、`HKCU\Environment`、`HKCU\Software`）对生产 token 均可读，对仅
+runtime token 均不可读；门禁四种组合中只有“仅 runtime 且不期望 registryRead”
+通过，生产校验因此拒绝。HKCU 根键同样只在 registryRead 下可读。由此 registryRead
+不只扩大 HKLM 只读范围，也让 LPAC 读取当前用户的注册表；这超出了批准修复时
+所述的范围，门禁拒绝是正确的，产品维持拒绝状态。
+
+同一运行暴露测试缺陷：HKCU 遍历打开键时未申请 KEY_QUERY_VALUE，导致
+`RegQueryInfoKey` 失败，13 个键中 12 个被误计为已消失，遍历提前结束。已在本地
+修正（打开时一并申请查询权限）；该遍历尚未取得有效全量结果。下一步需由用户在
+“接受 registryRead 的 HKCU 读取”与“改用更窄的 Winsock 授权或运行时”之间决定。
+
+按用户选择，下一次定点运行测试更窄的 Winsock 授权，不改产品：新增 test-only 候选
+`detachedWinsockGrant`。A1/A2 以 `DETACHED_PROCESS` 和单一 runtime capability 启动，
+须复现 `WSAStartup` 10107；B 同样只持有 runtime capability，但在其运行期间临时为该
+capability 在 Winsock 目录根键加可继承的 KEY_READ ACE，结束后写回原 DACL，并以
+SDDL 逐键核对整棵目录子树完全复原；复原未证实即不支持。独立审查指出的四项（候选
+变量泄漏到完整套件导致二次授权、CI 限制放错层、失败复原不重试、只核对两个键）均已修正。门禁的
+Winsock 正向对照改为“本次是否应可读”，HKCU 用户键必须拒绝不变。该候选只在
+显式请求且 `GITHUB_ACTIONS=true` 时由独立用例执行，开发检查在 ACL 后插入此步骤。
+问题是：不授予 registryRead、只放开 Winsock 目录读取，Node 能否正常运行。
+
+运行 [44142596063](https://github.com/ofoxai/ofox-desktop/actions/runs/44142596063)
+（`ad9aa76d`，推送自动触发）：ACL 1/1；`launch-comparison` 记为 inconclusive。
+`winsockGrantApplied=true`，B 的 `grantRestored=true`（整棵 Winsock 目录子树 SDDL
+逐键复原）。B 的 token 校验通过，即门禁正向对照看到授权下 Winsock 目录根键可读、
+HKCU 仍拒绝；但 B 与 A1/A2 一样以 `0x80000003` 退出，`stderrShape` 同为 `WSAStartup`
+10107。三组隔离证明、清理与运行时摘要一致。
+
+结论：仅放开 `WinSock2\Parameters` 子树不足以让 `WSAStartup` 成功；registryRead
+授予的范围中还有它需要的其他读取，目前未知。产品维持拒绝状态，不改 capability。
+下一步候选：用已验证的 Nt 观察器在“无控制台、仅 runtime”的 Node 上记录 libuv 中止前
+失败的系统调用与对象形态，以确定缺失的读取，再判断窄授权是否仍可行。
+
+按用户选择，下一次定点运行追踪失败的读取，不改产品。问题是：在 Winsock 目录可读
+（CI 专用临时 ACE）、无控制台、仅 runtime capability 的条件下，`WSAStartup` 内部
+哪一个被观察的操作被拒绝，或被观察的操作是否全部成功。做法：调试器诊断改为 ACL
+之后独立的 `startup-trace` 步骤，被观察的第一个 Node 改用上述配置，令牌门禁要求
+目录可读、HKCU 用户键拒绝；授权在进程与调试器结束后写回，并要求整棵子树逐键复原。
+观察器新增 `NtEnumerateKey`、`NtQueryKey`、`NtNotifyChangeKey`、
+`NtNotifyChangeMultipleKeys` 四个只记状态的接口，上限由 256 提高到 1024，以免
+`WSAStartup` 之前的加载调用耗尽配额；另在 primary thread 上为 `ws2_32!WSAStartup`
+设置延迟断点，报告进入前已有的调用数、返回时的调用数和返回值，并为区间内每次
+调用标记 `insideWsaStartup`。对象形态新增 Winsock 目录、Tcpip 及用户配置单元的公开
+名称；用户 SID、包 SID 只输出固定记号。已知限制：libuv 中止时触发的断点异常会让
+进程停在调试器中，直到跟踪专用的 60 秒超时由 Job 结束（调试器侧等待放宽到 75 秒），
+此前的记录不受影响；若 `WSAStartup` 不在 primary thread 上调用，区间标记不会出现，
+其余调用记录仍完整。未观察的接口（如 `NtEnumerateValueKey`、`NtCreateEvent`）上的
+拒绝不会显示，此时结果为区间内全部成功。跟踪测试同时断言授权复原与完整的调试器
+证明，因此该步骤通过即表示跟踪确实接上；结论仍以 `step.trace` 为准。独立审查的
+其余意见（入口线程校验、旧上限文字、功能测试里已不可达的对照分支）已处理。
+
+运行 [44221172203](https://github.com/ofoxai/ofox-desktop/actions/runs/44221172203)
+（`7977584b`，推送自动触发）：ACL 1/1；`startup-trace` 1/1 通过，即授权已施加并逐键
+复原（`winsockGrantApplied=true`、`winsockGrantRestored=true`），调试器完整证明成立
+（配置确认、attach 前与 continue 后均 `1→配对2`、原 Host Resume1、调试器已关闭）；
+随后注册表隔离前置按已知原因失败。令牌：1 个 capability，门禁看到 Winsock 目录可读、
+HKCU 两键拒绝。19 个观察点安装校验通过，主线程 71 次调用全部配对
+（`complete-for-fixed-set`），全部发生在 DLL 映射阶段：早期 HKLM 拒绝与之前相同；
+`dbghelp`、`iphlpapi`、`userenv`、`winmm`、`cryptbase` 等不在 KnownDlls 中，改从系统
+目录打开并映射成功。此后主线程再无被观察的调用，没有 DllMain 的注册表读取，
+`WSAStartup` 区间未出现；进程 stdout/stderr 均 0 字节，60 秒超时后由 Job 结束。
+
+结论：本次未回答 `WSAStartup` 的问题。同一配置在不挂调试器时（44142596063 的 B）
+会走到 `WSAStartup` 并报 10107，说明这次停顿由调试器引入。调试器提示符行比预期多
+1 行，推断调试器在映射完成后停下一次并冻结了目标，最可能是默认中断的首次机会异常
+（例如仅在被调试时才会抛出的无效句柄异常）；具体事件未被投影，尚未证实。
+
+独立复核给出更具体的推断：CDB 附加会让目标 PEB 的 `BeingDebugged` 为真，加载器因此在
+静态导入全部映射之后、任何 DllMain 之前执行调试器断点（`LdrpDoDebuggerBreak`，一条
+int3），默认会停下。这与“71 次调用全在映射阶段、无 DllMain 读取、提示符多 1 行”一致；
+此前挂调试器的运行都在 kernel32 初始化时即以 0142 结束，走不到这一步。尚待原生证实。
+
+下一次定点运行仍回答同一个问题（Winsock 目录可读时 `WSAStartup` 内部哪一个被观察的操作被拒），
+只消除调试器干扰：初始断点、断点异常和各类异常改为只记录不中断，保留各自的默认处理
+（断点按已处理继续，加载器断点正常返回；libuv 末尾的 `DebugBreak` 会继续到 `abort()`，
+进程直接退出而不再等超时）；无效句柄异常仅在被调试时才会抛出，设为已处理以等同未挂
+调试器。报告新增闭集的调试器事件（异常码、首次／二次、是否主线程、发生在第几次调用之后）
+和停顿位置，用于证实或否定上述推断。若调试器自设的观察断点意外受影响，调用数会为 0 并判为
+inconclusive，不会被误读。
+
+运行 [44226276948](https://github.com/ofoxai/ofox-desktop/actions/runs/44226276948)
+（`4fbd9fb2`，手动派发）：ACL 1/1；`startup-trace` 1/1 通过（授权已施加并逐键复原，
+调试器完整证明成立）；注册表隔离前置按已知原因失败。被跟踪的 Node 不再冻结：约 16 秒后
+写出 48 字节 stderr（与无调试器时 `WSAStartup` 10107 致命信息的长度一致，但未取得
+形态），随后调试器私有日志超过 4 MiB 上限，控制器以 `output_bound` 结束 CDB，进程因
+调试端口删除以 `0xC0000354` 退出；跟踪未能解码（`trace-decode-incomplete`），连调试器
+状态也一并丢失。
+
+结论：放行加载器断点后进程确实越过了上次的停顿点，且很可能走到了 `WSAStartup`；但
+本次未取得调用记录，问题仍未回答。超限原因推断为持续开启的加载器快照（loader snaps）
+调试输出：上次停在映射阶段时已有约 1700 行，此次覆盖了整个启动。另有两处放大：控制器
+按每行 1 字节计数换行，而 Windows 写入 CRLF，使文件大于计数并超过读取上限；解码失败时
+已读到的调试器状态未保留。
+
+下一次定点运行仍回答同一个问题。改动：被调试程序的调试输出事件不再记录（`sxi out`；
+快照开关与其读回证明不变，这不是异常设置）；日志改用 LF 并为控制器自身记录预留
+64 KiB，使文件不超过 4 MiB；解码失败时仍保留调试器状态（字节数、行数、阶段）。
+
+运行 [44228529933](https://github.com/ofoxai/ofox-desktop/actions/runs/44228529933)
+（`c2cf45a9`，手动派发）：ACL、`startup-trace` 通过（授权逐键复原、调试器证明成立），
+注册表隔离前置按已知原因失败。进程同样约 15 秒写出 48 字节 stderr 后，日志再次触及上限，
+CDB 被结束，进程以 `0xC0000354` 退出。日志这次留在读取上限内，调试器状态得以保留：
+4128772 字节、66114 行；提示符 63 行，恰为 62 条命令回显加 1 条粘连，即调试器全程未停。
+关闭被调试程序输出后体量几乎不变，上一轮“加载器快照撑满日志”的推断不成立。66114 行
+超过加载器快照投影的 50000 行上限，原始 Host 证明判为未验证，调用记录未解析。
+
+当前推断：libuv 致命错误后执行 `DebugBreak()`，而断点异常被设为只记录、按已处理继续；
+调试器不停下就不会越过该 int3，目标原地反复执行，每次产生一条首次机会通知，十余秒灌满
+日志。加载器断点被归为初始断点，调试器另有处理，所以能顺利越过。由此推断 `WSAStartup`
+区间的调用已写入日志，只是随洪水一起被丢弃。
+
+下一次定点运行仍回答同一个问题。改动：断点异常（非调试器自设断点）改为按未处理交还目标
+（`sxd -h bpe`，只改处理方式），libuv 的 `DebugBreak` 因而走到未处理异常并以 `0x80000003`
+结束，与未挂调试器一致；加载器快照投影的行数上限改为随 4 MiB 字节上限（按 16 字节一行）
+计算。这样即便仍出现洪水或二次机会停顿，它们也发生在 `WSAStartup` 之后，日志仍可解析，
+洪水中的异常只计入总数。
+
+运行 [44231498872](https://github.com/ofoxai/ofox-desktop/actions/runs/44231498872)
+（`b2d12b4d`，手动派发）**回答了问题**。ACL、`startup-trace` 通过（授权逐键复原、调试器
+证明成立），注册表隔离前置按已知原因失败。日志可解析：主线程 124 次调用全部配对
+（`complete-for-fixed-set`），`winsockStartup` 为 `returned`，进入前 120 次、返回时 121 次，
+返回值 **10107**。区间内只有一次被观察的调用：第 121 次 `NtOpenKeyEx`，对象为
+**`\Registry\Machine`（HKLM 根键本身）**，访问掩码 `0x2000000`（MAXIMUM_ALLOWED），
+返回 `0xC0000022`。这是 Windows 把预定义句柄 `HKEY_LOCAL_MACHINE` 映射为真实句柄的一步；
+它失败后 `ws2_32` 根本到不了 Winsock 目录，所以只放开目录子树（44142596063）无效。
+调试器事件同时证实了之前的推断：第 71 次调用后主线程出现首次机会 `0x80000003`
+（加载器调试器断点）；第 124 次后依次是 libuv `DebugBreak` 的首次、二次机会 `0x80000003`，
+以及 `abort()` 快速失败的二次机会 `0xC0000409` 反复通知（共 21731 条，在 `WSAStartup`
+之后，已不影响解析）。同一启动中其他组件也多次以 MAXIMUM_ALLOWED 打开 HKLM 根键或
+`\Registry\User\<user-sid>` 被拒，但不致命。
+
+结论：LPAC 下 `WSAStartup` 需要能打开 HKLM 根键。Windows 默认只通过 registryRead
+capability 向 LPAC 授予 HKLM 根键读取（并经继承覆盖大部分 HKLM），同一 capability 也
+覆盖当前用户 HKCU（44133006077）。不授予 registryRead 的窄方案必须修改 HKLM 根键的
+机器级 ACL（另加 Winsock 目录子树），需要管理员权限；而当前安装包为按用户安装
+（`wix/per-user-main.wxs`），安装时没有管理员权限。产品维持拒绝状态，下一步由用户
+在“接受 registryRead 的 HKCU 读取”“提权修改机器 ACL”“自建 Node/libuv”之间决定。
+
+用户决定（2026-11-18）：接受 registryRead。生产令牌维持 {runtime, registryRead}、
+无控制台启动；门禁改为按 `RegistryScope` 判断：生产要求 HKLM 根键与 Winsock 目录均可读
+（正向对照对齐跟踪结论），用户 `Environment`、`Software` 两键每次照常在实际挂起令牌上
+测量，但可读不再拒绝（已接受的残余风险，写入 `docs/known-limitations.md`）；任何测量
+失败仍拒绝，结果只在可信探针证据中保留。测试专用的仅 runtime 令牌保持负对照：HKLM 根键
+与用户键必须拒绝，目录只在 CI 临时授权下可读。原生前置改名为
+`document_registry_scope_is_measured_and_adds_no_write_rights`（开发检查步骤
+`registry-scope-prerequisite`）：固定四键中仅 runtime 令牌一个都读不到；HKCU 遍历比较
+读写权限，读取差异只计数（此前运行：3510 键，仅 runtime 可读 4 个、生产 1802 个），
+registryRead 不得新增任何写权限。开发工作流去掉跟踪开关，下一次运行不挂调试器，依次验证注册表范围
+前置、Python／OfficeCLI 功能前置与完整 `windows_sandbox`。Windows Python 能力仍关闭。
+
+2026-11-18 推送前的产物检查在 macOS 合成回归中复现了两处泄漏：步骤日志逐块复制 Cargo
+stdout/stderr，可选 CDB 报告包含进程、线程标识及词表外模块名。开发入口现逐个列出允许
+上传的文件，并从两个私有输出流中校验测试计数及按固定字段生成步骤日志。注册表收据保留
+四键、两种令牌的结果与 HKCU 遍历计数，功能失败保留可识别阶段、原生状态、源码位置与检查点。
+CDB 仍用实际标识完成配对，可选跟踪的收据另保留机器 ACL 的复原结果。使用 bundled Node
+22.23.4 运行文档 JS 回归 90/90 通过，独立复审通过。这些是本地证据。
+
+下一次 Windows Server 2022 定点运行只回答：接受 registryRead 后，在不挂调试器的情况下，
+注册表范围、Node／Pyodide／OfficeCLI、逃逸拒绝及其余开发门禁能否全部通过？Windows
+原生结果待验证。
+
+运行 [44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
+（`08f9f0c7`，push，第 1 次，Windows Server 2022）通过 ACL 和注册表范围前置。
+四种门禁结果为 `[true,false,true,false]`。生产令牌可读四键，仅 runtime 均不可读；
+宿主成功以 READ_CONTROL 打开 HKLM 根键。HKCU 遍历 3504 键，生产可读 1802、仅 runtime
+可读 4、新增可读 1798；两种令牌各可写 3 键，新增写权限和测量错误均为 0。
+
+功能前置在 `node_isolation` 超时，stdout 为 0 字节，stderr 为 168 字节，最后检查点为 7。
+Node 已执行隔离脚本并完成前面的文件与环境检查，停在子进程拒绝检查区间；Pyodide、OfficeCLI、
+完整 sandbox、附件及 Host 步骤均未执行。下载的 artifact 仅含 summary 与三个固定步骤日志。
+
+该区间原先使用 `spawnSync` 默认 stdio。Node 22.23.4 附带的 Windows libuv 在创建进程前
+先建立命名管道，建管道若遇到 ERROR_ACCESS_DENIED 会持续换名重试。这是与超时相符的
+源码解释，本次运行没有该调用的原生跟踪。
+[libuv 管道实现](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/pipe.c#L194-L219)
+和 [stdio 准备顺序](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/process.c#L945-L952)。
+
+候选修复让固定受限子进程探针继承宿主已提供的 stdio。只有明确的权限错误、未创建进程、
+无退出状态或信号且标记文件不存在时，该断言才通过。超时、未知或其他错误均拒绝，并将
+结果投影为闭集类别。本地回归含未受限子进程确实能写标记的正对照；原生结果待验证。
+下一次定点运行只回答：继承现有 stdio 后，检查点 7 能否取得明确的子进程拒绝证据，
+并使无调试器功能前置继续至后续检查？
+
+运行 [44242608733](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733)
+（`1570af28`，手动，第 1 次，Windows Server 2022）中，ACL 和注册表范围前置通过。
+四种门禁依次为 `[true,false,true,false]`。生产令牌可读四键，仅 runtime 四键均不可读。
+遍历 HKCU 3509 键，生产可读 1802、仅 runtime 可读 4，两者各可写 3，新增写权限和测量错误均为 0。
+
+继承已有 stdio 后，Node 在检查点 7 返回 `UNKNOWN`，进程退出码为 1，未超时。
+功能前置失败（Cargo 101）。该结果无法识别底层 Windows 错误，也不能证明子进程策略已阻止请求。
+Pyodide、OfficeCLI、完整 sandbox、附件及 Host 回归均未运行。
+
+下一次 Windows Server 2022 定点运行要回答：对该次 `UNKNOWN`，Windows 是否为这一个
+Node 进程、主线程和固定子进程命令记录了唯一的 KernelMode 子进程阻止事件（ID 4）？
+开发控制器仅在上述失败时查询现有日志。事件匹配只补充诊断证据，功能前置仍保留原退出码。
+未匹配、无法查询或无法核对命令都不足以判断原因。微软列出了子进程阻止及审计各自的事件 ID。
+[Microsoft Learn](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection)
+
+运行 [44245924637](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
+（`0ba77d22`，push，第 1 次，Windows Server 2022）通过 ACL 和注册表前置。
+四种门禁依次为 `[true,false,true,false]`。HKCU 遍历 3503 键，生产可读 1798、仅 runtime
+可读 4，两者各可写 3，新增写权限和测量错误为 0。功能前置在检查点 7 返回 `UNKNOWN`，
+Node 退出 1，未超时；其余原生步骤未执行。
+
+`childBlockEvent=no-match` 表明通道已启用、控制器取得了进程身份，但没有可归属的阻止事件。
+原查询把 PID 作为检索条件，查询返回零条和返回记录后无法核对身份共用该结果。此次产物无法
+区分这两种情况，也无法确认触发 `UNKNOWN` 的 Windows 错误。功能门禁继续拒绝。
+
+下一次 Windows Server 2022 定点运行要回答：这个 Node 进程从创建到退出的窗口内，通道中
+有无事件 4？若有，能否逐项核对调用者、进程创建时间、主线程与固定请求？
+开发诊断从同一已退出进程的句柄取得窗口，在运行器内检查候选记录，仅上传闭集结论。
+缺失、身份不符、匹配与查询错误均保留原功能前置的退出码。
+
+运行 [44249750166](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
+（`4713db57`，手动，第 1 次，Windows Server 2022）通过 ACL 和注册表前置，各 1/1。
+四种门禁依次为 `[true,false,true,false]`。生产令牌四键均可读，仅 runtime 均不可读。
+HKCU 遍历 3503 键，生产可读 1798、仅 runtime 可读 4，新增可读 1794。两者各可写 3，
+新增写权限和测量错误均为 0。
+
+功能前置在 `node_isolation` 检查点 7 返回 `UNKNOWN`，Node 退出 1，未超时，Cargo 退出 101。
+`childBlockEvent=no-event-in-window` 表示严格查询正常结束，在这个固定 Node 进程从创建
+到退出的精确时间内，KernelMode 通道没有事件 4。产物含 summary 和三个步骤日志。
+Pyodide、OfficeCLI、完整 sandbox、附件和 Host 回归均未执行。
+
+事件查询已回答本轮问题。要定位 `UNKNOWN`，还缺同一次固定请求的 Windows 调用结果：
+libuv 是否到达 `CreateProcessW`，若发生失败，转换成 libuv 错误之前的 Windows 错误是哪一类。
+现有 WSAStartup 专用 CDB 配置使用仅 runtime 的令牌并临时授权 Winsock 子树，复用该配置
+无法回答生产令牌上的问题。
+
+### 检查点 7 的 CI 专用观测
+
+下一次 Server 2022 定点运行要回答一个问题。复现检查点 7 的 `UNKNOWN` 时，固定
+请求是否进入内置 Node 实际导入的 `CreateProcessW`，调用返回时主线程的
+Win32 错误属于哪一类？
+
+`Document Engine Child Call Diagnostic` 只在开发分支运行一个 Rust 测试。它沿用
+生产启动器、令牌、Job 和 ACL。测试在原请求前等待调试器就绪，并在继承的 stdin
+回到 EOF 后继续。CDB 须与 Node 的实际导入地址核对，入口须匹配原来的子程序和参数，
+返回须匹配同一主线程及调用栈。运行器还核对请求前后标记、Node 的原始失败和清理结果。
+调用计数为零且观察完整时才报告 `not-reached`。证据不足时只记录
+`inconclusive` 和固定阶段。该诊断的结论不参与引擎准入。
+
+首次推送新增工作流文件会自动触发这一个诊断。其产物
+`document-child-call-<SHA>-<attempt>` 只收录 `summary.json` 和
+`child-call-trace.log`。两者只包含诊断类别和状态，调试器原文不落盘。
+
+本地已用校验过归档 SHA256 的 Windows x64 Node 22.23.4 核对 PE 导入项，并独立复审。
+文档相关测试 101/101 通过，覆盖断点插入失败、错误行与提示符粘连、入口与返回不配对、
+产物拒绝原文等情形。macOS Rust 测试 4555 项通过、28 项忽略，Windows 目标的
+生产和测试配置 Clippy 均通过。Server 2022 上这次调用是否命中及其结果仍待验证。
+
+运行 [44262693781](https://github.com/ofoxai/ofox-desktop/actions/runs/44262693781)
+（`f5ed73ce`，push，第 1 次，Windows Server 2022）通过生产运行时准备和依赖完整性检查。
+独立诊断失败。上传的两份文件均已核对，结论一致，`diagnosticRecorded=false`、
+`verdict=inconclusive`、`incompleteStage=last-error`。
+
+控制器只有在核对固定请求的程序及参数、配对同一主线程的返回地址和栈位置，并看到
+`CreateProcessW` 返回 0 后，才会进入 `last-error`。因此本次能确认受观测的调用确实
+到达并返回失败。产物不足以区分旧读取器缺值、格式不同或读到零，也没有完整收据可供
+核对本次 Node 最终状态。此前无调试器门禁在检查点 7 得到的 `UNKNOWN` 仍按失败处理。
+
+下次独立运行要回答：在该返回点，用与系统 ntdll 匹配的符号直接读取同一线程的
+`LastErrorValue`，能否得到非零的 Win32 错误类别，并完成固定请求、Node 结果和清理的全部核对？
+控制器在宿主临时目录内调用签名的 SymChk，只为固定系统 ntdll 准备符号。CDB 离线核对
+字段大小，从匹配的失败返回分支读取一个 DWORD。缺值或零仍使诊断失败，上传文件只含闭集类别。
+[微软调试器的类型化线程字段说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/c---numbers-and-operators)
+
+本地回归先复现旧解析器丢失固定数值记录，以及 CDB 表达式报错先于固定标记时丢失失败阶段。
+修正后文档诊断测试 101/101 通过。Windows 目标的两种 Clippy 配置、独立复审和 macOS
+全目标 Clippy 均通过。macOS Rust 测试 4555 项通过、28 项忽略，前端 3377 项通过、1 项跳过。
+新读取方式尚待原生运行。
+
+### Windows 11 普通桌面的功能前置
+
+在 Windows 11 家庭版 25H2 x64（26200.9974）上，从 bundle 核对提交
+`d1af0ec44a5383a410952b1b75b1784dc9e9fcaa`。以下运行都使用同一测试二进制和
+内置 Node 22.23.4。每次只执行普通主机用例
+`document_lpac_proves_python_office_and_escape_denials`，调试器和 CI 诊断均未启用。
+
+1. SSH 服务会话使用管理员令牌。四个注册表键可读，LPAC 令牌检查通过；
+   Node 在第一个检查点之前以 `0xc0000142` 退出，未超时，也没有输出。
+   仅凭退出码无法确定此次初始化失败的具体位置。
+2. 同账户的交互桌面使用普通权限令牌。Node 到达检查点 7，固定子进程请求返回
+   `UNKNOWN`，Node 退出 1，未超时。Job 活动进程归零，任务目录和 AppContainer
+   配置文件均已清理。运行窗口内有一条 KernelMode 事件 4，调用进程、主线程、
+   子程序映像和固定参数都吻合。此次功能测试自身未记录进程创建时间和退出时间。
+3. 再次在普通桌面运行同一用例，验证上述内核事件能否归属到该次 Node 实例。宿主仅对
+   已核对映像的 Node 保留查询句柄，读取创建和退出时间。精确生存窗口内只有一条
+   KernelMode 事件 4。事件里的调用进程创建时间与句柄值精确一致，调用进程、主线程、
+   目标映像及固定参数全部匹配。Win11 内核确实阻止了这次固定请求。Node 仍在
+   检查点 7 返回 `UNKNOWN`，退出 1，未超时。Job 归零，任务目录及配置文件均已清理。
+   [微软对事件 4 的定义](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection#review-exploit-protection-events-in-windows-event-viewer)
+
+从 SSH 切到桌面时同时改变了会话和权限，无法区分各自对初始化的影响。普通桌面运行复现了
+Server 2022 的检查点 7 结果。功能前置仍失败，后续隔离检查、Pyodide 和 OfficeCLI
+尚未执行。事件 4 不含 `CreateProcessW` 返回点的 Win32 错误码。内置 libuv 会将未映射的
+错误归为 `UV_UNKNOWN`，无法从 Node 结果反推原值。Server 2022 的原始错误仍待独立诊断。
+[Node 22.23.4 的 libuv 错误映射](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/error.c#L153-L167)
+
+### Server 2022 检查点 7 的原始错误码复核
+
+运行 [44437664975](https://github.com/ofoxai/ofox-desktop/actions/runs/44437664975)
+（`d1af0ec4`，手动，第 1 次）要确认固定请求的 `CreateProcessW` 失败返回点上，
+同一线程记录的原始 Win32 错误。生产运行时准备和完整性检查通过，独立诊断失败。
+已核对产物 SHA-256，`summary.json` 和 `child-call-trace.log` 均记录
+`diagnosticRecorded=false`、`verdict=inconclusive`、`incompleteStage=cleanup`。
+
+诊断宿主在终止调试工具的 Job、等待控制器退出、确认该 Job 归零、移除私有临时目录
+四项中任一项出错时，只报告 `cleanup`。该分支会覆盖此前的观测结果或失败阶段。
+现有回执无法区分哪一项失败，也无法判定此次是否读到了错误码。Server 2022 的原始
+错误码仍待验证，Win11 的事件 4 无法补足这个数值。此次仅运行独立诊断。
+
+运行 [44441881312](https://github.com/ofoxai/ofox-desktop/actions/runs/44441881312)
+（`e17de183`，手动，第 1 次）分别记录清理前的控制器状态和四项清理结果。
+生产运行时准备通过，两份产物的内容一致且归档 SHA-256 已核对。整次诊断失败。
+清理前处于 `exit`，缺少控制器结论。工具 Job 终止、控制器回收、Job 归零均成功，
+仅私有临时目录删除失败。这些记录不足以确认原始 Win32 错误码、删除错误的原因或持有者。
+
+Win11 25H2 对照使用同版本 Rust 1.95 和 `tempfile 3.27.0`。在独立临时目录内，
+普通文件和只读文件都被 `TempDir::close()` 成功删除；保持文件以独占方式打开时，
+该操作失败，关闭句柄后测试目录可完整回收。此对照只描述该 Win11 主机上的行为。
+
+运行 [44446009244](https://github.com/ofoxai/ofox-desktop/actions/runs/44446009244)
+（`fc77b6b4`，手动，第 1 次）分别核对进程调用的配对返回和目录删除的原始错误类别。
+两份产物一致，归档 SHA-256 已校验。生产运行时准备通过；诊断为
+`inconclusive`，清理前为 `return-pair`，回执中没有 `pairedReturn` 或
+`controllerVerdict`。该阶段可以表示配对未完成，也可以表示后续记录与已有配对矛盾。
+本轮无法判定哪种情形发生，检查点 7 的 Win32 错误码仍未知。
+
+工具 Job 终止、控制器回收和 Job 归零成功，删除私有临时目录失败。
+`scratchRemovalError=access-denied` 唯一对应目录删除操作的 Win32 错误 5。
+产物没有记录根目录或哪一个子项触发拒绝。此前 Win11 独占普通文件对照的删除错误是
+32；该场景尚不能解释 Server 2022 的错误 5。本轮未执行无调试器功能门禁。
+
+随后在 Win11 25H2 上使用 Rust 1.95 的 `std::fs::remove_dir_all` 做文件系统对照。
+普通目录、仅根目录带只读属性、仅嵌套目录带只读属性，三组均删除成功，并分别确认目录已消失。
+在这台主机上，单独设置目录只读属性未复现 Server 2022 的删除错误 5。
+
+在 Win11 25H2 x64 上，已核对本地候选 `2be96f85` 的完整 SHA 和 bundle SHA-256。
+使用内置 Node 22.23.4 和 Windows PowerShell 5.1.26100.9818，协议回放和产物校验
+6/6 通过，Rust 1.95 控制器定点用例 1/1 通过。回放覆盖返回点的单行读数、缺失退出记录
+及旧格式记录。出现后续矛盾或观测工具报错时，分别记录 `return-conflict` 或
+`return-observer-error`，两者均撤销配对类别。本次仅验证协议，未测得原始 Win32 错误码。
+
+运行 [44450426997](https://github.com/ofoxai/ofox-desktop/actions/runs/44450426997)
+（`2be96f85`，Server 2022，手动，第 1 次）通过生产运行时准备和完整性检查。
+归档 SHA-256 已核对，`summary.json` 与 `child-call-trace.log` 两份记录一致。
+清理前的阶段为 `return-observer-error`。宿主只有在已收到固定调用的配对结果后才接受
+这一阶段。后续观测出错使该结果失效，回执没有 `pairedReturn` 或 `controllerVerdict`。
+这一阶段不能识别具体的工具错误，也不能还原已撤销的返回类别。
+
+工具 Job 终止、控制器回收及 Job 归零均成功；私有临时目录删除再次返回错误 5。
+整次独立诊断失败，检查点 7 的原始 Win32 错误码仍未知。无调试器功能门禁尚未通过。
+
+用本次提交的 PowerShell 解析器离线回放：在配对结果送达后，分别于 `EXIT_PAIRED` 之前
+和之后注入断点错误、语法错误、命令文件读取错误，六种情况都得到 `return-observer-error`。
+两个位置注入显式矛盾记录均得到 `return-conflict`。本次 Actions 作业日志也未收录返回数值行
+或退出标记，现有记录无法判定出错时是否已看见 `EXIT_PAIRED`。
+
+本地候选 `9717e783` 为后续观测补充 `observerError`。仅在收到唯一完整的原生失败回执、
+已撤销配对且错误可分类时，记录退出标记前后及断点、语法、命令文件读取三类原因。
+Win11 25H2 已核对 bundle 摘要和完整提交，PowerShell/JS 回放与产物校验 6/6，Rust 控制器
+定点用例 1/1。测试覆盖文件名中含 `breakpoint` 时仍正确归类为命令文件读取错误。
+本次验证没有启动 CDB，之前 Server 2022 产物的错误归属和原始 Win32 数值仍无法恢复。
+
+
+### Server 2022 后续结果
+
+上述记录保留各次运行当时的结论。后续 Server 2022 运行
+[44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
+取得固定调用的配对 Win32 错误 367。针对私有临时目录的清理修复随后通过
+[44531568236](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236)。
+完整功能门禁、Win11 对照和安装版验证范围见[文档引擎开发诊断](windows-testing.md#文档引擎开发诊断)。

@@ -7,8 +7,8 @@
 use super::{
     catalog::{self, Model},
     host::{
-        self, blocking, local_gateway_allowed, scrub_secrets_in, AssistantHost, Identity,
-        RunControl, Runtime, CANCELLED, PROTOCOL, STDIO,
+        self, blocking, scrub_secrets_in, AssistantHost, Identity, RunControl, Runtime, CANCELLED,
+        PROTOCOL, STDIO,
     },
     process,
     projection::recount_usage,
@@ -257,7 +257,7 @@ impl AssistantHost {
             "apiKey": key,
             "apex": apex,
             "baseUrl": base_url,
-            "allowLocalGateway": local_gateway_allowed(&base_url),
+            "allowLocalGateway": self.env.allows_local_gateway(&base_url),
             "proxy": proxy,
             "userText": job.input.question,
             "replyText": job.input.reply,

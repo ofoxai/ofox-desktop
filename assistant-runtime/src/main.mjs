@@ -1,9 +1,11 @@
+import { markStage, traceRuntime } from "./runtime-diagnostics.mjs";
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AssistantRuntime } from "./runtime.mjs";
 import { LINE_LIMIT, oversizedReplyId } from "./ipc.mjs";
 import { errorMessage, redact, scrubSecrets } from "./security.mjs";
+import { scrubTaskPlan } from "./task-plan.mjs";
 
 const { version: sdkVersion } = JSON.parse(
   await readFile(
@@ -18,12 +20,39 @@ const { version: sdkVersion } = JSON.parse(
 const pending = new Map();
 // Frames carry conversation content: only the exact run credentials go.
 // Error text in them was already scrubbed as a diagnostic.
-const write = (value) =>
-  process.stdout.write(
-    JSON.stringify(scrubSecrets(value, [...runtime.secrets])) + "\n",
-  );
+const write = (value, method) => {
+  const secrets = [...runtime.secrets];
+  let safe = scrubSecrets(value, secrets);
+  if (value.method === "event" && value.params?.type === "task_plan")
+    safe = {
+      ...safe,
+      params: {
+        ...safe.params,
+        data: { steps: scrubTaskPlan(value.params.data.steps, secrets) },
+      },
+    };
+  else if (
+    value.method === "event" &&
+    value.params?.type === "run_end" &&
+    ["completed", "stopped", "error"].includes(value.params.data?.status)
+  )
+    safe = {
+      ...safe,
+      params: {
+        ...safe.params,
+        data: { ...safe.params.data, status: value.params.data.status },
+      },
+    };
+  else if (
+    ["run", "compact"].includes(method) &&
+    ["completed", "stopped", "error"].includes(value.result?.status)
+  )
+    safe = { ...safe, result: { ...safe.result, status: value.result.status } };
+  process.stdout.write(JSON.stringify(safe) + "\n");
+};
 const runtime = new AssistantRuntime({
   emit: (event) => write({ method: "event", params: event }),
+  markStage: traceRuntime ? markStage : undefined,
   hostCall: (params, signal) =>
     new Promise((resolve, reject) => {
       const id = `tool-${randomUUID()}`;
@@ -71,7 +100,11 @@ for (const method of ["log", "info", "debug", "warn", "error"])
             : JSON.stringify(redact(value, [...runtime.secrets])),
       )
       .join(" ");
-    process.stderr.write(`${safe.slice(0, 4000)}\n`);
+    const line = safe.slice(0, 4000);
+    const diagnostic = traceRuntime
+      ? `[runtime] ${line.replaceAll("\n", "\n[runtime] ")}`
+      : line;
+    process.stderr.write(`${diagnostic}\n`);
   };
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -107,6 +140,7 @@ function terminate() {
   })());
 }
 input.on("close", () => {
+  markStage("host_stdin_closed");
   void terminate();
 });
 process.on("SIGTERM", () => {
@@ -115,6 +149,7 @@ process.on("SIGTERM", () => {
 process.on("SIGINT", () => {
   void terminate();
 });
+markStage("ready");
 
 async function handle(line) {
   let request;
@@ -176,11 +211,14 @@ async function handle(line) {
       result = { protocolVersion: 1, sdkVersion };
     else if (request.method === "load")
       result = await runtime.load(request.params ?? {});
-    else if (request.method === "run")
-      result = await runtime.run(request.params ?? {});
-    else if (request.method === "compact")
-      result = await runtime.run(request.params ?? {}, true);
-    else if (request.method === "title")
+    else if (request.method === "run" || request.method === "compact") {
+      markStage("run_received");
+      result = await runtime.run(
+        request.params ?? {},
+        request.method === "compact",
+      );
+      markStage("run_finished");
+    } else if (request.method === "title")
       result = await runtime.title(request.params ?? {});
     else if (request.method === "navigate")
       result = await runtime.navigate(request.params ?? {});
@@ -193,7 +231,8 @@ async function handle(line) {
     else if (request.method === "stop")
       result = await runtime.stop(request.params ?? {});
     else throw new Error("Unknown assistant runtime method");
-    if (request.id !== undefined) write({ id: request.id, result });
+    if (request.id !== undefined)
+      write({ id: request.id, result }, request.method);
   } catch (error) {
     write({
       id: request?.id ?? null,

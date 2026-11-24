@@ -698,6 +698,15 @@ function DocumentResult({
 }) {
   const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
+  const cancelledSave = useRef<HTMLButtonElement | null>(null);
+  useLayoutEffect(() => {
+    if (saving) return;
+    const button = cancelledSave.current;
+    cancelledSave.current = null;
+    if (!button?.isConnected || button.disabled) return;
+    const { activeElement, body } = button.ownerDocument;
+    if (activeElement === body) button.focus({ preventScroll: true });
+  }, [saving]);
   if (item.status === "submitting")
     return (
       <div role="status" className={`${MEDIA_PLACEHOLDER} h-14 w-64 flex-row`}>
@@ -721,9 +730,14 @@ function DocumentResult({
   const save = (
     action: (file: AssistantAttachment) => Promise<unknown>,
     file: AssistantAttachment,
+    plainSaveButton?: HTMLButtonElement,
   ) => {
     setSaving(true);
     void action(file)
+      .then((saved) => {
+        if (saved === false && plainSaveButton)
+          cancelledSave.current = plainSaveButton;
+      })
       .catch((error) => toast.error(t(assistantErrorKey(error))))
       .finally(() => setSaving(false));
   };
@@ -788,7 +802,7 @@ function DocumentResult({
               <Button
                 variant="secondary"
                 disabled={disabled || saving}
-                onClick={() => save(onSave, file)}
+                onClick={(event) => save(onSave, file, event.currentTarget)}
               >
                 {t("assistant.media.save")}
               </Button>

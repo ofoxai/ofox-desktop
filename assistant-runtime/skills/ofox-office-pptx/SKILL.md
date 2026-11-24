@@ -9,15 +9,15 @@ Prefer the offered `{"kind":"python","code":"…"}` route; otherwise use "When P
 
 When offered, use `get_presentation_candidates` first, choose an eligible ID (manual wins), then read `get_presentation_style({id:"…"})`. Otherwise list styles. Match audience/density; adaptations are experimental.
 
-Distinguish theme/fonts, composition, narrative, workflow and engine. Keep composition, not just colours. Partial native layouts need no HTML runtime/remote assets. Check font fallback; see [workflow](resources/design-workflow.md).
+Distinguish theme, composition, narrative and engine. Keep composition and font fallback; native layouts need no HTML runtime. See [workflow](resources/design-workflow.md).
 
-Plan each page's claim, evidence, relationship, visual, composition, density and editing. Check facts/exports; plans certify nothing. Core formulas use `equation()` even on diagram pages. Visual kinds: `native-chart` data, `native-math` formulas, `native-diagram` simple steps/relations, `code-figure` a richer diagram or curve drawn with `figure()`/`plot()`, `generated-image` a picture.
+Plan each page's claim, evidence, relationship, visual, composition, density and editing. Verify facts/exports. Core formulas use `equation()` even on diagram pages. Visual kinds: `native-chart`, `native-math`, `native-diagram`, `code-figure` (diagram/curve via `figure()`/`plot()`), `generated-image`.
 
-Use candidates for requirements (optional unknowns: null), then `freeze_presentation_plan` once for all pages. Explain inferences. Current plan references bind automatically; explicit ones must match. New plan, new turn.
+Candidate unknowns: null. `freeze_presentation_plan` once for all pages; explain inferences. References bind automatically; explicit ones must match. New plan, new turn.
 
-Native editing is not prior round-trip certification: default to `unverifiedAllowed`; use `verifiedRequired` only for explicit certification demands. If blocked, follow `nextAction`, never retry unchanged or skip freezing.
+Native editing needs `unverifiedAllowed`; `verifiedRequired` adds explicit prior round-trip certification. If blocked, follow `nextAction`; never retry unchanged or skip freezing.
 
-The opening Host text says whether slide images are on and how many (up to N, or exactly N): plan `generated-image` pages to match; when off, plan none. It also lists pictures the conversation already holds: place one free as a `user-image` whose `assetId` is its attachment id, and keep an earlier deck's pictures that way when changing it. A plan grants no budget; without Host approval use supplied assets or the declared fallback. Planned `generate_image` calls carry `presentationAssetId`/`planId`/`revision`. Never expose private paths or asset bytes.
+Host text states image count (off/ceiling/exact): match `generated-image` plans; off means none. Existing pictures are free `user-image` assets (`assetId`: attachment id); reuse earlier deck pictures when editing. A plan grants no budget: without Host approval use supplied assets/fallback. Planned `generate_image` calls carry `presentationAssetId`/`planId`/`revision`. Never expose private paths or asset bytes.
 
 ## Python deck code
 
@@ -45,6 +45,7 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `new_deck(title="", footer="", style="navy", language="zh")`: returns `prs`; rejects unknown/disabled styles. Footer appears on content pages.
 - `source_deck()`: Host-authorized original snapshot; source mode rejects `new_deck`.
 - `target_slides(prs)`: authorized actual source pages in plan order. Edit these; preserve the remaining pages.
+- To replace existing text, match the old text in the target slide's text shapes and edit the existing paragraphs/runs in place to preserve formatting. Imported titles may be ordinary text boxes even when `slide.shapes.title` is empty. Check that the old text is gone before previewing the replacement.
 - `bring_title_to_front(slide)`: raise the same title; retain ID/rich text/fonts and extension order. Source edits need this, not `.text=` merely to raise it.
 - `cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None)`: cover; optional right SVG art, legacy 4.6×5.5, adaptations 4.2×4.5.
 - `section_slide(prs, title, number="", subtitle="", notes="")`: section break.
@@ -65,8 +66,8 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `pyramid(slide, levels, x, y, w, h, size=14)`: 2–6 native levels, narrowest first; label or `{"title","body"}`.
 - `code(slide, source, x, y, w, h, size=12)`: ≤40 monospaced lines on a dark panel.
 - `formula(slide, x, y, w, h, lines, size=15)`: plain text; warns; not academic math.
-- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; LaTeX adds noneditable PNG. `{"latex":r"\sin(x)"}` or structures. LaTeX: scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos,quad (em-space),mathrm/operatorname (1–64 ASCII alphanumerics). Brace signed/multi-digit scripts; other macros fail. Literal text. Verify WPS/PowerPoint display/editing.
-- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels; process means sequence, comparison means independent items without arrows.
+- `equation(slide, x, y, w, h, expression, size=22)`: Native OMML; `{"latex":r"\log(x)"}` adds PNG fallback. Supports scripts,hat/widehat,frac,Greek,braced sum/sqrt,top,dots/ldots/cdots,sin/cos/log/exp,quad,mathrm/operatorname,mathcal. Names: 1–64 ASCII alphanumerics (mathcal: letters only). Functions upright; mathcal editable script. Brace signed/multi-digit scripts and all sum bodies. Other macros fail. Verify Office display/editing.
+- `relation(slide, items, x, y, w, h, kind="process", size=15)`: 2–6 string labels. process/sequence: ordered arrows; comparison: no arrows. spatial fails: choose comparison for independent items or fork_join() for source→parallel branches→merge.
 - `fork_join(slide, branches, x, y, w, h, source="", merge="")`: 2–6 parallel label strings; source→all→merge, no branch-to-branch arrows. For lesson/panel bodies use the `main` box, not full-slide `G`.
 - `native_chart(slide, kind, categories, series, x, y, w, h, title="")`: native chart plus workbook; bar/line/pie; series `[{"name":"…","values":[…]}]`, at most 100 supplied finite values.
 - `shape(slide, kind, x, y, w, h, fill=None, line=None, line_w=0.75, radius=None)`: `MSO_SHAPE.RECTANGLE`, `ROUNDED_RECTANGLE`, `OVAL`, etc.; radius only for rounded.
@@ -78,6 +79,8 @@ Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.61
 - `background(slide, color)`: whole-slide fill. On dark fills, recolour native title runs via `r.font.color.rgb = rgb(T.white)` and use light text/subtitles.
 - Native chart: `slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(x), Inches(y), Inches(w), Inches(h), chart_data).chart`; set chart/axis/data-label fonts ≥12pt and distinct series colours.
 - Fit: `text_height(text, pt, width_in, spacing=1.3)`, `lines_for(text, pt, width_in)`, `em_width(s)`, `bullets_height(items, pt, width_in, gap_pt=6)`, `need(what, needed, has, slide=None)` (overflow lint), `rgb(h)` (hex to colour).
+
+For CLIP, first read [loss/diagram examples](resources/clip-loss.md). Brace both sums. Plan `sequence` (`process` alias); encoders use fork/join.
 
 ## Design rules
 

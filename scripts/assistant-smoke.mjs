@@ -25,9 +25,8 @@ const environment = Object.fromEntries(
 // Run the actual copied production tree with no user credentials or SDK config.
 async function productionSmoke() {
   const assert = (await import("node:assert/strict")).default;
-  const { mkdir, mkdtemp, readFile, rm, writeFile } = await import(
-    "node:fs/promises"
-  );
+  const { mkdir, mkdtemp, readFile, rm, writeFile } =
+    await import("node:fs/promises");
   const { execFileSync } = await import("node:child_process");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
@@ -61,6 +60,16 @@ async function productionSmoke() {
   );
   const testToken = "in-memory-production-smoke-credential";
   try {
+    if (process.platform === "win32") {
+      const childProbe = require(
+        path.join(process.argv[3], "probes/windows-child-probe.node"),
+      );
+      // The Job-owned native verifier covers the suspended-child control.
+      assert.equal(typeof childProbe.probe, "function");
+      assert.throws(() => childProbe.probe("unexpected argument"), {
+        code: "ERR_PROBE_ARGUMENTS",
+      });
+    }
     // The legacy PDF.js build reads text (CJK through the shipped CMaps) and
     // renders a page without text through the native canvas.
     const { AttachmentStore } = await import(
@@ -251,16 +260,18 @@ async function productionSmoke() {
       fetch: async () => {
         turns++;
         const delta =
-          turns === 1
+          turns <= 2
             ? {
                 tool_calls: [
                   {
                     index: 0,
-                    id: "smoke-search",
+                    id: turns === 1 ? "smoke-prepare" : "smoke-search",
                     type: "function",
                     function: {
-                      name: "web_search",
-                      arguments: JSON.stringify({ query: "smoke" }),
+                      name: turns === 1 ? "beginSingleStep" : "web_search",
+                      arguments: JSON.stringify(
+                        turns === 1 ? {} : { query: "smoke" },
+                      ),
                     },
                   },
                 ],
@@ -274,7 +285,7 @@ async function productionSmoke() {
                 {
                   index: 0,
                   delta: {},
-                  finish_reason: turns === 1 ? "tool_calls" : "stop",
+                  finish_reason: turns <= 2 ? "tool_calls" : "stop",
                 },
               ],
             },
@@ -305,9 +316,12 @@ async function productionSmoke() {
     });
     await searching.close();
     await new Promise((resolve) => gateway.close(resolve));
-    assert.equal(searched.status, "completed");
+    assert.equal(searched.status, "completed", searched.errorCode);
+    assert.equal(turns, 3);
     assert.deepEqual(searches, [`Bearer ${testToken}`]);
-    const tool = searched.entries.find((entry) => entry.role === "tool");
+    const tool = searched.entries.find(
+      (entry) => entry.role === "tool" && entry.toolName === "web_search",
+    );
     assert.equal(tool.toolName, "web_search");
     assert.equal(tool.details.usage.searchCalls, 1);
     assert.deepEqual(tool.details.sources, [

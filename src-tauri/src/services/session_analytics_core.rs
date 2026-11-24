@@ -52,6 +52,9 @@ pub struct UsageFact {
     /// Of the cache writes, those kept for an hour (Claude), at their own rate.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_write_1h: u64,
+    /// Missing persisted evidence is unknown for Claude, not an observed zero.
+    #[serde(default)]
+    pub cache_write_ttl_known: bool,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -304,6 +307,15 @@ pub(crate) fn message_activity_refs<'a>(
     window: &Window,
     days: &[DayBoundary],
 ) -> Result<Activity, String> {
+    message_projection_refs(messages, window, days, true)
+}
+
+fn message_projection_refs<'a>(
+    messages: impl IntoIterator<Item = &'a MessageEvent>,
+    window: &Window,
+    days: &[DayBoundary],
+    include_activity: bool,
+) -> Result<Activity, String> {
     validate_window(window)?;
     let mut dates = std::collections::BTreeSet::new();
     let mut ordered_days: Vec<_> = days.iter().enumerate().collect();
@@ -323,7 +335,11 @@ pub(crate) fn message_activity_refs<'a>(
     let mut timelines: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
     let mut active_dates = std::collections::BTreeSet::new();
     let mut daily_messages = vec![0; days.len()];
-    let mut daily_active_ms = vec![0; days.len()];
+    let mut daily_active_ms = if include_activity {
+        vec![0; days.len()]
+    } else {
+        vec![]
+    };
     let mut daily_sessions: Vec<BTreeSet<&str>> =
         (0..days.len()).map(|_| BTreeSet::new()).collect();
     let mut by_session_messages: BTreeMap<&str, u64> = BTreeMap::new();
@@ -343,12 +359,15 @@ pub(crate) fn message_activity_refs<'a>(
         if !message.main || !matches!(message.role, Role::User | Role::Assistant) {
             continue;
         }
-        // Keep neighbours outside the window. A valid gap may cross either
-        // query boundary even when neither endpoint is inside it.
-        timelines
-            .entry(message.session_key.as_str())
-            .or_default()
-            .push(message.at_ms);
+        if include_activity {
+            // The legacy method keeps neighbours outside the window because
+            // a gap may cross a boundary with neither endpoint inside it.
+            // Native runtime does not use these message-derived timelines.
+            timelines
+                .entry(message.session_key.as_str())
+                .or_default()
+                .push(message.at_ms);
+        }
         if contains_time(window, message.at_ms) {
             let index = ordered_days.partition_point(|(_, day)| day.end_ms <= message.at_ms);
             let (day_index, day) = ordered_days
@@ -364,7 +383,9 @@ pub(crate) fn message_activity_refs<'a>(
                 1,
             )?;
             daily_sessions[*day_index].insert(message.session_key.as_str());
-            active_dates.insert(day.date.as_str());
+            if include_activity {
+                active_dates.insert(day.date.as_str());
+            }
         }
     }
     for (session, mut times) in timelines {
@@ -421,7 +442,7 @@ pub(crate) fn message_activity_refs<'a>(
                 .daily_messages
                 .insert(day.date.clone(), daily_messages[index]);
         }
-        if daily_active_ms[index] > 0 {
+        if include_activity && daily_active_ms[index] > 0 {
             result
                 .daily_active_ms
                 .insert(day.date.clone(), daily_active_ms[index]);
@@ -437,6 +458,16 @@ pub(crate) fn message_activity_refs<'a>(
         }
     }
     Ok(result)
+}
+
+/// Native runtime has its own projection. This path retains only verified
+/// conversational message counts and their session/day membership.
+pub(crate) fn message_counts_refs<'a>(
+    messages: impl IntoIterator<Item = &'a MessageEvent>,
+    window: &Window,
+    days: &[DayBoundary],
+) -> Result<Activity, String> {
+    message_projection_refs(messages, window, days, false)
 }
 
 fn validate_window(window: &Window) -> Result<(), String> {
@@ -491,6 +522,7 @@ mod tests {
             buckets,
             complete: true,
             cache_write_1h: 0,
+            cache_write_ttl_known: true,
         }
     }
     fn filters() -> Filters {
@@ -962,5 +994,91 @@ mod tests {
         )
         .is_err());
         assert!(message_activity(&[message("s", "a", 0)], &window, &[]).is_err());
+    }
+    #[test]
+    fn native_message_counts_preserve_verified_counts_without_legacy_runtime_work() {
+        let window = Window {
+            start_ms: Some(0),
+            end_ms: 3_000,
+        };
+        let days = [day("first", 0, 2_000), day("second", 2_000, 3_000)];
+        let mut tool = message("s", "tool", 1_500);
+        tool.role = Role::Tool;
+        let mut child = message("child", "child", 1_500);
+        child.main = false;
+        let duplicate = message("s", "last", 2_500);
+        let messages = [
+            message("s", "before", -1_000),
+            message("s", "first", 1_000),
+            tool,
+            child,
+            duplicate.clone(),
+            duplicate,
+        ];
+        let legacy = message_activity_refs(&messages, &window, &days).unwrap();
+        let counts = message_counts_refs(&messages, &window, &days).unwrap();
+        assert_eq!(counts.messages, 2);
+        assert_eq!(counts.messages, legacy.messages);
+        assert_eq!(counts.daily_messages, legacy.daily_messages);
+        assert_eq!(counts.by_session_messages, legacy.by_session_messages);
+        assert_eq!(counts.daily_sessions, legacy.daily_sessions);
+        assert!(legacy.active_ms > 0);
+        assert_eq!(counts.active_ms, 0);
+        assert!(counts.by_session.is_empty());
+        assert!(counts.daily_active_ms.is_empty());
+        assert!(counts.intervals.is_empty());
+        assert!(counts.native_allocations.is_empty());
+    }
+
+    #[test]
+    fn native_message_counts_do_not_add_interval_only_day_or_session_membership() {
+        let messages = [message("s", "before", -1_000), message("s", "after", 4_000)];
+        let window = Window {
+            start_ms: Some(0),
+            end_ms: 3_000,
+        };
+        let days = [day("first", 0, 2_000), day("second", 2_000, 3_000)];
+        let legacy = message_activity_refs(&messages, &window, &days).unwrap();
+        assert_eq!(legacy.active_ms, 3_000);
+        let counts = message_counts_refs(&messages, &window, &days).unwrap();
+        assert_eq!(counts, Activity::default());
+    }
+
+    #[test]
+    fn native_message_counts_keep_identity_duplicate_window_and_day_validation() {
+        let window = Window {
+            start_ms: Some(0),
+            end_ms: 3_000,
+        };
+        let days = [day("first", 0, 3_000)];
+        for messages in [
+            vec![message("s", "", 1)],
+            vec![message("", "id", 1)],
+            vec![message("s", "same", -10), message("s", "same", -9)],
+        ] {
+            assert_eq!(
+                message_counts_refs(&messages, &window, &days).unwrap_err(),
+                message_activity_refs(&messages, &window, &days).unwrap_err()
+            );
+        }
+        let messages = [message("s", "a", 1)];
+        for boundaries in [
+            vec![],
+            vec![day("first", 0, 2_000), day("second", 1_000, 3_000)],
+            vec![day("same", 0, 1_000), day("same", 1_000, 3_000)],
+        ] {
+            assert_eq!(
+                message_counts_refs(&messages, &window, &boundaries).unwrap_err(),
+                message_activity_refs(&messages, &window, &boundaries).unwrap_err()
+            );
+        }
+        let backwards = Window {
+            start_ms: Some(4_000),
+            end_ms: 3_000,
+        };
+        assert_eq!(
+            message_counts_refs(&messages, &backwards, &days).unwrap_err(),
+            message_activity_refs(&messages, &backwards, &days).unwrap_err()
+        );
     }
 }

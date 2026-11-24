@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { Check } from "typebox/value";
+import { FREEZE_PRESENTATION_SCHEMA } from "../src/presentation-planning.mjs";
 import { documentTools } from "../src/document-tools.mjs";
 import { mediaTools } from "../src/media-tools.mjs";
 import { ADAPTED_STYLES } from "../src/deck/catalog.mjs";
@@ -586,6 +589,71 @@ test("planning schema explains document-wide visual needs, required density and 
     /reuse.*complete.*requirements.*density/i,
   );
 });
+test("the actual CLIP fourth-page process alias freezes as sequence without mutating the model call", async () => {
+  const given = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/clip-loss-plan-process.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const before = structuredClone(given);
+  const f = fixture();
+  assert.equal(given.slides[3].relationship, "process");
+  assert.equal(
+    Check(f.get("freeze_presentation_plan").parameters, given),
+    true,
+  );
+  assert.equal(
+    Check(FREEZE_PRESENTATION_SCHEMA, given),
+    false,
+    "canonical Host inputs keep the standard enum",
+  );
+  const result = await f.get("freeze_presentation_plan").execute(given);
+  assert.equal(result.details.status, "frozen");
+  assert.equal(f.calls.length, 1);
+  const canonical = {
+    ...given,
+    slides: structuredClone(f.calls[0].args.slides),
+  };
+  assert.equal(canonical.slides[3].relationship, "sequence");
+  assert.equal(Check(FREEZE_PRESENTATION_SCHEMA, canonical), true);
+  assert.deepEqual(given, before);
+  await f.get("freeze_presentation_plan").execute(canonical);
+  assert.equal(
+    f.calls.length,
+    1,
+    "equivalent alias and canonical calls reuse the existing freeze",
+  );
+});
+
+test("planning aliases stay narrow and preserve the distinct spatial relationship", async () => {
+  for (const value of ["sequential", "Process", " process", "sequence "]) {
+    const f = fixture();
+    const args = {
+      requirements: requirements(),
+      styleId: "cartesian",
+      decisionSummary: "Test a relationship",
+      slides: slides(),
+    };
+    args.slides[1].relationship = value;
+    await assert.rejects(
+      f.get("freeze_presentation_plan").execute(args),
+      /Malformed/,
+    );
+    assert.deepEqual(f.calls, []);
+  }
+  const f = fixture();
+  const args = {
+    requirements: requirements(),
+    styleId: "cartesian",
+    decisionSummary: "A spatial claim",
+    slides: slides(),
+  };
+  args.slides[1].relationship = "spatial";
+  await f.get("freeze_presentation_plan").execute(args);
+  assert.equal(f.calls[0].args.slides[1].relationship, "spatial");
+});
+
 test("actual malformed planning requests remain rejected without a Host freeze and can be corrected", async () => {
   const f = fixture();
   const req = { ...requirements(), slideCount: 6 };
@@ -605,7 +673,7 @@ test("actual malformed planning requests remain rejected without a Host freeze a
     decisionSummary: "A six-page lesson",
     slides: pages.map((page, index) => ({
       ...page,
-      relationship: index === 1 ? "process" : page.relationship,
+      relationship: index === 1 ? "sequential" : page.relationship,
     })),
   };
   const originals = structuredClone({
@@ -638,7 +706,7 @@ test("actual malformed planning requests remain rejected without a Host freeze a
     slides: invalidPlan.slides.map((page) => ({
       ...page,
       relationship:
-        page.relationship === "process" ? "sequence" : page.relationship,
+        page.relationship === "sequential" ? "sequence" : page.relationship,
     })),
   };
   const result = await f.get("freeze_presentation_plan").execute(corrected);
@@ -1510,6 +1578,126 @@ test("known source style is inherited only for that source and yields to an expl
     chosen.details.candidates.map((item) => item.id),
     ["cartesian"],
   );
+});
+
+function sourceCandidateFixture(allowedPages = [3]) {
+  const source = {
+    attachmentId: "uploaded-deck",
+    version: "a".repeat(64),
+    pageNumbers: [3],
+  };
+  const f = fixture({
+    sourceFiles: [
+      {
+        attachmentId: source.attachmentId,
+        version: source.version,
+        totalPages: 8,
+        allowedPages,
+        styleId: "cartesian",
+      },
+    ],
+  });
+  const plan = {
+    requirements: { ...requirements(), slideCount: 1 },
+    styleId: "cartesian",
+    decisionSummary: "Revise the selected source page",
+    slides: [slides()[1]],
+  };
+  return { f, plan, source };
+}
+
+test("a source-scoped candidate cannot freeze without its source and can recover", async () => {
+  const { f, plan, source } = sourceCandidateFixture();
+  const discover = f.get("get_presentation_candidates");
+  const eligible = await discover.execute({
+    requirements: plan.requirements,
+    source,
+  });
+  assert.ok(eligible.details.eligibleIds.includes(plan.styleId));
+  assert.deepEqual(eligible.details.source, source);
+  assert.match(eligible.details.nextAction, /exact source/);
+
+  const blocked = await discover.execute({
+    requirements: { ...plan.requirements, roundTrip: "verifiedRequired" },
+  });
+  assert.equal(blocked.details.status, "blocked");
+
+  const freezePlan = f.get("freeze_presentation_plan");
+  await assert.rejects(
+    freezePlan.execute(plan),
+    /assistant_presentation_plan_invalid: .*source/i,
+  );
+  assert.equal(f.calls.length, 0, "a missing source must not reach the Host");
+
+  const frozen = await freezePlan.execute({ ...plan, source });
+  assert.equal(frozen.details.status, "frozen");
+  assert.deepEqual(frozen.details.source, source);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0].args.source, source);
+});
+
+test("an eligible unscoped lookup permits a new deck while a reference is available", async () => {
+  const { f, plan, source } = sourceCandidateFixture();
+  const discover = f.get("get_presentation_candidates");
+  await discover.execute({ requirements: plan.requirements, source });
+  const newDeck = {
+    requirements: requirements(),
+    styleId: "course-module",
+    decisionSummary:
+      "Create an independent teaching deck from reference material",
+    slides: slides(),
+  };
+  const eligible = await discover.execute({
+    requirements: newDeck.requirements,
+  });
+  assert.ok(eligible.details.eligibleIds.includes(newDeck.styleId));
+
+  const frozen = await f.get("freeze_presentation_plan").execute(newDeck);
+  assert.equal(frozen.details.status, "frozen");
+  assert.equal(frozen.details.source, undefined);
+  assert.equal(f.calls[0].args.source, undefined);
+});
+
+test("another admitted source page requires rediscovery before freezing", async () => {
+  const { f, plan, source } = sourceCandidateFixture([3, 4]);
+  const discover = f.get("get_presentation_candidates");
+  const freezePlan = f.get("freeze_presentation_plan");
+  await discover.execute({ requirements: plan.requirements, source });
+
+  const other = { ...source, pageNumbers: [4] };
+  await assert.rejects(
+    freezePlan.execute({ ...plan, source: other }),
+    /assistant_presentation_plan_invalid: .*source/i,
+  );
+  assert.equal(
+    f.calls.length,
+    0,
+    "a different candidate scope must not freeze",
+  );
+
+  await discover.execute({ requirements: plan.requirements, source: other });
+  const frozen = await freezePlan.execute({ ...plan, source: other });
+  assert.equal(frozen.details.status, "frozen");
+  assert.deepEqual(f.calls[0].args.source, other);
+});
+
+test("starting a source revision after an unscoped lookup requires discovery for that source", async () => {
+  const { f, plan, source } = sourceCandidateFixture();
+  const discover = f.get("get_presentation_candidates");
+  const freezePlan = f.get("freeze_presentation_plan");
+  const ordinary = await discover.execute({ requirements: plan.requirements });
+  assert.equal(ordinary.details.status, "eligible");
+
+  await assert.rejects(
+    freezePlan.execute({ ...plan, source }),
+    /assistant_presentation_plan_invalid: .*source/i,
+  );
+  assert.equal(f.calls.length, 0);
+
+  await discover.execute({ requirements: plan.requirements, source });
+  const frozen = await freezePlan.execute({ ...plan, source });
+  assert.deepEqual(frozen.details.source, source);
+  assert.equal(f.calls.length, 1);
 });
 
 test("a plan names each page's kind, refuses a run of three identical kinds and keeps image placement consistent", async () => {

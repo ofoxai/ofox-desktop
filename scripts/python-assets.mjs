@@ -13,7 +13,8 @@ export function pyodideWheelUrl(pin, env = process.env) {
 }
 
 // The Python engine is offered only on the platforms python-downloads.json
-// lists (macOS). Everywhere else its wheels are not staged and the pyodide npm
+// lists. Resource staging does not grant runtime execution: the host must also
+// admit a working OS sandbox. Elsewhere its wheels are not staged and the pyodide npm
 // package, which can only run that engine, is pruned from the production tree.
 export const pythonEngineOffered = (platform, downloads) =>
   downloads.platforms.includes(platform);

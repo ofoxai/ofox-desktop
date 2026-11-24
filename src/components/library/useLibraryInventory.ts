@@ -88,5 +88,19 @@ export function useLibraryInventory(
     return () => clearTimeout(timer);
   }, [valid]);
   const rescan = useCallback(() => setRefresh((value) => value + 1), []);
-  return { inventory: valid, error, loading, expired, rescan };
+  // Effects start IPC after commit. Cover the first frame of a requested scan.
+  // Expiry alone is not a request: consumers must still be able to retry it.
+  const pending =
+    active &&
+    epoch !== undefined &&
+    epoch >= 0 &&
+    current.current?.key !== key &&
+    (!expired || snapshot?.key !== key);
+  return {
+    inventory: valid,
+    error,
+    loading: loading || pending,
+    expired,
+    rescan,
+  };
 }

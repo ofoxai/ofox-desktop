@@ -28,6 +28,7 @@ interface ToolDiscoveryPageProps {
   onBack?: () => void;
   onBind: (selectedTools: string[]) => void;
   onEnterLocal?: () => void;
+  binding?: boolean;
 }
 
 /** Stagger 翻 selected 的相邻间隔（ms）。跳过 missing 不占 tick。 */
@@ -37,6 +38,7 @@ export default function ToolDiscoveryPage({
   onBack,
   onBind,
   onEnterLocal,
+  binding = false,
 }: ToolDiscoveryPageProps) {
   const { t } = useTranslation();
   const installableTools = useToolInstallCapabilities();
@@ -185,6 +187,7 @@ export default function ToolDiscoveryPage({
   });
 
   const handleToggle = (id: string) => {
+    if (binding) return;
     // 扫描中 / stagger 还没跑完都不允许手动切。前者是显式产品规则
     // ("等所有扫描结束才能流转")，后者是为了不让用户在自动选中动画中
     // 抢一次 click 造成状态混乱（比如点中的卡正好下一个 tick 要翻
@@ -237,9 +240,11 @@ export default function ToolDiscoveryPage({
                 autoSelectTick={e.autoSelectTick}
                 progress={installProgress[e.id]}
                 onClick={() => handleToggle(e.id)}
-                onRetry={() => void detectTools()}
+                onRetry={() => {
+                  if (!binding) void detectTools();
+                }}
                 onInstall={
-                  installableTools.includes(e.id)
+                  !binding && installableTools.includes(e.id)
                     ? () => install(e.id)
                     : undefined
                 }
@@ -266,6 +271,7 @@ export default function ToolDiscoveryPage({
           {onBack && (
             <button
               onClick={onBack}
+              disabled={binding}
               className="px-6 py-2.5 text-sm text-ink-muted hover:text-ink"
             >
               {t("uiCopy.back")}
@@ -273,12 +279,14 @@ export default function ToolDiscoveryPage({
           )}
           <button
             onClick={() => onBind(selected.map((e) => e.id))}
-            disabled={!scanDone || selected.length === 0}
+            disabled={binding || !scanDone || selected.length === 0}
             className="flex-1 rounded-xl bg-brand px-6 py-3 text-base font-semibold text-brand-on shadow-md transition-all disabled:opacity-50 "
           >
-            {!scanDone
-              ? t("uiCopy.scanning")
-              : t("uiCopy.startBinding", { value1: selected.length })}
+            {binding
+              ? t("uiCopy.binding")
+              : !scanDone
+                ? t("uiCopy.scanning")
+                : t("uiCopy.startBinding", { value1: selected.length })}
           </button>
         </div>
         {onEnterLocal && (
@@ -286,6 +294,7 @@ export default function ToolDiscoveryPage({
             type="button"
             className="mb-4 mt-3 self-center py-1 text-ui text-ink-muted hover:text-ink hover:underline"
             onClick={onEnterLocal}
+            disabled={binding}
           >
             {t("toolCatalog.skipBinding")}
           </button>

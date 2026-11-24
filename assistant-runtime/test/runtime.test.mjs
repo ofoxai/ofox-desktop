@@ -26,6 +26,11 @@ const model = {
   maxOutputTokens: 4096,
 };
 const token = "short-lived-credential-never-persist-123456789";
+import {
+  isFixtureOpening,
+  withPlanningOpening,
+} from "./fixtures/planning-opening.mjs";
+
 function stream(text, options = {}) {
   const { usage, omitUsage, ...responseOptions } = options;
   const chunks = [
@@ -59,11 +64,11 @@ function stream(text, options = {}) {
     { headers: { "content-type": "text/event-stream" }, ...responseOptions },
   );
 }
-function toolStream(name, args, second) {
+function toolStream(name, args, second, id = "call-one") {
   const calls = [
     {
       index: 0,
-      id: "call-one",
+      id,
       type: "function",
       function: { name, arguments: JSON.stringify(args) },
     },
@@ -106,8 +111,8 @@ async function sandbox(t) {
 }
 
 class ProbeRuntime extends AssistantRuntime {
-  tools(context) {
-    return probeTools(this, context);
+  tools(context, model) {
+    return [...super.tools(context, model), ...probeTools(this, context)];
   }
 }
 
@@ -262,12 +267,15 @@ test("one uncertain write prevents a second tool from the same SDK batch", async
   const params = await sandbox(t);
   const writes = [];
   const runtime = new ProbeRuntime({
-    fetch: async () =>
-      toolStream(
-        probeToolName,
-        { command: "first" },
-        { name: probeToolName, args: { command: "second" } },
-      ),
+    fetch: withPlanningOpening(
+      async () =>
+        toolStream(
+          probeToolName,
+          { command: "first" },
+          { name: probeToolName, args: { command: "second" } },
+        ),
+      "plan",
+    ),
     hostCall: async (call) => {
       writes.push(call.args.command);
       await new Promise((resolve) => setImmediate(resolve));
@@ -320,7 +328,10 @@ test("real Pi SDK streams and reloads native history without persisting credenti
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://api.ofox.io/v1/chat/completions");
   assert.equal(requests[0].headers.get("authorization"), `Bearer ${token}`);
-  assert.equal(requests[0].body.tools, undefined);
+  assert.deepEqual(
+    requests[0].body.tools.map((tool) => tool.function.name).sort(),
+    ["beginSingleStep", "updatePlan"],
+  );
   assert.match(requests[0].body.messages[0].content, /Ofox Assistant/);
   assert.match(
     events
@@ -1257,10 +1268,10 @@ test("host tool results are scrubbed before SDK persistence and unknown writes t
   let requests = 0;
   let writes = 0;
   const runtime = new ProbeRuntime({
-    fetch: async () => {
+    fetch: withPlanningOpening(async () => {
       requests++;
       return toolStream(probeToolName, { command: "write" });
-    },
+    }, "single"),
     hostCall: async (call) => {
       assert.equal(call.operationId, params.operationId);
       writes++;
@@ -1484,7 +1495,312 @@ test("a portable native history can continue, edit and regenerate", async (t) =>
   await runtime.close();
 });
 
-test("legacy configuration parameters cannot add tools or replace the general role", async (t) => {
+test("ordinary chat reports a real task plan through Pi without local operations", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const params = { ...(await sandbox(t)), apex };
+    const events = [];
+    const requests = [];
+    const steps = [
+      { step: "Compare the evidence", status: "in_progress" },
+      { step: "Write the findings", status: "pending" },
+    ];
+    const runtime = new AssistantRuntime({
+      emit: (event) => events.push(event),
+      hostCall: async () => assert.fail("Planning has no host authority"),
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return requests.length === 1
+          ? toolStream("updatePlan", { steps })
+          : stream("The findings are ready.");
+      },
+    });
+    t.after(() => runtime.close());
+    assert.equal((await runtime.run(params)).status, "completed");
+    assert.deepEqual(
+      requests[0].tools.map((tool) => tool.function.name).sort(),
+      ["beginSingleStep", "updatePlan"],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === "task_plan").map((e) => e.data),
+      [{ steps }],
+    );
+    assert.match(requests[0].messages[0].content, /multi-stage/);
+    assert.doesNotMatch(
+      requests[0].messages[0].content,
+      /Local configuration is enabled/,
+    );
+  }
+});
+
+test("opaque reasoning and paired plan updates replay through the eighth request", async (t) => {
+  // Match the shape of the installed-app incident with invented identifiers
+  // and payloads. A loopback response cannot establish upstream ownership.
+  const updates = [
+    ["in_progress", "pending", "pending"],
+    ["completed", "in_progress", "pending"],
+    ["completed", "pending", "in_progress"],
+    ["completed", "in_progress", "pending"],
+    ["completed", "completed", "in_progress"],
+    ["completed", "pending", "in_progress"],
+    ["completed", "in_progress", "pending"],
+  ];
+  const labels = ["Confirm the topic", "Write questions", "Summarize findings"];
+  const plans = updates.map((statuses) =>
+    labels.map((step, index) => ({ step, status: statuses[index] })),
+  );
+  const reasoning = plans.map((_, index) =>
+    [1, 2, 3, 5, 6].includes(index)
+      ? [
+          {
+            type: "reasoning.encrypted",
+            id: `rs_${"a".repeat(48)}${String(index).padStart(2, "0")}::${"b".repeat(60)}`,
+            data: `opaque-fixture-${index}`,
+            format: "openai-responses-v1",
+            index: 0,
+          },
+        ]
+      : undefined,
+  );
+  const ids = plans.map((_, index) => `call-plan-${index + 1}`);
+
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    for (const rejected of [false, true]) {
+      await t.test(
+        `${apex} ${rejected ? "HTTP 400" : "completed"}`,
+        async (t) => {
+          const params = { ...(await sandbox(t)), apex };
+          const requests = [];
+          const events = [];
+          const runtime = new AssistantRuntime({
+            emit: (event) => events.push(event),
+            hostCall: async () => assert.fail("Planning has no host authority"),
+            fetch: async (url, init) => {
+              assert.equal(
+                new URL(url).href,
+                `https://api.${apex}/v1/chat/completions`,
+              );
+              const index = requests.push(JSON.parse(init.body)) - 1;
+              if (index === plans.length) {
+                const headers = {
+                  "x-ofox-request-id": "fixture-eighth-request",
+                };
+                return rejected
+                  ? Response.json(
+                      {
+                        error: {
+                          type: "invalid_request_error",
+                          message:
+                            "The requested item was created under a different resource.",
+                        },
+                      },
+                      { status: 400, headers },
+                    )
+                  : stream("The findings are ready.", {
+                      headers: {
+                        ...headers,
+                        "content-type": "text/event-stream",
+                      },
+                    });
+              }
+              assert.ok(
+                index < plans.length,
+                "The final request must not replay",
+              );
+              const delta = {
+                role: "assistant",
+                reasoning_details: reasoning[index],
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: ids[index],
+                    type: "function",
+                    function: {
+                      name: "updatePlan",
+                      arguments: JSON.stringify({ steps: plans[index] }),
+                    },
+                  },
+                ],
+              };
+              return new Response(
+                `data: ${JSON.stringify({ id: `fixture-response-${index}`, choices: [{ index: 0, delta, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`,
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            },
+          });
+          t.after(() => runtime.close());
+          const outcome = await runtime.run(params);
+          assert.equal(outcome.status, rejected ? "error" : "completed");
+          if (rejected) {
+            assert.equal(outcome.errorStatus, 400);
+          } else {
+            assert.equal(
+              outcome.entries.findLast((entry) => entry.role === "assistant")
+                .content,
+              "The findings are ready.",
+            );
+          }
+          assert.equal(requests.length, 8);
+          for (const [index, request] of requests.entries()) {
+            const history = request.messages
+              .filter(
+                (message) =>
+                  message.tool_calls ||
+                  message.reasoning_details ||
+                  message.role === "tool",
+              )
+              .map((message) =>
+                message.role === "assistant"
+                  ? [
+                      message.tool_calls?.map((call) => [
+                        call.id,
+                        call.function.name,
+                        JSON.parse(call.function.arguments),
+                      ]),
+                      message.reasoning_details,
+                    ]
+                  : [
+                      message.tool_call_id,
+                      JSON.parse(message.content).steps,
+                      message.reasoning_details,
+                    ],
+              );
+            const expected = plans.slice(0, index).flatMap((steps, i) => [
+              [[[ids[i], "updatePlan", { steps }]], reasoning[i]],
+              [ids[i], steps, undefined],
+            ]);
+            assert.deepEqual(history, expected);
+          }
+          assert.deepEqual(
+            events
+              .filter((event) => event.type === "task_plan")
+              .map((e) => e.data.steps),
+            plans,
+          );
+          assert.equal(
+            events.some((event) => event.type === "retrying"),
+            false,
+          );
+          const native = (await readFile(params.sessionFile, "utf8"))
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const lastReceipt = native
+            .filter((entry) => entry.customType === "ofox-desktop-request")
+            .at(-1).data;
+          assert.equal(lastReceipt.requestId, "fixture-eighth-request");
+          assert.equal(lastReceipt.httpStatus, rejected ? 400 : 200);
+          assert.equal(lastReceipt.status, rejected ? "rejected" : "completed");
+        },
+      );
+    }
+  }
+});
+
+test("Pi preserves typed plan states when credentials collide with their spellings", async (t) => {
+  const params = await sandbox(t);
+  params.knownSecrets = [
+    "completed",
+    "in_progress",
+    "pending",
+    "abcdefgh",
+    "xy7",
+    "4187",
+  ];
+  const events = [];
+  const requests = [];
+  const steps = [
+    { step: "completed evidence xy7", status: "completed" },
+    { step: "in_progress analysis 4187", status: "in_progress" },
+    { step: "abcdefgh".repeat(5), status: "pending" },
+  ];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => assert.fail("Planning cannot use the host"),
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream("updatePlan", { steps })
+        : stream("Done.");
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(params)).status, "completed");
+  assert.deepEqual(
+    requests[0].tools[0].function.parameters.properties.steps.items.properties.status.anyOf.map(
+      (item) => item.const,
+    ),
+    ["pending", "in_progress", "completed"],
+  );
+  const shown = events.find((event) => event.type === "task_plan")?.data;
+  assert.ok(shown, "Pi must execute the valid plan, not a redacted enum");
+  const expected = ["completed", "in_progress", "pending"];
+  const check = (value) => {
+    assert.deepEqual(
+      value.steps.map((step) => step.status),
+      expected,
+    );
+    for (const step of value.steps) {
+      assert.ok([...step.step].length <= 40);
+      assert.doesNotMatch(step.step, /completed|in_progress|abcdefgh|xy7|4187/);
+    }
+  };
+  check(shown);
+  check(
+    JSON.parse(
+      requests[1].messages.find((message) => message.role === "tool").content,
+    ),
+  );
+  const native = (await readFile(params.sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const result = native.find(
+    (entry) =>
+      entry.message?.role === "toolResult" &&
+      entry.message.toolName === "updatePlan",
+  );
+  check(JSON.parse(result.message.content[0].text));
+  const call = native
+    .flatMap((entry) =>
+      entry.message?.role === "assistant" ? entry.message.content : [],
+    )
+    .find((part) => part.type === "toolCall" && part.name === "updatePlan");
+  check(call.arguments);
+});
+
+test("redaction cannot admit an over-limit raw plan by shortening its label", async (t) => {
+  const secret = "a-long-label-secret-12345";
+  const params = { ...(await sandbox(t)), knownSecrets: [secret] };
+  const events = [];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream("updatePlan", {
+            steps: [{ step: secret + "x".repeat(20), status: "pending" }],
+          })
+        : stream("Done.");
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(params)).status, "completed");
+  assert.equal(
+    events.some((event) => event.type === "task_plan"),
+    false,
+  );
+  assert.match(
+    requests[1].messages.find((message) => message.role === "tool").content,
+    /Validation failed/,
+  );
+  assert.doesNotMatch(
+    await readFile(params.sessionFile, "utf8"),
+    new RegExp(secret),
+  );
+});
+
+test("legacy configuration parameters cannot add local tools or replace the general role", async (t) => {
   const params = {
     ...(await sandbox(t)),
     kind: "configuration",
@@ -1502,7 +1818,10 @@ test("legacy configuration parameters cannot add tools or replace the general ro
   t.after(() => runtime.close());
   const result = await runtime.run(params);
   assert.equal(result.status, "completed");
-  assert.equal(body.tools, undefined);
+  assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), [
+    "beginSingleStep",
+    "updatePlan",
+  ]);
   assert.match(body.messages[0].content, /Ofox Assistant, a general/);
   assert.doesNotMatch(body.messages[0].content, /configuration assistant/);
   assert.doesNotMatch(JSON.stringify(body.messages), /Saved memory/);
@@ -1512,6 +1831,8 @@ test("the system prompt describes only the capabilities enabled for the run", as
   const prompts = [];
   for (const Runtime of [AssistantRuntime, ProbeRuntime]) {
     const params = await sandbox(t);
+    if (Runtime === AssistantRuntime)
+      params.model = { ...params.model, tools: false };
     const runtime = new Runtime({
       fetch: async (_url, options) => {
         // Pi appends a <cwd> section after the preamble this runtime owns.
@@ -1528,8 +1849,9 @@ test("the system prompt describes only the capabilities enabled for the run", as
   assert.match(chat, /^You are Ofox Assistant/);
   assert.doesNotMatch(
     chat,
-    /tool|attachment|import|search|web|cite|URL|PDF|page/i,
+    /Use only the provided tools|this turn's authorized target|\b(?:attachment|import|search|web|cite|URL|PDF|page)\b/i,
   );
+  assert.ok(!chat.includes(probeGuideline));
   assert.match(withTool, /Use only the provided tools\./);
   assert.ok(withTool.includes(probeGuideline));
 });
@@ -1551,6 +1873,15 @@ async function systemPreamble(t, extra) {
   return preamble;
 }
 
+test("a repair suggestion offers enablement only while repairs are unavailable", async (t) => {
+  for (const localEligible of [false, true]) {
+    const prompt = await systemPreamble(t, { localEligible });
+    assert.match(prompt, /Check my local Codex configuration/);
+    assert.match(prompt, /Help me diagnose and fix Codex/);
+    assert.equal(prompt.includes("[[enable_local_config]]"), !localEligible);
+  }
+});
+
 test("every run knows a mermaid block is drawn as a diagram", async (t) => {
   const plain = await systemPreamble(t, {});
   assert.match(plain, /mermaid code block is drawn as a diagram/);
@@ -1566,8 +1897,15 @@ test("custom instructions follow the role as standing instructions, without the 
     instructions: `Answer in haiku.\nSign as ${token}`,
     knownSecrets: [],
   });
-  assert.ok(instructed.startsWith(`${plain}\n`), instructed);
-  const added = instructed.slice(plain.length);
+  assert.match(instructed, /^You are Ofox Assistant/);
+  const roleTail =
+    "Preserve the user's requirements through long conversations.";
+  const roleEnd = instructed.indexOf(roleTail);
+  assert.ok(roleEnd > 0, instructed);
+  const added = instructed
+    .slice(roleEnd + roleTail.length)
+    .split("Task execution preparation:")[0]
+    .trimEnd();
   assert.match(added, /standing instructions/);
   assert.ok(
     added.endsWith("Answer in haiku.\nSign as [REDACTED]"),
@@ -1686,10 +2024,10 @@ test("read_attachment and its guidance exist only when the conversation has atta
       ["notes.txt", "kept for later", "text/plain"],
     ]);
     const runtime = new AssistantRuntime({
-      fetch: async (_url, options) => {
+      fetch: withPlanningOpening(async (_url, options) => {
         seen.push(JSON.parse(options.body));
         return stream("ok");
-      },
+      }, "single"),
     });
     t.after(() => runtime.close());
     const result = await runtime.run({
@@ -1700,10 +2038,11 @@ test("read_attachment and its guidance exist only when the conversation has atta
   }
   const [textOnly, vision] = seen;
   for (const body of seen) {
-    assert.deepEqual(
-      body.tools.map((tool) => tool.function.name),
-      ["read_attachment"],
-    );
+    assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), [
+      "beginSingleStep",
+      "read_attachment",
+      "updatePlan",
+    ]);
     assert.match(body.messages[0].content, /read_attachment reads UTF-8 text/);
     assert.doesNotMatch(lastUserText(body), /kept for later/);
   }
@@ -2119,17 +2458,20 @@ test("reading a mixed PDF through a tool discloses text coverage and missing pag
   let calls = 0;
   let body;
   const runtime = new AssistantRuntime({
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       body = JSON.parse(init.body);
       return ++calls === 1
         ? toolStream("read_attachment", { id: "mixed.pdf" })
         : stream("Choose a vision model for page 2");
-    },
+    }, "single"),
   });
   t.after(() => runtime.close());
   const result = await runtime.run(params);
   assert.equal(result.status, "completed");
-  const tool = body.messages.find((message) => message.role === "tool");
+  const tool = body.messages.find(
+    (message) =>
+      message.role === "tool" && !isFixtureOpening(message.tool_call_id),
+  );
   assert.match(tool.content, /Cover only/);
   assert.match(tool.content, /pagesWithoutText.*2/);
   assert.match(tool.content, /vision model/i);
@@ -2145,12 +2487,12 @@ test("a vision model renders a PDF page through read_attachment", async (t) => {
   let calls = 0;
   let body;
   const runtime = new AssistantRuntime({
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       body = JSON.parse(init.body);
       return ++calls === 1
         ? toolStream("read_attachment", { id: "scan.pdf", page: 1 })
         : stream("A red square");
-    },
+    }, "single"),
   });
   t.after(() => runtime.close());
   const result = await runtime.run(params);
@@ -2435,6 +2777,202 @@ function thinkingReply(name) {
   ]);
 }
 
+function initialPptPlanReply(protocol, steps) {
+  const name = "updatePlan";
+  const input = { steps };
+  if (protocol === "completions") return toolStream(name, input);
+  if (protocol === "responses") {
+    const call = {
+      id: "fc-plan",
+      call_id: "call-plan",
+      type: "function_call",
+      name,
+    };
+    const response = {
+      id: "response-plan",
+      status: "completed",
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    return eventsResponse([
+      { type: "response.created", response },
+      { type: "response.output_item.added", output_index: 0, item: call },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { ...call, arguments: JSON.stringify(input) },
+      },
+      { type: "response.completed", response },
+    ]);
+  }
+  return eventsResponse([
+    {
+      type: "message_start",
+      message: {
+        id: "plan-message",
+        type: "message",
+        role: "assistant",
+        model: "anthropic/claude-haiku-5.5",
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_plan", name, input: {} },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ]);
+}
+
+test("an explicit PPTX requests its initial plan before other tools across providers", async (t) => {
+  const models = await thinkingModels();
+  const steps = [
+    { step: "Prepare slides", status: "in_progress" },
+    { step: "Deliver deck", status: "pending" },
+  ];
+  for (const [protocol, toolChoice] of [
+    ["completions", { type: "function", function: { name: "updatePlan" } }],
+    ["responses", { type: "function", name: "updatePlan" }],
+    ["anthropic", { type: "tool", name: "updatePlan" }],
+  ]) {
+    await t.test(protocol, async (t) => {
+      const params = await sandbox(t);
+      const outbound = [];
+      const plans = [];
+      const runtime = new AssistantRuntime({
+        fetch: async (_url, init) => {
+          outbound.push(JSON.parse(init.body));
+          return outbound.length === 1
+            ? initialPptPlanReply(protocol, steps)
+            : thinkingReply(protocol);
+        },
+        emit: (event) => {
+          if (event.type === "task_plan") plans.push(event.data.steps);
+        },
+        hostCall: async () => assert.fail("Planning cannot call a Host tool"),
+      });
+      t.after(() => runtime.close());
+      let input = atLevel(protocol, models[protocol]);
+      if (protocol === "completions")
+        input = { ...input, id: "deepseek/deepseek-v4.1-flash-1017" };
+      const result = await runtime.run({
+        ...params,
+        model: input,
+        thinkingLevel: "high",
+        prompt: "Create three slides about attention",
+        documents: { formats: ["pptx"], selectedStyle: "auto" },
+      });
+      assert.equal(result.status, "completed");
+      assert.deepEqual(plans, [steps]);
+      assert.equal(outbound.length, 2);
+      const [first, next] = outbound;
+      const names = (body) =>
+        body.tools.map((tool) => tool.function?.name ?? tool.name).sort();
+      assert.deepEqual(names(first), ["updatePlan"]);
+      assert.deepEqual(first.tool_choice, toolChoice);
+      assert.deepEqual(names(next), [
+        "beginSingleStep",
+        "create_document",
+        "get_presentation_style",
+        "updatePlan",
+      ]);
+      assert.equal(next.tool_choice, undefined);
+      if (protocol === "completions") {
+        assert.deepEqual(first.thinking, { type: "disabled" });
+        assert.equal(next.thinking, undefined);
+        assert.equal(next.reasoning_effort, "high");
+      } else if (protocol === "anthropic") {
+        assert.deepEqual(first.thinking, { type: "disabled" });
+        assert.equal(next.thinking.type, "adaptive");
+      }
+    });
+  }
+});
+
+test("only a valid initial checklist opens the selected PPTX tools", async (t) => {
+  const steps = [
+    { step: "Draft slides", status: "in_progress" },
+    { step: "Deliver slides", status: "pending" },
+  ];
+  const choice = { type: "function", function: { name: "updatePlan" } };
+  for (const scenario of [
+    "empty checklist",
+    "ignored choice",
+    "text instead",
+  ]) {
+    await t.test(scenario, async (t) => {
+      const params = await sandbox(t);
+      const outbound = [];
+      const plans = [];
+      const hostCalls = [];
+      const runtime = new AssistantRuntime({
+        fetch: async (_url, init) => {
+          outbound.push(JSON.parse(init.body));
+          if (outbound.length === 1) {
+            if (scenario === "empty checklist")
+              return toolStream("updatePlan", { steps: [] });
+            if (scenario === "ignored choice")
+              return toolStream("create_document", {
+                name: "unexpected.md",
+                format: "md",
+                content: "Do not create this",
+              });
+            return stream("Skipped planning");
+          }
+          if (scenario === "ignored choice") return stream("Skipped planning");
+          return outbound.length === 2
+            ? toolStream("updatePlan", { steps }, undefined, "call-valid-plan")
+            : stream("Planned");
+        },
+        emit: (event) => {
+          if (event.type === "task_plan") plans.push(event.data.steps);
+        },
+        hostCall: async (request) => hostCalls.push(request),
+      });
+      t.after(() => runtime.close());
+      const result = await runtime.run({
+        ...params,
+        prompt: "Create three slides about attention",
+        documents: { formats: ["pptx", "md"], selectedStyle: "cartesian" },
+      });
+      assert.deepEqual(hostCalls, []);
+      if (scenario === "empty checklist") {
+        assert.equal(result.status, "completed");
+        assert.deepEqual(plans, [steps]);
+        assert.deepEqual(
+          outbound.map((body) => body.tool_choice),
+          [choice, choice, undefined],
+        );
+      } else {
+        assert.equal(result.status, "error");
+        assert.equal(
+          result.errorCode,
+          scenario === "ignored choice"
+            ? "assistant_plan_required"
+            : "assistant_invalid_plan",
+        );
+        assert.deepEqual(plans, []);
+        assert.deepEqual(
+          outbound.map((body) => body.tool_choice),
+          scenario === "ignored choice" ? [choice, choice] : [choice],
+        );
+      }
+    });
+  }
+});
+
 /** One run of `input`; its raw request body and events. */
 async function thinkingRun(t, name, input, extra = {}) {
   const params = await sandbox(t);
@@ -2470,7 +3008,7 @@ async function thinkingRun(t, name, input, extra = {}) {
   };
 }
 
-test("a run without a thinking level sends exactly the request it sent before levels existed", async (t) => {
+test("a tool-free run without a thinking level sends the pinned default provider request", async (t) => {
   const pinned = JSON.parse(
     await readFile(
       new URL("./fixtures/default-requests.json", import.meta.url),
@@ -2478,7 +3016,8 @@ test("a run without a thinking level sends exactly the request it sent before le
     ),
   );
   for (const [name, input] of Object.entries(await thinkingModels())) {
-    const plain = await thinkingRun(t, name, input);
+    const toolFree = { ...input, tools: false };
+    const plain = await thinkingRun(t, name, toolFree);
     assert.equal(plain.raw, pinned[name], name);
     assert.deepEqual(
       plain.events.find((event) => event.type === "run_start").data,
@@ -2486,14 +3025,14 @@ test("a run without a thinking level sends exactly the request it sent before le
     );
     // The catalog's thinking fields alone change nothing either.
     assert.equal(
-      (await thinkingRun(t, name, atLevel(name, input))).raw,
+      (await thinkingRun(t, name, atLevel(name, toolFree))).raw,
       pinned[name],
       name,
     );
   }
 });
 
-test("empty custom instructions leave each provider's default request exactly as it was", async (t) => {
+test("empty custom instructions preserve each provider's pinned tool-free request", async (t) => {
   const pinned = JSON.parse(
     await readFile(
       new URL("./fixtures/default-requests.json", import.meta.url),
@@ -2502,7 +3041,14 @@ test("empty custom instructions leave each provider's default request exactly as
   );
   for (const [name, input] of Object.entries(await thinkingModels()))
     assert.equal(
-      (await thinkingRun(t, name, input, { instructions: "" })).raw,
+      (
+        await thinkingRun(
+          t,
+          name,
+          { ...input, tools: false },
+          { instructions: "" },
+        )
+      ).raw,
       pinned[name],
       name,
     );
@@ -2740,47 +3286,59 @@ test("tool preparation is visible while arguments stream, before any execution a
         issues: [],
       };
     },
-    fetch: async () =>
-      ++requestCount > 1
-        ? stream("done")
-        : new Response(
-            new ReadableStream({
-              async start(controller) {
-                controller.enqueue(
-                  chunk({
-                    role: "assistant",
-                    tool_calls: [
-                      {
-                        index: 0,
-                        id: "call-preparing",
-                        type: "function",
-                        function: {
-                          name: "create_document",
-                          arguments:
-                            '{"name":"notes.md","format":"md","content":"',
+    fetch: withPlanningOpening(
+      async () =>
+        ++requestCount > 1
+          ? stream("done")
+          : new Response(
+              new ReadableStream({
+                async start(controller) {
+                  controller.enqueue(
+                    chunk({
+                      role: "assistant",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call-preparing",
+                          type: "function",
+                          function: {
+                            name: "create_document",
+                            arguments: '{"name":"notes.md",',
+                          },
                         },
-                      },
-                    ],
-                  }),
-                );
-                await blocked;
-                controller.enqueue(
-                  chunk({
-                    tool_calls: [
-                      {
-                        index: 0,
-                        function: { arguments: 'private-source-code"}' },
-                      },
-                    ],
-                  }),
-                );
-                controller.enqueue(chunk({}, "tool_calls"));
-                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                controller.close();
-              },
-            }),
-            { headers: { "content-type": "text/event-stream" } },
-          ),
+                      ],
+                    }),
+                  );
+                  controller.enqueue(
+                    chunk({
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: { arguments: '"format":"md","content":"' },
+                        },
+                      ],
+                    }),
+                  );
+                  await blocked;
+                  controller.enqueue(
+                    chunk({
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: { arguments: 'private-source-code"}' },
+                        },
+                      ],
+                    }),
+                  );
+                  controller.enqueue(chunk({}, "tool_calls"));
+                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                  controller.close();
+                },
+              }),
+              { headers: { "content-type": "text/event-stream" } },
+            ),
+      "single",
+    ),
   });
   t.after(() => runtime.close());
   const running = runtime.run({
@@ -2809,6 +3367,10 @@ test("tool preparation is visible while arguments stream, before any execution a
       false,
     );
     assert.equal(calls.length, 0, "the Host has not executed a tool");
+    const activity = events.filter((event) => event.type === "model_activity");
+    assert.ok(activity.length > 0, "streamed arguments must renew model liveness");
+    assert.deepEqual(Object.keys(activity[0].data), ["bytes"]);
+    assert.ok(activity[0].data.bytes > 0);
   } finally {
     release();
     await running;
@@ -2843,10 +3405,13 @@ test("tool preparation clears after SDK validation without inventing an executio
       hostCalls++;
       throw new Error("must not execute");
     },
-    fetch: async () =>
-      ++requests === 1
-        ? toolStream("create_document", { format: "md" })
-        : stream("done"),
+    fetch: withPlanningOpening(
+      async () =>
+        ++requests === 1
+          ? toolStream("create_document", { format: "md" })
+          : stream("done"),
+      "single",
+    ),
   });
   t.after(() => runtime.close());
   const result = await runtime.run({
@@ -2882,10 +3447,13 @@ test("tool preparation never publishes arbitrary registered tool names", async (
       hostCalls++;
       return { status: "completed", output: "ok" };
     },
-    fetch: async () =>
-      ++requests === 1
-        ? toolStream(probeToolName, { command: "private command" })
-        : stream("done"),
+    fetch: withPlanningOpening(
+      async () =>
+        ++requests === 1
+          ? toolStream(probeToolName, { command: "private command" })
+          : stream("done"),
+      "single",
+    ),
   });
   t.after(() => runtime.close());
   assert.equal((await runtime.run(await sandbox(t))).status, "completed");
@@ -3616,14 +4184,14 @@ test("retrying a model request after a tool or media operation never replays tha
         calls.push(call);
         return { status: "completed", model: "media", files: [] };
       },
-      fetch: async () => {
+      fetch: withPlanningOpening(async () => {
         requests++;
         return requests === 1
           ? toolStream(name, args)
           : requests < 4
             ? Response.json({ error: { message: "busy" } }, { status: 503 })
             : stream("Done once");
-      },
+      }, "single"),
     });
     assert.equal((await runtime.run(params)).status, "completed", name);
     assert.equal(requests, 4, name);
@@ -3683,10 +4251,10 @@ test("assistant skills appear in the actual provider prompt without local tools"
   ];
   const requests = [];
   const runtime = new AssistantRuntime({
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       requests.push(JSON.parse(init.body));
       return stream("done");
-    },
+    }, "single"),
   });
   await runtime.run(params);
   assert.match(JSON.stringify(requests[0].messages), /Available skills/);
@@ -3725,10 +4293,13 @@ test("assistant use_skill reaches the host without local tools", async (t) => {
         truncated: false,
       };
     },
-    fetch: async () =>
-      count++ === 0
-        ? toolStream("use_skill", { name: "drawing" })
-        : stream("done"),
+    fetch: withPlanningOpening(
+      async () =>
+        count++ === 0
+          ? toolStream("use_skill", { name: "drawing" })
+          : stream("done"),
+      "single",
+    ),
   });
   await runtime.run(params);
   assert.equal(calls.length, 1);
@@ -3759,15 +4330,18 @@ test("use_skill hands the model the skill body as written, not as JSON", async (
       files: ["SKILL.md", "references/a.md"],
       truncated: false,
     }),
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       request = JSON.parse(init.body);
       return count++ === 0
         ? toolStream("use_skill", { name: "drawing" })
         : stream("done");
-    },
+    }, "single"),
   });
   await runtime.run(params);
-  const tool = request.messages.find((message) => message.role === "tool");
+  const tool = request.messages.find(
+    (message) =>
+      message.role === "tool" && !isFixtureOpening(message.tool_call_id),
+  );
   assert.ok(tool.content.includes(body), tool.content);
   assert.match(
     tool.content,
@@ -3808,10 +4382,10 @@ test("models without tools receive neither use_skill nor an instruction to call 
 test("system prompt tells the model to produce files with create_document", async (t) => {
   const requests = [];
   const runtime = new AssistantRuntime({
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       requests.push(JSON.parse(init.body));
       return stream("done");
-    },
+    }, "single"),
   });
   t.after(() => runtime.close());
   const result = await runtime.run({
@@ -3857,8 +4431,11 @@ test("no create_document without the documents param", async (t) => {
     const result = await runtime.run({ ...(await sandbox(t)), ...extra });
     assert.equal(result.status, "completed");
   }
-  for (const body of requests) {
-    assert.equal(body.tools, undefined);
+  for (const [index, body] of requests.entries()) {
+    assert.deepEqual(
+      (body.tools ?? []).map((tool) => tool.function.name).sort(),
+      index === 0 ? ["beginSingleStep", "updatePlan"] : [],
+    );
     assert.doesNotMatch(
       body.messages[0].content,
       /create_document|cannot attach|cannot produce/,
@@ -3891,12 +4468,12 @@ test("only a vision model sees the document's preview after create_document", as
           previewPath,
         };
       },
-      fetch: async (_url, init) => {
+      fetch: withPlanningOpening(async (_url, init) => {
         requests.push(JSON.parse(init.body));
         return requests.length === 1
           ? toolStream("create_document", args)
           : stream("done");
-      },
+      }, "single"),
     });
     t.after(() => runtime.close());
     const result = await runtime.run({
@@ -3936,7 +4513,7 @@ test("a create_document call the runtime rejects ends unsuccessful, a created fi
         issues: [],
       };
     },
-    fetch: async (_url, init) => {
+    fetch: withPlanningOpening(async (_url, init) => {
       requests.push(JSON.parse(init.body));
       return requests.length === 1
         ? toolStream(
@@ -3948,7 +4525,7 @@ test("a create_document call the runtime rejects ends unsuccessful, a created fi
             },
           )
         : stream("done");
-    },
+    }, "plan"),
   });
   t.after(() => runtime.close());
   const result = await runtime.run({
@@ -3962,7 +4539,10 @@ test("a create_document call the runtime rejects ends unsuccessful, a created fi
   );
   assert.deepEqual(
     events
-      .filter((event) => event.type === "tool_end")
+      .filter(
+        (event) =>
+          event.type === "tool_end" && !isFixtureOpening(event.data.toolCallId),
+      )
       .map(({ data }) => [data.toolCallId, data.success]),
     [
       ["call-one", false],
@@ -3970,7 +4550,8 @@ test("a create_document call the runtime rejects ends unsuccessful, a created fi
     ],
   );
   const results = requests[1].messages.filter(
-    (message) => message.role === "tool",
+    (message) =>
+      message.role === "tool" && !isFixtureOpening(message.tool_call_id),
   );
   assert.match(
     JSON.stringify(results[0]),

@@ -3,8 +3,8 @@
 use super::{
     attachments, catalog,
     host::{
-        blocking, local_gateway_allowed, native_entries, navigate_native, read_optional, restore,
-        session_key, AssistantHost, CatalogSnapshot, Identity, RunControl,
+        blocking, native_entries, navigate_native, read_optional, restore, session_key,
+        AssistantHost, CatalogSnapshot, Identity, RunControl,
     },
     projection::merge_native,
     store::{self, SessionList, SessionRecord},
@@ -16,6 +16,116 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// A narrow startup hint, never execution authority. Only the current user's
+/// opening clause is considered; tutorials, quotations and history are not
+/// document requests. Ambiguous turns can still select a PPT style or skill.
+fn requests_presentation(text: &str) -> bool {
+    fn word_position(text: &str, word: &str) -> Option<usize> {
+        text.match_indices(word).find_map(|(at, _)| {
+            let boundary = |ch: char| !ch.is_ascii_alphanumeric() && ch != '_';
+            (text[..at].chars().next_back().is_none_or(boundary)
+                && text[at + word.len()..].chars().next().is_none_or(boundary))
+            .then_some(at)
+        })
+    }
+    let clause = text
+        .split(['\n', '\r', '。', '；', ';'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if clause.contains(['`', '?', '？']) {
+        return false;
+    }
+    let ascii_format = ["pptx", "ppt", "powerpoint", "slides"]
+        .iter()
+        .filter_map(|word| word_position(&clause, word))
+        .min();
+    let local_format = [
+        "幻灯片",
+        "演示文稿",
+        "スライド",
+        "プレゼンテーション",
+        "パワーポイント",
+    ]
+    .iter()
+    .filter_map(|word| clause.find(word))
+    .min();
+    if ascii_format.is_none() && local_format.is_none() {
+        return false;
+    }
+    let direct = ["请帮我", "请你", "帮我", "请", "please "]
+        .iter()
+        .find_map(|prefix| clause.strip_prefix(prefix))
+        .unwrap_or(&clause)
+        .trim_start();
+    let chinese = [
+        "制作", "生成", "创建", "做", "修改", "编辑", "更新", "重做", "调整", "优化",
+    ]
+    .iter()
+    .any(|verb| direct.starts_with(verb))
+        && !["怎么", "如何", "什么", "方法", "教程", "能不能", "是否"]
+            .iter()
+            .any(|question| direct.contains(question));
+    let english = [
+        "create ",
+        "generate ",
+        "make ",
+        "build ",
+        "edit ",
+        "update ",
+        "revise ",
+        "modify ",
+        "redesign ",
+    ]
+    .iter()
+    .any(|verb| direct.starts_with(verb))
+        && ascii_format.is_some_and(|at| {
+            // "Generate Python code to create a PPTX" requests code, not a
+            // presentation. Likewise a tutorial or UI component about slides.
+            ![
+                "markdown",
+                "tutorial",
+                "code",
+                "function",
+                "component",
+                "script",
+                "guide",
+                "react",
+                "html",
+            ]
+            .iter()
+            .any(|word| word_position(&clause[..at], word).is_some())
+                && !["pptx", "ppt", "powerpoint", "slides"]
+                    .iter()
+                    .any(|format| {
+                        clause[at..].strip_prefix(format).is_some_and(|tail| {
+                            let tail = tail.trim_start();
+                            [
+                                "tutorial",
+                                "component",
+                                "function",
+                                "code",
+                                "script",
+                                "guide",
+                            ]
+                            .iter()
+                            .any(|word| word_position(tail, word) == Some(0))
+                        })
+                    })
+        });
+    chinese
+        || english
+        || [
+            "を作成してください",
+            "を修正してください",
+            "を編集してください",
+            "を更新してください",
+        ]
+        .iter()
+        .any(|ending| direct.trim_end_matches(['.', '！', '!']).ends_with(ending))
+}
 
 // Only supported UI language codes cross the runtime boundary. The renderer
 // resolves first-launch language; persisted settings keep old callers working.
@@ -33,6 +143,18 @@ fn request_ui_language(requested: Option<&str>, saved: Option<&str>) -> String {
 const MAX_MESSAGE_BYTES: usize = 128_000;
 /// The turn to show is not a user turn of the conversation's native history.
 const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
+
+fn local_task_paths(
+    mut paths: super::tools::context::LocalPaths,
+) -> Result<super::tools::context::LocalPaths, String> {
+    // Pin the same physical home that Host diagnostics report, including
+    // partial mutations that have no structured verificationFolder result.
+    paths.home = super::tools::scope::resolve(&paths.home)?;
+    if !paths.home.is_dir() {
+        return Err("assistant_local_unavailable".into());
+    }
+    Ok(paths)
+}
 
 fn apply_presentation_text_budget(
     policy: Option<&super::presentation::VisualPolicy>,
@@ -87,12 +209,13 @@ impl AssistantHost {
         let identity = self.identity().await?;
         let generation = self.generation();
         self.refresh_catalog(identity.clone(), generation, refresh)?;
+        self.start_document_preparation();
         let snapshot = self.cached_catalog(&identity, generation)?;
         self.bootstrap_snapshot(identity, generation, snapshot)
             .await
     }
     /// Explicit full-read callers retain source retry and timeout semantics.
-    pub async fn bootstrap(&self) -> Result<Value, String> {
+    pub async fn bootstrap(self: &Arc<Self>) -> Result<Value, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         let (catalog, error) = match self.page_models(&identity.apex).await {
@@ -108,6 +231,7 @@ impl AssistantHost {
                 .load(std::sync::atomic::Ordering::SeqCst),
             refreshing: false,
         };
+        self.wait_document_preparation().await;
         self.bootstrap_snapshot(identity, generation, snapshot)
             .await
     }
@@ -141,12 +265,7 @@ impl AssistantHost {
         })
         .await
         .unwrap_or_default();
-        // Documents only with the runtime that registers their tool.
-        let runtime = match self.runtime() {
-            Ok(r) => json!({"available":true,"reason":null,"version":r.version,
-                "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
-            Err(reason) => json!({"available":false,"reason":reason,"version":null}),
-        };
+        let runtime = self.runtime_fields();
         let key = if self.env.key_ready(&identity).await {
             "ready"
         } else {
@@ -165,6 +284,34 @@ impl AssistantHost {
         object.insert("rememberedModels".into(), remembered);
         object.insert("speechPreferences".into(), speech);
         Ok(value)
+    }
+    fn runtime_fields(&self) -> Value {
+        // Inventory is independent of the optional, potentially slow native
+        // isolation proof. Python stays unavailable until that proof passes.
+        match self.runtime() {
+            Ok(r) => json!({"available":true,"reason":null,"version":r.version,
+                "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
+            Err(reason) => json!({"available":false,"reason":reason,"version":null}),
+        }
+    }
+    pub(super) async fn publish_runtime(
+        &self,
+        identity: &Identity,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.ensure_current(identity, generation).await?;
+        let mut data =
+            json!({"owner":identity.owner,"generation":generation,"runtime":self.runtime_fields()});
+        super::host::scrub_secrets_in(&mut data, &self.known_keys());
+        self.ensure_current(identity, generation).await?;
+        self.env.emit(Event {
+            session_id: String::new(),
+            run_id: String::new(),
+            operation_id: String::new(),
+            r#type: "runtime_state".into(),
+            data,
+        });
+        Ok(())
     }
     pub(super) async fn publish_catalog(
         &self,
@@ -697,11 +844,44 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
-        // Local configuration where this computer offers it: a conversation
-        // still chats when its paths are unavailable.
-        let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
-            match self.env.local_paths().await {
-                Ok(paths) => Some(paths),
+        // Explicit deck workflows need Python in the first runtime schema.
+        // A normal text turn carries workflowVersion too, so that flag alone
+        // must never make chat wait for optional document isolation.
+        let deck_context = branch.presentation_style_id.is_some()
+            || branch.skill.as_deref() == Some(super::skills::PPTX_BUILTIN)
+            || requests_presentation(branch.resent_text.as_deref().unwrap_or(&request.text))
+            || branch.file_references.iter().any(|reference| {
+                record.attachments.iter().any(|file| {
+                    file.id == reference.attachment_id
+                        && file.mime_type
+                            == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                })
+            });
+        if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
+            self.wait_document_preparation().await;
+        } else {
+            self.start_document_preparation();
+        }
+        self.ensure_current(&identity, generation).await?;
+
+        // The persisted capability is eligibility. Resolve an actual target
+        // from the active user turn, before loading any model-only context.
+        let task = super::tools::task::Task::from_user_text(
+            branch.resent_text.as_deref().unwrap_or(&request.text),
+        );
+        let local_task = if model.tools {
+            task.filter(|task| {
+                task.access == super::tools::task::Access::Diagnose
+                    || (super::capabilities::enabled(&record.session.capabilities)
+                        && request.retry_message_id.is_none()
+                        && request.regenerate_message_id.is_none())
+            })
+        } else {
+            None
+        };
+        let local = if let Some(task) = local_task {
+            match self.env.local_paths().await.and_then(local_task_paths) {
+                Ok(paths) => Some((task, paths.home, paths.skill)),
                 Err(error) => {
                     log::warn!("[Assistant] local configuration is unavailable: {error}");
                     None
@@ -710,8 +890,9 @@ impl AssistantHost {
         } else {
             None
         };
-        let mut local_config = local_paths.map(|paths| {
-            json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
+        let mut local_config = local.as_ref().map(|(task, folder, skill)| {
+            let target = (task.tool, folder.clone());
+            json!({"task":task,"cwd":folder,"platform":std::env::consts::OS,"skillPath":skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id, Some(&target))})
         });
         self.remember_key(&key);
         let ui_language = request_ui_language(
@@ -727,14 +908,16 @@ impl AssistantHost {
                 .clone()
                 .unwrap_or_default(),
         ));
-        control.presentation_context=branch.presentation_style_id.is_some() || branch.file_references.iter().any(|reference|record.attachments.iter().any(|file|file.id==reference.attachment_id && file.mime_type=="application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+        control.presentation_context = deck_context;
         carry_presentation_spend(&mut control, &record, &branch);
         control.presentation_enabled = request.presentation_workflow_version == Some(1)
             && model.tools
             && self.runtime().is_ok()
             && self.engines().formats().contains(&"pptx");
         control.ui_language = ui_language.clone();
-        control.local_enabled = local_config.is_some();
+        control.local_home = local.as_ref().map(|(_, folder, _)| folder.clone());
+        control.local_task = local.map(|(task, folder, _)| (task, folder));
+        control.local_enabled = control.local_task.is_some();
         control.mcp = super::mcp::current(self.env.config_dir())
             .await
             .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
@@ -885,7 +1068,7 @@ impl AssistantHost {
             "knownSecrets": control.secrets(),
             "apex": identity.apex,
             "baseUrl": base_url,
-            "allowLocalGateway": local_gateway_allowed(&base_url),
+            "allowLocalGateway": self.env.allows_local_gateway(&base_url),
             "proxy": proxy,
             "prompt": text,
             "editEntryId": branch.edit_entry,
@@ -893,6 +1076,18 @@ impl AssistantHost {
         });
         if let Some(params) = params.as_object_mut() {
             params.insert("skills".into(), skills["skills"].clone());
+            if super::capabilities::enabled(&record.session.capabilities) {
+                params.insert("localEligible".into(), Value::Bool(true));
+            }
+            if model.tools
+                && control
+                    .skills
+                    .lock()
+                    .map_err(|_| "assistant_state_unavailable")?
+                    .has_selected()
+            {
+                params.insert("readSelectedSkill".into(), Value::Bool(true));
+            }
             params.insert(
                 "mcp".into(),
                 if control.mcp["servers"]
@@ -949,14 +1144,8 @@ impl AssistantHost {
                 if !source_files.is_empty() {
                     documents.insert("sourceFiles".into(), json!(source_files));
                 }
-            }
-            if let Some(style) = branch
-                .presentation_style_id
-                .as_deref()
-                .filter(|style| *style != "auto")
-            {
-                if let Some(documents) = params.get_mut("documents").and_then(Value::as_object_mut)
-                {
+                // An explicit Auto picker selection also commits this turn to PPTX creation.
+                if let Some(style) = branch.presentation_style_id.as_deref() {
                     documents.insert("selectedStyle".into(), json!(style));
                 }
             }
@@ -2087,6 +2276,7 @@ pub(super) fn publish_turn(
     let at = now();
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
+        task_progress: None,
         file_references: branch.file_references.clone(),
         presentation_visual_policy: branch.presentation_visual_policy.clone(),
         presentation_plan: None,
@@ -2117,6 +2307,7 @@ pub(super) fn publish_turn(
         anchor_entry_id: anchor.clone(),
     });
     record.messages.push(Message {
+        task_progress: Some(TaskProgress::new(at)),
         file_references: vec![],
         presentation_visual_policy: None,
         presentation_plan: None,
@@ -2174,6 +2365,74 @@ pub(super) fn publish_turn(
 mod tests {
     use super::*;
     use crate::services::assistant::host::Identity;
+
+    #[test]
+    fn current_user_presentation_commands_wait_without_matching_format_questions() {
+        for text in [
+            "请制作一份用于本机验收的4页16:9 Transformer介绍PPT：包含可编辑公式。",
+            "制作一个transformer汇报PPT",
+            "帮我生成PPTX，不联网。",
+            "请帮我修改这份演示文稿",
+            "更新第4页幻灯片",
+            "Create an eight-page PowerPoint presentation.",
+            "Please generate a PPTX with native equations.",
+            "Edit the slides, preserving their notes.",
+            "Transformerのスライドを作成してください。",
+            "このプレゼンテーションを修正してください。",
+        ] {
+            assert!(requests_presentation(text), "{text}");
+        }
+        for text in [
+            "hi",
+            "PPT是什么？",
+            "怎么创建PPT",
+            "请解释如何制作幻灯片",
+            "制作PPT需要什么软件",
+            "生成PPT的方法",
+            "你能生成PPT吗？",
+            "Explain how to create PowerPoint presentations.",
+            "Can you edit PPTX files?",
+            "Generate an appt reminder.",
+            "Create a powerpoint_helper function.",
+            "Create a slideshare link.",
+            "Create a Markdown tutorial explaining how to edit PowerPoint.",
+            "Create a React slides component.",
+            "Generate Python code to create a PPTX.",
+            "Create a slides component.",
+            "Create a PowerPoint tutorial.",
+            "`Create a PPTX`",
+            "\"Create a PPTX\"",
+            "> Create a PPTX",
+            "Here is an example:\nCreate a PPTX",
+            "先解释一下。请制作PPT",
+            "スライドの作成方法を説明してください。",
+            "「スライドを作成してください」",
+        ] {
+            assert!(!requests_presentation(text), "{text}");
+        }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn local_task_home_is_pinned_before_partial_mutation_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let paths = super::super::tools::context::LocalPaths {
+            home: alias.clone(),
+            config_roots: vec![],
+            shell_files: vec![],
+            skill: real.join("SKILL.md"),
+        };
+        let pinned = local_task_paths(paths).unwrap();
+        assert_eq!(pinned.home, real.canonicalize().unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert_ne!(pinned.home, alias.canonicalize().unwrap());
+    }
 
     #[test]
     #[serial_test::serial]
@@ -2467,6 +2726,43 @@ mod tests {
                 style
             );
             assert_eq!(user.content, "Topic only");
+        }
+    }
+
+    #[test]
+    fn task_progress_starts_at_reply_registration_and_is_fresh_for_each_turn() {
+        let (mut record, _, _, _) = fixture();
+        for _ in 0..2 {
+            let request = send(&record, "Make a report", json!({}));
+            let branch = Branch::resolve(&record, &request).unwrap();
+            let control = RunControl::new(
+                Identity {
+                    owner: "ab".repeat(32),
+                    apex: "ofox.ai".into(),
+                },
+                &request,
+                String::new(),
+            );
+            publish_turn(
+                &mut record,
+                &control,
+                &request,
+                &branch,
+                "Make a report",
+                &[],
+                None,
+                "test/model",
+            )
+            .unwrap();
+            let reply = record.messages.last().unwrap();
+            let value = serde_json::to_value(reply).unwrap();
+            assert_eq!(value["taskProgress"]["startedAt"], reply.created_at);
+            assert_eq!(value["taskProgress"]["steps"], json!([]));
+            let user = &record.messages[record.messages.len() - 2];
+            assert!(serde_json::to_value(user)
+                .unwrap()
+                .get("taskProgress")
+                .is_none());
         }
     }
 

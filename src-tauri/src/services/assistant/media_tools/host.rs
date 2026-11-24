@@ -450,6 +450,7 @@ impl AssistantHost {
         let result = tokio::select! {
             biased;
             _ = cancel.wait_for(|cancelled| *cancelled) => Err(media::UNKNOWN.to_string()),
+            _ = tokio::time::sleep_until(run.run_deadline()) => Err(super::super::documents::runner::RUN_TIMEOUT.to_string()),
             result = work => result,
         };
         if result.is_err() {

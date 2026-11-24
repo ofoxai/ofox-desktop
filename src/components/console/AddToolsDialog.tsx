@@ -72,6 +72,8 @@ export default function AddToolsDialog({
   const { t } = useTranslation();
   const installableTools = useToolInstallCapabilities();
   const alreadyBoundSet = useMemo(() => new Set(alreadyBound), [alreadyBound]);
+  const boundRef = useRef(alreadyBoundSet);
+  const submittingRef = useRef(false);
 
   // 初始 6 张 scanning——对话框打开瞬间不显示空白网格。
   const [entries, setEntries] = useState<ToolEntry[]>(() =>
@@ -87,6 +89,38 @@ export default function AddToolsDialog({
   const [submitting, setSubmitting] = useState(false);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const scanGeneration = useRef(0);
+
+  useEffect(() => {
+    boundRef.current = alreadyBoundSet;
+    // A partial result updates parent state. Refresh binding badges without
+    // running discovery again or replacing the user's remaining selection.
+    setEntries((previous) =>
+      previous.map((entry) => {
+        if (entry.status === "scanning") return entry;
+        if (alreadyBoundSet.has(entry.id)) {
+          return {
+            ...entry,
+            status:
+              entry.status === "missing" || entry.status === "boundMissing"
+                ? "boundMissing"
+                : "bound",
+          };
+        }
+        if (entry.status === "bound" || entry.status === "boundMissing") {
+          return {
+            ...entry,
+            status:
+              entry.status === "boundMissing"
+                ? "missing"
+                : entry.version
+                  ? "unselected"
+                  : "detectionFailed",
+          };
+        }
+        return entry;
+      }),
+    );
+  }, [alreadyBoundSet]);
 
   const detect = useCallback(async () => {
     const generation = ++scanGeneration.current;
@@ -124,7 +158,7 @@ export default function AddToolsDialog({
         const installationStatus = getInstallationStatus(info);
         const detected = installationStatus === "installed" && !info?.error;
         let status: ToolStatus;
-        if (alreadyBoundSet.has(id)) {
+        if (boundRef.current.has(id)) {
           // 已绑工具即便本机检测不到（极少见，比如卸载了 CLI 但配置还在）
           // 也保留 bound 态——用户对"是否已绑"的认知靠 ofox 端，不依赖
           // 本地 CLI 是否仍可用。
@@ -157,7 +191,7 @@ export default function AddToolsDialog({
           if (generation !== scanGeneration.current) return;
           setEntries((prev) =>
             prev.map((e) =>
-              e.id === id
+              e.id === id && !boundRef.current.has(id)
                 ? {
                     ...e,
                     status: "selected",
@@ -186,14 +220,14 @@ export default function AddToolsDialog({
         TOOL_ORDER.map((id) => ({
           id,
           label: TOOL_META[id].label,
-          status: alreadyBoundSet.has(id) ? "bound" : "detectionFailed",
+          status: boundRef.current.has(id) ? "bound" : "detectionFailed",
           version: null,
           autoSelectTick: 0,
         })),
       );
       setScanDone(true);
     }
-  }, [alreadyBoundSet]);
+  }, []);
 
   useEffect(() => {
     if (open) {
@@ -247,7 +281,8 @@ export default function AddToolsDialog({
   const isScanning = entries.some((e) => e.status === "scanning");
 
   const handleConfirm = async () => {
-    if (selected.length === 0) return;
+    if (submittingRef.current || selected.length === 0) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const newlySelectedIds = selected.map((e) => e.id);
@@ -260,17 +295,24 @@ export default function AddToolsDialog({
         toast.success(t("uiCopy.addBound", { value1: newlySucceeded.length }));
       }
       onAdded(succeeded);
-      onOpenChange(false);
+      if (newlySucceeded.length === newlySelectedIds.length) {
+        onOpenChange(false);
+      }
     } catch (e) {
       console.error("[AddToolsDialog] bind failed", e);
       toast.error(t("uiCopy.bindFailed"));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
 
+  const handleOpenChange = (next: boolean) => {
+    if (!submittingRef.current) onOpenChange(next);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] overflow-hidden sm:max-w-[560px]">
         <DialogHeader>
           <DialogTitle>{t("uiCopy.addTools")}</DialogTitle>
@@ -309,13 +351,16 @@ export default function AddToolsDialog({
                   autoSelectTick={e.autoSelectTick}
                   progress={installProgress[e.id]}
                   onClick={() => handleToggle(e.id)}
-                  onRetry={() => void detect()}
+                  onRetry={() => {
+                    if (!submittingRef.current) void detect();
+                  }}
                   onManageBound={() => {
+                    if (submittingRef.current) return;
                     onOpenChange(false);
                     onManageBound?.(e.id);
                   }}
                   onInstall={
-                    installableTools.includes(e.id)
+                    !submitting && installableTools.includes(e.id)
                       ? () => install(e.id)
                       : undefined
                   }

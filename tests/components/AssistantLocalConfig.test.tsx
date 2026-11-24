@@ -62,7 +62,10 @@ describe("the composer's permission control", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Turn on full auto?",
     });
-    expect(dialog).toHaveTextContent(/install, update or remove tools/);
+    expect(dialog).toHaveTextContent(/repairing a launcher or an Ofox binding/);
+    expect(dialog).toHaveTextContent(
+      /only for local operations within the current request/,
+    );
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Cancel" }),
     );

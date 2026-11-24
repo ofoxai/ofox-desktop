@@ -10,6 +10,7 @@ use super::{
     documents::{
         create::EngineSandbox,
         engines::{engines_at, Engines},
+        runner::RUN_TIMEOUT,
     },
     drops::DropSlot,
     process,
@@ -17,6 +18,7 @@ use super::{
         add_usage, is_dangling, merge_native, record_attachment_outcome, save_projection,
         settle_interrupted, settle_run, AttachmentOutcome, ProjectionBuffer,
     },
+    runtime_diagnostics,
     store::AssistantStore,
     title,
     types::*,
@@ -57,7 +59,10 @@ const SEARCH_OUTCOME_UNKNOWN: &str = "assistant_search_outcome_unknown";
 pub(super) const STDIO: &str = "assistant_runtime_stdio";
 pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
+const RUNTIME_EXITED: &str = "assistant_runtime_exited";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
+const PRESENTATION_RUN_DEADLINE: Duration = Duration::from_secs(60 * 60);
+const PRESENTATION_MODEL_IDLE: Duration = Duration::from_secs(5 * 60);
 /// How long a fetched model catalog is trusted.
 const MODELS_TTL: Duration = Duration::from_secs(600);
 /// How long a send does not ask again a catalog source whose read failed: a
@@ -174,6 +179,11 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
     /// The LLM gateway base of `apex`.
     fn gateway_base(&self, apex: &str) -> Result<String, String>;
+    /// A trusted host may grant its own loopback test transport. Application
+    /// environments retain the debug-only policy; no runtime input grants it.
+    fn allows_local_gateway(&self, base_url: &str) -> bool {
+        local_gateway_allowed(base_url)
+    }
     /// Keyless, model-specific provider pricing for a media quote.
     fn provider_prices<'a>(
         &'a self,
@@ -233,6 +243,9 @@ pub struct RunControl {
     /// the language its documents are set in.
     pub(super) ui_language: String,
     pub(super) local_enabled: bool,
+    pub(super) local_task: Option<(super::tools::task::Task, PathBuf)>,
+    /// Physical home captured when this run's local capability was admitted.
+    pub(super) local_home: Option<PathBuf>,
     pub identity: Identity,
     pub session_id: String,
     pub run_id: String,
@@ -246,6 +259,9 @@ pub struct RunControl {
     live_input: Mutex<Option<mpsc::Sender<super::live::LiveCommand>>>,
     pub cancel: watch::Sender<bool>,
     pub deadline: tokio::time::Instant,
+    initial_deadline: tokio::time::Instant,
+    presentation_deadline: tokio::time::Instant,
+    presentation_admitted: AtomicBool,
     /// The accepted Ofox credential, never selected from the scrub list.
     ofox_api_key: Mutex<String>,
     /// Every secret this run must redact, including Ofox keys and unrelated
@@ -255,6 +271,7 @@ pub struct RunControl {
 
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
+        let started = tokio::time::Instant::now();
         Self {
             presentation_style_id: request.presentation_style_id.clone(),
             presentation_enabled: false,
@@ -276,6 +293,8 @@ impl RunControl {
             artifact: None,
             ui_language: "zh".into(),
             local_enabled: false,
+            local_task: None,
+            local_home: None,
             identity,
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
@@ -288,9 +307,45 @@ impl RunControl {
             live_runs: Mutex::new(HashSet::new()),
             live_input: Mutex::new(None),
             cancel: watch::channel(false).0,
-            deadline: tokio::time::Instant::now() + RUN_DEADLINE,
+            deadline: started + RUN_DEADLINE,
+            initial_deadline: started + RUN_DEADLINE,
+            presentation_deadline: started + PRESENTATION_RUN_DEADLINE,
+            presentation_admitted: AtomicBool::new(false),
             ofox_api_key: Mutex::new(secret.clone()),
             secret: Mutex::new(vec![secret]),
+        }
+    }
+
+    /// Only an accepted, persisted deck plan gets the longer overall budget.
+    /// Local callbacks retain `deadline`; an explicitly shorter limit also
+    /// constrains presentation work. Re-freezing never moves the absolute cap.
+    pub(super) fn run_deadline(&self) -> tokio::time::Instant {
+        if self.presentation_admitted.load(Ordering::SeqCst)
+            && self.deadline >= self.initial_deadline
+        {
+            self.presentation_deadline
+        } else {
+            self.deadline
+        }
+    }
+
+    pub(super) fn admit_presentation_deadline(&self) -> Result<(), String> {
+        if self.cancelled() {
+            return Err(CANCELLED.into());
+        }
+        if tokio::time::Instant::now() >= self.run_deadline() {
+            return Err(RUN_TIMEOUT.into());
+        }
+        self.presentation_admitted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn model_wait_deadline(&self, progress: tokio::time::Instant) -> tokio::time::Instant {
+        let end = self.run_deadline();
+        if self.presentation_admitted.load(Ordering::SeqCst) {
+            end.min(progress + PRESENTATION_MODEL_IDLE)
+        } else {
+            end
         }
     }
 
@@ -404,6 +459,13 @@ pub struct AssistantHost {
     /// The bundled document engines; found once, as they never change while
     /// the app runs.
     engines: OnceLock<Engines>,
+    /// Optional document isolation is warmed outside opening chat and ordinary
+    /// text turns: 0 = idle/retryable, 1 = pending, 2 = successfully prepared.
+    document_preparation: AtomicU64,
+    document_preparation_finished: tokio::sync::Notify,
+    #[cfg(test)]
+    document_preparation_barrier:
+        Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// The `sandbox-exec` officecli runs under, once a probe showed it works
     /// there (see `documents::create`).
     pub(super) office_sandbox: EngineSandbox,
@@ -543,7 +605,7 @@ pub fn scrub_detail(text: &str, secrets: &[String]) -> String {
 
 /// The runtime may talk to a plain `http://localhost:<port>` gateway (the
 /// `OFOX_USE_LOCAL` dev gateway, a test's mock) only in debug builds. A
-/// release build always sends `allowLocalGateway: false`.
+/// release application's default environment sends `allowLocalGateway: false`.
 pub(super) fn local_gateway_allowed(base_url: &str) -> bool {
     cfg!(debug_assertions) && is_local_gateway(base_url)
 }
@@ -729,9 +791,36 @@ pub(super) fn runtime_at(base: &Path) -> Result<Runtime, String> {
 
 pub(super) fn runtime_command(runtime: &Runtime) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&runtime.node);
-    command.arg("--max-old-space-size=512").arg(&runtime.entry);
+    command.arg("--max-old-space-size=512");
+    #[cfg(windows)]
+    if matches!(
+        runtime.entry.components().next(),
+        Some(std::path::Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+    ) {
+        // Tauri already canonicalizes the installed executable directory.
+        // Node 22's main-script realpath fails on that verbatim Windows path.
+        command.arg("--preserve-symlinks-main");
+    }
+    command.arg(&runtime.entry);
     process::clean_environment(&mut command);
     command
+}
+
+async fn save_runtime_diagnostic(path: PathBuf, mut report: Value) {
+    report["recordedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    let result = blocking(move || {
+        let bytes = serde_json::to_vec_pretty(&report).map_err(|_| STATE.to_string())?;
+        crate::config::atomic_write_with(
+            &path,
+            &bytes,
+            crate::config::AtomicOpts { mode: Some(0o600) },
+        )
+        .map_err(|_| STATE.to_string())
+    })
+    .await;
+    if result.is_err() {
+        log::warn!("[Assistant] could not write runtime diagnostic");
+    }
 }
 
 /// How a run ended when it did not fail.
@@ -785,6 +874,8 @@ impl From<&str> for Failure {
 #[derive(Default)]
 struct Attempt {
     projection: ProjectionBuffer,
+    model_progress: Option<tokio::time::Instant>,
+    model_progress_bytes: u64,
     /// Text reached the user or a request counted tokens: a refused key is
     /// then not retried, so nothing shown or billed is replayed.
     progressed: bool,
@@ -830,6 +921,10 @@ impl AssistantHost {
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
+            document_preparation: AtomicU64::new(0),
+            document_preparation_finished: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            document_preparation_barrier: Mutex::default(),
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
             python_sandbox: EngineSandbox::default(),
@@ -1036,23 +1131,121 @@ impl AssistantHost {
         }
     }
 
-    /// Whether Python decks are offered: the engine is there (on macOS
-    /// only), and so are officecli, which checks every deck, and
-    /// `sandbox-exec`; officecli's latest sandbox probe did not fail
-    /// (officecli checks a Python deck only in its sandbox), and the Python
-    /// engine's own probe has not failed. Before a probe has run, Python is
-    /// offered and a call is refused when its sandbox turns out missing. A
-    /// failed Python probe, or a runner that could not start the code (see
-    /// [`Self::python_broken`]), turns it off for the session: Python
-    /// content is then refused before the engine runs again.
+    /// Whether complete Python and officecli engines have working isolation.
+    /// macOS can offer Python before its first sandbox-exec engine probe;
+    /// Windows requires a functional proof of the current runtime digest first.
+    /// A failed sandbox probe or a runner that could not start the code (see
+    /// [`Self::python_broken`]) turns it off before another Python call.
     pub(super) fn python_offered(&self) -> bool {
         let engines = self.engines();
+        #[cfg(windows)]
+        let isolation =
+            self.env.runtime_dir().ok().is_some_and(|root| {
+                super::documents::runner::windows_document_engine_proven(&root)
+            });
+        #[cfg(not(windows))]
+        let isolation = self.env.sandbox_exec().is_some_and(|path| path.is_file());
         engines.python.is_some()
             && engines.officecli.is_some()
-            && self.env.sandbox_exec().is_some_and(|path| path.is_file())
+            && isolation
             && !self.office_sandbox.failed()
             && !self.python_sandbox.failed()
             && !self.python_broken.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn start_document_preparation(self: &Arc<Self>) {
+        if self.ensure_accepting_runs().is_err()
+            || self.document_preparation.load(Ordering::SeqCst) != 0
+        {
+            return;
+        }
+        let engines = self.engines();
+        let needed = cfg!(windows) && engines.python.is_some() && engines.officecli.is_some();
+        #[cfg(test)]
+        let needed = needed || self.document_preparation_barrier.lock().unwrap().is_some();
+        if !needed
+            || self
+                .document_preparation
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let host = self.clone();
+        self.track(
+            format!("document-preparation-{}", super::types::id()),
+            async move {
+                host.prepare_document_engines().await;
+                // The runtime is machine-local. Publish only for the authority
+                // current when preparation ends, never the account that began it.
+                if let Ok(identity) = host.identity().await {
+                    let generation = host.generation();
+                    let _ = host.publish_runtime(&identity, generation).await;
+                }
+                let state = if host.office_sandbox.failed() || host.python_sandbox.failed() {
+                    0
+                } else {
+                    2
+                };
+                host.document_preparation.store(state, Ordering::SeqCst);
+                host.document_preparation_finished.notify_waiters();
+            },
+        );
+    }
+
+    /// Explicit document work shares the background proof; ordinary chat does
+    /// not wait. A failed proof is retried by a later operation, never a loop.
+    pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+        // A completed preparation can lose its native proof during a later
+        // cleanup/recheck. Explicit document work may reprove it, while an
+        // actual runner failure remains disabled for this process.
+        if !self.python_broken.load(Ordering::Relaxed) && !self.python_offered() {
+            let _ = self.document_preparation.compare_exchange(
+                2,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        self.start_document_preparation();
+        loop {
+            let finished = self.document_preparation_finished.notified();
+            if self.document_preparation.load(Ordering::SeqCst) != 1 {
+                return;
+            }
+            finished.await;
+        }
+    }
+
+    /// Windows advertises model-code execution only after real functional and
+    /// negative probes on the current complete runtime digest. The launcher
+    /// independently rechecks that proof before each process creation.
+    pub(super) async fn prepare_document_engines(&self) {
+        #[cfg(test)]
+        {
+            let barrier = self.document_preparation_barrier.lock().unwrap().clone();
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                release.notified().await;
+                #[cfg(windows)]
+                return;
+            }
+        }
+        #[cfg(windows)]
+        {
+            let engines = self.engines();
+            if engines.python.is_none() || engines.officecli.is_none() {
+                return;
+            }
+            let ready = match self.env.runtime_dir() {
+                Ok(root) => super::documents::runner::ensure_windows_document_engine_ready(&root)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+            self.office_sandbox.record_windows_probe(ready);
+            self.python_sandbox.record_windows_probe(ready);
+        }
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
@@ -1560,7 +1753,10 @@ impl AssistantHost {
             log::warn!("[Assistant] refused unsafe MCP event payload");
             return;
         }
-        scrub_secrets_in(&mut data, &run.secrets());
+        if super::progress::scrub_event(kind, &mut data, &run.mcp, &run.secrets()).is_err() {
+            log::warn!("[Assistant] refused invalid task progress event metadata");
+            return;
+        }
         self.env.emit(Event {
             session_id: run.session_id.clone(),
             run_id: run.run_id.clone(),
@@ -1707,6 +1903,9 @@ impl AssistantHost {
             return Err(IDENTITY_CHANGED.into());
         }
         self.validate_run(&run)?;
+        if run.local_enabled || super::tools::task::Task::from_user_text(&request.text).is_some() {
+            return Err("assistant_local_task_in_progress".into());
+        }
         if request.id == run.run_id || request.id == run.operation_id {
             return Err("assistant_stale_operation".into());
         }
@@ -1737,19 +1936,47 @@ impl AssistantHost {
         let stdio = || Failure::unsent(STDIO.into());
         self.validate_run(control).map_err(Failure::unsent)?;
         let runtime = self.runtime().map_err(Failure::unsent)?;
-        let mut child =
-            process::Child::spawn(runtime_command(&runtime)).map_err(Failure::unsent)?;
+        let request_id = id();
+        let trace_path = (std::env::var_os(runtime_diagnostics::SWITCH).as_deref()
+            == Some(std::ffi::OsStr::new("1")))
+        .then(|| {
+            self.env
+                .config_dir()
+                .join("assistant-runtime-diagnostics")
+                .join(format!("{request_id}.json"))
+        });
+        let diagnostic = trace_path.is_some();
+        let mut command = runtime_command(&runtime);
+        if diagnostic {
+            command.arg(runtime_diagnostics::NODE_FLAG);
+        }
+        let mut child = match process::Child::spawn_io(command) {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = trace_path {
+                    save_runtime_diagnostic(
+                        path,
+                        json!({"outcome":"spawn_failed","osError":error.raw_os_error()}),
+                    )
+                    .await;
+                }
+                return Err(Failure::unsent("assistant_process_start_failed".into()));
+            }
+        };
         let mut input = child.take_stdin().ok_or_else(stdio)?;
         let output = child.take_stdout().ok_or_else(stdio)?;
         let stderr = child.take_stderr().ok_or_else(stdio)?;
         // Drain, never publish: dependencies may print request headers.
-        let drain = tokio::spawn(async move {
+        let mut drain = tokio::spawn(async move {
+            if diagnostic {
+                return Some(runtime_diagnostics::collect(stderr).await);
+            }
             let _ = process::bounded_output(stderr, 64 * 1024).await;
+            None
         });
         let mut output = BufReader::new(output);
         let mut buffer = Vec::new();
         let mut attempt = Attempt::default();
-        let request_id = id();
         let (sender, mut commands) = mpsc::channel(8);
         if !control.compact_only {
             *control
@@ -1783,13 +2010,63 @@ impl AssistantHost {
         };
         if result.is_err()
             && !attempt.answered
-            && (control.cancelled() || tokio::time::Instant::now() >= control.deadline)
+            && (control.cancelled()
+                || tokio::time::Instant::now() >= control.run_deadline()
+                || result
+                    .as_ref()
+                    .is_err_and(|error| error.code == RUN_TIMEOUT))
         {
             // Let the runtime save the interrupted turn before the process goes.
             self.stop_runtime(control, &request_id, &mut input, &mut output, &mut buffer)
                 .await;
         }
-        child.stop().await;
+        if let Some(path) = trace_path {
+            let outcome = match &result {
+                Ok(Finish::Completed) => "completed",
+                Ok(Finish::Stopped) => "stopped",
+                Err(error) => match error.code.as_str() {
+                    CANCELLED => "cancelled",
+                    RUNTIME_EXITED => "stdout_eof",
+                    STDIO => "stdio_failed",
+                    PROTOCOL => "protocol_failed",
+                    RUN_TIMEOUT => "timed_out",
+                    _ if attempt.answered => "runtime_replied_with_error",
+                    _ => "run_failed",
+                },
+            };
+            // Try to read the genuine status before stop() kills the job. An
+            // EOF may precede process termination by a few scheduler ticks.
+            let exit = child
+                .exit_before_cleanup(matches!(outcome, "stdout_eof" | "stdio_failed"))
+                .await;
+            let exit = match exit {
+                Ok(Some(status)) => json!({
+                    "state":"exited",
+                    "code":status.code(),
+                    "hex":status.code().map(|code| format!("0x{:08X}",code as u32))
+                }),
+                Ok(None) => json!({"state":"alive_before_cleanup"}),
+                Err(error) => json!({"state":"wait_failed","osError":error.raw_os_error()}),
+            };
+            child.stop().await;
+            let trace = match tokio::time::timeout(Duration::from_millis(400), &mut drain).await {
+                Ok(Ok(trace)) => trace,
+                _ => None,
+            };
+            save_runtime_diagnostic(
+                path,
+                json!({
+                    "outcome":outcome,
+                    "exit":exit,
+                    "requestWritten":attempt.sent,
+                    "responseReceived":attempt.answered,
+                    "trace":trace
+                }),
+            )
+            .await;
+        } else {
+            child.stop().await;
+        }
         drain.abort();
         result
     }
@@ -1828,6 +2105,7 @@ impl AssistantHost {
         attempt.sent = true;
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut pending: HashMap<String, super::live::LiveCommand> = HashMap::new();
+        let mut model_progress = tokio::time::Instant::now();
         loop {
             let length = tokio::select! {
                 _ = cancel.changed() => return Err(CANCELLED.into()),
@@ -1856,15 +2134,18 @@ impl AssistantHost {
                         return Err(IDENTITY_CHANGED.into());
                     }
                     self.validate_run(control)?;
-                    if tokio::time::Instant::now() > control.deadline {
-                        return Err("assistant_run_timeout".into());
+                    if tokio::time::Instant::now() >= control.model_wait_deadline(model_progress) {
+                        return Err(RUN_TIMEOUT.into());
                     }
                     continue;
                 }
                 result = read_frame(output, buffer) => result?,
             };
             if length == 0 {
-                return Err("assistant_runtime_exited".into());
+                return Err(RUNTIME_EXITED.into());
+            }
+            if tokio::time::Instant::now() >= control.model_wait_deadline(model_progress) {
+                return Err(RUN_TIMEOUT.into());
             }
             let value: Value = serde_json::from_slice(buffer).map_err(|_| PROTOCOL)?;
             buffer.clear();
@@ -1878,6 +2159,9 @@ impl AssistantHost {
                 let _ = command.reply.send(result);
             } else if value["method"] == "event" {
                 self.on_event(control, &value["params"], attempt).await?;
+                if let Some(progress) = attempt.model_progress.take() {
+                    model_progress = progress;
+                }
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
@@ -1893,7 +2177,19 @@ impl AssistantHost {
                     .as_str()
                     .is_some_and(super::documents::is_document_tool)
                 {
-                    self.dispatch_document_tool(control, &value["params"]).await
+                    let result = self.dispatch_document_tool(control, &value["params"]).await;
+                    // Tool execution owns its workers through cleanup. A
+                    // document deadline ends the run, not just the callback.
+                    if tokio::time::Instant::now() >= control.run_deadline()
+                        || result.as_ref().is_err_and(|error| error == RUN_TIMEOUT)
+                    {
+                        if self.identity().await? != control.identity {
+                            return Err(IDENTITY_CHANGED.into());
+                        }
+                        self.validate_run(control)?;
+                        return Err(RUN_TIMEOUT.into());
+                    }
+                    result
                 } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)
@@ -1902,6 +2198,16 @@ impl AssistantHost {
                 } else {
                     self.dispatch_tool(control, &value["params"]).await
                 };
+                if self.identity().await? != control.identity {
+                    return Err(IDENTITY_CHANGED.into());
+                }
+                self.validate_run(control)?;
+                if tokio::time::Instant::now() >= control.run_deadline() {
+                    return Err(RUN_TIMEOUT.into());
+                }
+                // Tool workers have their own bounded waits. Their elapsed
+                // time is not a model stall, but cannot renew the overall cap.
+                model_progress = tokio::time::Instant::now();
                 let reply = tool_reply(
                     &value["id"],
                     result,
@@ -1930,6 +2236,16 @@ impl AssistantHost {
         }
         super::mcp::scrub_event_data(&mut data, &control.mcp)?;
         match kind {
+            "model_activity" => {
+                let bytes = data["bytes"]
+                    .as_u64()
+                    .filter(|bytes| *bytes > 0 && *bytes <= 9_007_199_254_740_991)
+                    .ok_or(PROTOCOL)?;
+                if bytes > attempt.model_progress_bytes {
+                    attempt.model_progress_bytes = bytes;
+                    attempt.model_progress = Some(tokio::time::Instant::now());
+                }
+            }
             "retrying" => {
                 let retry = data["attempt"]
                     .as_u64()
@@ -1944,6 +2260,12 @@ impl AssistantHost {
                 self.emit(control, "steer_applied", data);
             }
             "text_delta" | "thinking_delta" => {
+                if data["delta"]
+                    .as_str()
+                    .is_some_and(|delta| !delta.is_empty())
+                {
+                    attempt.model_progress = Some(tokio::time::Instant::now());
+                }
                 attempt.progressed = true;
                 attempt.projection.push(control, kind, &mut data);
                 if attempt.projection.due() {
@@ -1975,7 +2297,12 @@ impl AssistantHost {
                     .store(kind == "compaction_start", Ordering::SeqCst);
                 self.emit(control, kind, data);
             }
-            "task_plan" | "task_status" if control.local_enabled => {
+            "task_plan"
+                if !control.compact_only && !control.audio_only && control.artifact.is_none() =>
+            {
+                self.save_task_plan(control, data).await?;
+            }
+            "task_status" if control.local_enabled => {
                 scrub_secrets_in(&mut data, &control.secrets());
                 let shown = super::tools::events::task_event(kind, &data)?;
                 self.emit(control, kind, shown);
@@ -2275,17 +2602,25 @@ impl AssistantHost {
     pub(super) async fn finish(
         self: &Arc<Self>,
         control: &Arc<RunControl>,
-        outcome: Result<Finish, Failure>,
+        mut outcome: Result<Finish, Failure>,
     ) {
-        let stopped = match &outcome {
-            Ok(finish) => *finish == Finish::Stopped,
-            Err(_) => control.cancelled(),
-        };
-        let completed = matches!(outcome, Ok(Finish::Completed));
+        let stopped = matches!(outcome, Ok(Finish::Stopped)) || control.cancelled();
         // A file the reply previewed and never delivered is delivered from
-        // its folder before the folders go.
-        self.deliver_previews(control).await;
+        // its folder before the folders go. Preserve an earlier provider
+        // failure, and never publish a stopped reply's previews.
+        if !stopped {
+            if let Err(code) = self.deliver_previews(control).await {
+                if matches!(outcome, Ok(Finish::Completed)) {
+                    // Saving a local file makes no additional paid request;
+                    // keep the model's already returned usage/cost evidence.
+                    outcome = Err(Failure::unsent(code));
+                }
+            }
+        }
         self.remove_document_folders(control).await;
+        // Stop may arrive while a preview is being kept or its folders go.
+        let stopped = stopped || control.cancelled();
+        let completed = matches!(outcome, Ok(Finish::Completed)) && !stopped;
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
         let error_code = outcome.as_ref().err().map(|failure| failure.code.clone());
@@ -2575,6 +2910,292 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("host/local_interruption_tests.rs");
+    include!("host/presentation_timeout_tests.rs");
+
+    #[tokio::test]
+    async fn task_progress_persists_without_local_access_before_publication() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_config, env, host) = fixture_with_env();
+            *env.apex.lock().unwrap() = apex.into();
+            let store = host.store(&identity().owner).unwrap();
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().identity.apex = apex.into();
+            assert!(!run.local_enabled);
+            store
+                .mutate(&sid, |record| {
+                    record.messages.push(
+                        serde_json::from_value(json!({
+                            "id":run.message_id,"role":"assistant","content":"","createdAt":99,
+                            "status":"streaming","runId":run.run_id,
+                            "taskProgress":{"startedAt":10,"steps":[]}
+                        }))
+                        .unwrap(),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let steps = json!([
+                {"step":"Inspect test-opaque-run-key","status":"completed"},
+                {"step":"Generate document","status":"in_progress"}
+            ]);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+                "type":"task_plan","data":{"steps":steps}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            assert_eq!(saved["taskProgress"]["startedAt"], 10);
+            assert_eq!(saved["taskProgress"]["steps"][1], steps[1]);
+            assert!(!saved.to_string().contains("test-opaque-run-key"));
+            {
+                let events = env.events.lock().unwrap();
+                let shown = events
+                    .iter()
+                    .find(|event| event.r#type == "task_plan")
+                    .unwrap();
+                assert_eq!(shown.data["messageId"], run.message_id);
+                assert_eq!(shown.data["startedAt"], 10);
+                assert_eq!(shown.data["steps"], saved["taskProgress"]["steps"]);
+            }
+            let mut stale = event.clone();
+            stale["operationId"] = json!(id());
+            assert!(host
+                .on_event(&run, &stale, &mut Attempt::default())
+                .await
+                .is_err());
+            let mut invalid = event.clone();
+            invalid["data"]["steps"] = json!([{"step":"x".repeat(41),"status":"pending"}]);
+            assert!(host
+                .on_event(&run, &invalid, &mut Attempt::default())
+                .await
+                .is_err());
+            store
+                .mutate(&sid, |record| {
+                    record.messages[0].status = "completed".into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(host
+                .on_event(&run, &event, &mut Attempt::default())
+                .await
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap()
+                    ["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_does_not_enable_special_runs_or_local_task_status() {
+        for special in ["compact", "audio", "artifact", "status"] {
+            let (_config, env, host) = fixture_with_env();
+            let sid = host
+                .store(&identity().owner)
+                .unwrap()
+                .create("test/model", false)
+                .unwrap()
+                .session
+                .id;
+            let mut run = control(&sid);
+            let config = Arc::get_mut(&mut run).unwrap();
+            match special {
+                "compact" => config.compact_only = true,
+                "audio" => config.audio_only = true,
+                "artifact" => config.artifact = Some("artifact".into()),
+                _ => {}
+            }
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":if special=="status" {"task_status"} else {"task_plan"},"data":{"steps":[],"warning":"repeat_warning"}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            assert!(env.events.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_bounds_unicode_after_secret_redaction() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let secret = "12345678";
+        run.add_secret(secret);
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        for label in [
+            format!("api_key=x {}", "字".repeat(30)),
+            format!("{} api_key=x", "字".repeat(30)),
+            format!("{}{secret}", "字".repeat(32)),
+            format!("api_key=x {}{secret}", "字".repeat(22)),
+        ] {
+            assert!(label.chars().count() <= 40);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":label,"status":"in_progress"}]}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+            assert!(label.chars().count() <= 40);
+            assert!(label.contains(crate::redact::REDACTED));
+            assert!(!label.contains("api_key=x") && !label.contains(&secret[..2]));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["steps"],
+                saved["taskProgress"]["steps"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_scrubs_short_captured_mcp_credentials_only_from_labels() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp = json!({"servers":{"fixture":{"url":"https://fixture.invalid/mcp","headers":{"X-API-Key":"xy7"},"env":{"PIN":"4187","PASSWORD":"pending","LONG_PASSWORD":"completed"}}}});
+        for secret in super::super::mcp::secrets(&run.mcp) {
+            run.add_secret(&secret);
+        }
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Review pending completed 4187 xy7","status":"pending"},{"step":"Finish","status":"completed"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let mut saved =
+            serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+        let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+        for secret in ["xy7", "4187", "pending", "completed"] {
+            assert!(!label.contains(secret));
+        }
+        assert!(label.contains("Review"));
+        assert_eq!(saved["taskProgress"]["steps"][0]["status"], "pending");
+        assert_eq!(saved["taskProgress"]["steps"][1]["status"], "completed");
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["steps"],
+            saved["taskProgress"]["steps"]
+        );
+        saved["status"] = json!("completed");
+        host.emit(&run, "message", json!({"message":saved}));
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "message");
+            assert_eq!(event.data["message"]["status"], "completed");
+            assert_eq!(event.data["message"]["taskProgress"], saved["taskProgress"]);
+        }
+        let mut next = saved.clone();
+        next["status"] = json!("streaming");
+        host.emit(
+            &run,
+            "steer_applied",
+            json!({"messages":[saved,{"id":"user","role":"user","status":"completed"},next,{"id":"queued","role":"user","status":"queued"}]}),
+        );
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "steer_applied");
+            assert_eq!(event.data["messages"][0]["status"], "completed");
+            assert_eq!(event.data["messages"][1]["status"], "completed");
+            assert_eq!(event.data["messages"][2]["status"], "streaming");
+            assert_eq!(event.data["messages"][3]["status"], "queued");
+            assert_eq!(
+                event.data["messages"][0]["taskProgress"],
+                saved["taskProgress"]
+            );
+            assert_eq!(
+                event.data["messages"][2]["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+        // A lookalike object on an unrelated event is not typed metadata.
+        host.emit(
+            &run,
+            "error",
+            json!({"taskProgress":saved["taskProgress"],"status":"completed"}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["taskProgress"]["steps"][1]["status"],
+            crate::redact::REDACTED
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            crate::redact::REDACTED
+        );
+        for status in ["completed", "stopped", "error"] {
+            host.emit(&run, "run_end", json!({"status":status}));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["status"],
+                status
+            );
+        }
+        host.emit(&run, "run_end", json!({"status":"debug completed"}));
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+        host.emit(
+            &run,
+            "message",
+            json!({"message":{"role":"assistant","status":"debug completed"}}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["message"]["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_progress_steering_uses_a_new_reply_snapshot_and_keeps_the_previous_one() {
+        let (_config, _env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let input = id();
+        run.live_runs.lock().unwrap().insert(input.clone());
+        let old_progress =
+            json!({"startedAt":10,"steps":[{"step":"First task","status":"in_progress"}]});
+        store.mutate(&sid,|record|{
+            record.messages=serde_json::from_value(json!([
+                {"id":run.message_id,"role":"assistant","content":"","createdAt":99,"status":"streaming","runId":run.run_id,"taskProgress":old_progress},
+                {"id":input,"role":"user","content":"Next task","createdAt":100,"status":"queued","runId":input}
+            ])).unwrap();
+            Ok(())
+        }).unwrap();
+        let shown = host
+            .apply_live_input(
+                &run,
+                &json!({"id":input,"previousEntryId":"previous-entry"}),
+            )
+            .await
+            .unwrap();
+        let fresh = &shown["messages"][2];
+        assert_eq!(fresh["taskProgress"]["startedAt"], fresh["createdAt"]);
+        assert_eq!(fresh["taskProgress"]["steps"], json!([]));
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Second task","status":"pending"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let saved = store.load_detail(&sid).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved.messages[0]).unwrap()["taskProgress"],
+            old_progress
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.messages[2]).unwrap()["taskProgress"]["steps"][0]["step"],
+            "Second task"
+        );
+    }
 
     #[tokio::test]
     async fn local_write_journals_and_restores_only_after_the_run_ends() {
@@ -3642,6 +4263,42 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_callback_refuses_a_home_alias_retargeted_after_admission() {
+        let (tmp, env, host) = fixture_with_env();
+        let original = tmp.path().join("original-home");
+        let other = tmp.path().join("other-home");
+        std::fs::create_dir_all(original.join("config")).unwrap();
+        std::fs::create_dir_all(other.join("config")).unwrap();
+        let alias = tmp.path().join("home-alias");
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        *env.local_home.lock().unwrap() = Some(alias.clone());
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        let state = Arc::get_mut(&mut run).unwrap();
+        state.local_enabled = true;
+        state.local_home = Some(original.canonicalize().unwrap());
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "toolCallId":"retargeted","name":"bash","args":{"folder":alias.join("config"),
+            "command":"pwd","timeout":2}});
+        let result = host.dispatch_tool(&run, &call).await;
+        assert_eq!(result.unwrap_err(), "assistant_local_scope_changed");
+        assert!(!other.join("config/probe-marker").exists());
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
     /// Dispatches one call and answers the approval it raises with `choice`.
     async fn dispatch_answering(
         host: &Arc<AssistantHost>,
@@ -3814,12 +4471,12 @@ mod tests {
         let pending =
             json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":false}]});
         host.keep_local_task(&run, &json!({"localTaskState":pending}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         // A run that ends without reporting keeps the debt; one that verified clears it.
         host.keep_local_task(&run, &json!({"status":"error"}));
-        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        assert_eq!(host.local_task_state(&owner, &sid, None), pending);
         host.keep_local_task(&run, &json!({"localTaskState":null}));
-        assert_eq!(host.local_task_state(&owner, &sid), Value::Null);
+        assert_eq!(host.local_task_state(&owner, &sid, None), Value::Null);
         host.release_run(&run);
     }
 
@@ -4014,10 +4671,236 @@ mod tests {
         host.release_run(&run);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_document_waiting_to_publish_cannot_reply_or_attach_after_the_run_deadline() {
+        use super::super::media_tools::host::MediaRun;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let (_tmp, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        let state = Arc::get_mut(&mut run).unwrap();
+        state.media = Some(MediaRun::new(Default::default()));
+        state.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        host.register_run(run.clone(), host.generation(), || {
+            store.mutate(&sid, |record| {
+                record.session.active_run = Some(RunRef {
+                    run_id: run.run_id.clone(),
+                    operation_id: run.operation_id.clone(),
+                });
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id":run.message_id,"role":"assistant","content":"",
+                        "createdAt":now(),"status":"streaming","runId":run.run_id,
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+        })
+        .unwrap();
+        let document = |call_id: &str, name: &str, format: &str, content: &str| {
+            json!({
+                "sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+                "toolCallId":call_id,"name":"create_document",
+                "args":{"name":name,"format":format,"content":content},
+            })
+        };
+        let first = host
+            .dispatch_document_tool(&run, &document("first", "keep.txt", "txt", "already saved"))
+            .await
+            .unwrap();
+        let kept = store
+            .attachment_dir(&sid)
+            .unwrap()
+            .join(first["file"]["id"].as_str().unwrap());
+
+        // Hold the real attachment lock while the next tool makes its file.
+        // Release it only after the Host's overall deadline has passed.
+        let (ready, locked) = oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let lock = tokio::task::spawn_blocking({
+            let (store, sid) = (store.clone(), sid.clone());
+            move || {
+                store.with_attachment_lock(&sid, || {
+                    ready.send(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                })
+            }
+        });
+        locked.await.unwrap();
+
+        let (host_pipe, runtime_pipe) = tokio::io::duplex(8192);
+        let turn = tokio::spawn({
+            let (host, run) = (host.clone(), run.clone());
+            async move {
+                let (output, mut input) = tokio::io::split(host_pipe);
+                let (_sender, mut commands) = mpsc::channel(1);
+                host.converse(
+                    &run,
+                    &json!({}),
+                    false,
+                    "run",
+                    (&mut input, &mut BufReader::new(output), &mut Vec::new()),
+                    (&mut Attempt::default(), &mut commands),
+                )
+                .await
+            }
+        });
+        let mut runtime = BufReader::new(runtime_pipe);
+        let mut line = String::new();
+        runtime.read_line(&mut line).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["id"], "run");
+        runtime
+            .write_all(
+                &frame(&json!({
+                    "id":"late-tool","method":"tool",
+                    "params":document("late", "late.md", "md", "should not be published"),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let outputs = store
+            .native_history_path(&sid)
+            .unwrap()
+            .with_file_name("outputs");
+        let wait_started = std::time::Instant::now();
+        while !std::fs::read_dir(&outputs)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.path().join("out.md").is_file())
+        {
+            assert!(
+                wait_started.elapsed() < Duration::from_secs(5),
+                "the late document did not reach its output folder before expiry"
+            );
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(11)).await;
+        release.send(()).unwrap();
+        lock.await.unwrap().unwrap();
+
+        let result = turn.await.unwrap();
+        assert_eq!(result.as_ref().unwrap_err().code, "assistant_run_timeout");
+        host.finish(&run, result).await;
+        let mut replies = String::new();
+        runtime.read_to_string(&mut replies).await.unwrap();
+        assert!(replies.is_empty(), "run returned a tool reply after expiry");
+        let saved = store.load_record(&sid).unwrap();
+        assert_eq!(saved.attachments.len(), 1);
+        assert_eq!(saved.attachments[0].name, "keep.txt");
+        assert_eq!(std::fs::read(kept).unwrap(), b"already saved");
+        assert!(saved.session.active_run.is_none());
+        assert_eq!(saved.messages[0].status, "error");
+        assert_eq!(
+            saved.messages[0].error_code.as_deref(),
+            Some("assistant_run_timeout")
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_python_document_checks_windows_readiness_once_for_the_same_runtime() {
+        use super::super::{
+            documents::windows_sandbox::{
+                readiness_check_count, windows_document_sandbox_receipts,
+            },
+            media_tools::host::MediaRun,
+        };
+
+        let (_tmp, env, host) = fixture_with_env();
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assistant-runtime/resources")
+            .canonicalize()
+            .expect("run pnpm assistant:prepare before native tests");
+        *env.runtime.lock().unwrap() = Some(runtime.clone());
+        host.wait_document_preparation().await;
+        assert!(
+            host.python_offered(),
+            "the prepared Windows runtime must prove isolation"
+        );
+
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().media = Some(MediaRun::new(Default::default()));
+        host.register_run(run.clone(), host.generation(), || {
+            store.mutate(&sid, |record| {
+                record.session.active_run = Some(RunRef {
+                    run_id: run.run_id.clone(),
+                    operation_id: run.operation_id.clone(),
+                });
+                Ok(())
+            })
+        })
+        .unwrap();
+        let checks_before = readiness_check_count(&runtime);
+        let sequence_before = windows_document_sandbox_receipts(0)
+            .last()
+            .and_then(|receipt| receipt["sequence"].as_u64())
+            .unwrap_or_default();
+        let started = std::time::Instant::now();
+        let preview = host
+            .dispatch_document_tool(
+                &run,
+                &json!({
+                    "sessionId":sid, "runId":run.run_id, "operationId":run.operation_id,
+                    "toolCallId":"preview", "name":"create_document",
+                    "args":{
+                        "name":"Readiness fixture.pptx", "format":"pptx", "preview":true,
+                        "content":{"kind":"python","code":
+                            "prs = new_deck(title='Readiness fixture')\ncover_slide(prs, 'Readiness fixture', subtitle='中文 日本語')\n"}
+                    }
+                }),
+            )
+            .await
+            .expect("the fixed Python preview must complete through the native Host");
+        let checks = readiness_check_count(&runtime) - checks_before;
+        let receipts = windows_document_sandbox_receipts(sequence_before);
+        eprintln!(
+            "Windows Python preview: readiness_checks={checks} lpac_launches={} elapsed_ms={}",
+            receipts.len(),
+            started.elapsed().as_millis()
+        );
+        assert_eq!(preview["status"], "completed");
+        assert_eq!(preview["preview"], true);
+        assert_eq!(preview["slides"], 1);
+        assert_eq!(preview["pagePaths"].as_array().map(Vec::len), Some(1));
+        for name in ["node.exe", "officecli.exe"] {
+            assert!(
+                receipts.iter().any(|receipt| {
+                    receipt["executable"]
+                        .as_str()
+                        .is_some_and(|executable| Path::new(executable).ends_with(name))
+                        && receipt["trustedProbe"] == false
+                        && receipt["tokenVerified"] == true
+                        && receipt["jobStopped"] == true
+                        && receipt["cleanupComplete"] == true
+                        && receipt["status"] == 0
+                }),
+                "{name} must keep using the verified LPAC launch"
+            );
+        }
+        host.remove_document_folders(&run).await;
+        host.release_run(&run);
+        assert_eq!(
+            checks, 1,
+            "one runtime readiness check for the whole document"
+        );
+    }
+
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        text_send_enabled: AtomicBool,
+        local_home: Mutex<Option<PathBuf>>,
+        local_mutation_fixture: Mutex<Option<Arc<LocalMutationFixture>>>,
+        local_key_barrier: Mutex<Option<Arc<LocalKeyBarrier>>>,
         skill_refresh_fail: AtomicBool,
         skill_db: Mutex<Option<Arc<crate::Database>>>,
         apex: Mutex<String>,
@@ -4040,6 +4923,36 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_mutate<'a>(
+            &'a self,
+            _name: &'a str,
+            tool: crate::app_config::BindableTool,
+            _model: Option<&'a str>,
+            _operation: &'a str,
+        ) -> BoxFuture<'a, Result<Value, String>> {
+            let fixture = self.local_mutation_fixture.lock().unwrap().clone();
+            Box::pin(async move {
+                let fixture = fixture.ok_or("assistant_local_unavailable")?;
+                if !fixture.change {
+                    return Err("assistant_local_unavailable".into());
+                }
+                let guard = super::super::tools::transaction::begin(
+                    None,
+                    tool.as_str(),
+                    vec![fixture.path.clone()],
+                )?;
+                crate::config::atomic_write(&fixture.path, b"changed")
+                    .map_err(|_| "assistant_write_failed")?;
+                drop(guard);
+                fixture.written.notify_one();
+                if let Some(error) = fixture.fail_after_write {
+                    return Err(error.into());
+                }
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+
         fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
             self.skill_db
                 .lock()
@@ -4119,18 +5032,31 @@ mod tests {
             super::super::skills::read_verified(&db, proof, access, read)
         }
         fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
-            Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
+            let barrier = self.local_key_barrier.lock().unwrap().clone();
+            Box::pin(async move {
+                if let Some(barrier) = barrier {
+                    barrier.entered.notify_one();
+                    barrier.release.notified().await;
+                }
+                Ok(zeroize::Zeroizing::new([7; 32]))
+            })
         }
 
         fn local_paths(
             &self,
         ) -> BoxFuture<'_, Result<super::super::tools::context::LocalPaths, String>> {
             Box::pin(async {
+                let home = self
+                    .local_home
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| self.config.clone());
                 Ok(super::super::tools::context::LocalPaths {
-                    home: self.config.clone(),
-                    config_roots: vec![self.config.join("config")],
-                    shell_files: vec![self.config.join(".zshrc")],
-                    skill: self.config.join("skills/SKILL.md"),
+                    config_roots: vec![home.join("config")],
+                    shell_files: vec![home.join(".zshrc")],
+                    skill: home.join("skills/SKILL.md"),
+                    home,
                 })
             })
         }
@@ -4147,7 +5073,13 @@ mod tests {
             _: Option<&'a str>,
             _: &'a Admit<'a>,
         ) -> BoxFuture<'a, Result<String, String>> {
-            Box::pin(async { Err("assistant_key_unavailable".to_string()) })
+            Box::pin(async {
+                if self.text_send_enabled.load(Ordering::SeqCst) {
+                    Ok("synthetic-inert-runtime-key".into())
+                } else {
+                    Err("assistant_key_unavailable".to_string())
+                }
+            })
         }
         fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
             Box::pin(async { false })
@@ -4179,7 +5111,11 @@ mod tests {
             })
         }
         fn gateway_base(&self, _: &str) -> Result<String, String> {
-            Err("assistant_unknown_apex".into())
+            if self.text_send_enabled.load(Ordering::SeqCst) {
+                Ok("https://api.ofox.ai/v1".into())
+            } else {
+                Err("assistant_unknown_apex".into())
+            }
         }
         fn config_dir(&self) -> PathBuf {
             self.config.clone()
@@ -4219,6 +5155,10 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            text_send_enabled: AtomicBool::new(false),
+            local_home: Mutex::new(None),
+            local_mutation_fixture: Mutex::new(None),
+            local_key_barrier: Mutex::new(None),
             skill_refresh_fail: AtomicBool::new(false),
             skill_db: Mutex::new(None),
             apex: Mutex::new("ofox.ai".into()),
@@ -4742,8 +5682,13 @@ mod tests {
 
     #[test]
     fn the_runtime_may_use_a_local_gateway_only_in_debug_builds() {
+        let (_config, env, _host) = fixture_with_env();
         assert_eq!(
             local_gateway_allowed("http://localhost:8088"),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(
+            env.allows_local_gateway("http://localhost:8088"),
             cfg!(debug_assertions)
         );
         for refused in [
@@ -4758,6 +5703,7 @@ mod tests {
             "http://127.0.0.1:8088",
         ] {
             assert!(!local_gateway_allowed(refused), "{refused}");
+            assert!(!env.allows_local_gateway(refused), "{refused}");
         }
     }
 
@@ -7005,6 +7951,315 @@ while read line; do :; done"#,
         assert!(!formats.contains(&json!("docx")));
     }
     #[tokio::test]
+    async fn cache_first_bootstrap_returns_while_document_preparation_is_pending() {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let opening = tokio::spawn({
+            let host = host.clone();
+            async move { host.bootstrap_cached(false).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let boot = tokio::time::timeout(Duration::from_secs(1), opening)
+            .await
+            .expect("opening chat must not wait for document preparation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(boot["models"][0]["id"], "test/model");
+        assert!(!host.python_offered(), "unproven Python stays unavailable");
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.r#type != "runtime_state"));
+        let again = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .expect("a second bootstrap shares the pending probe")
+            .unwrap();
+        assert_eq!(again["models"][0]["id"], "test/model");
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("tool/model", false)
+            .unwrap()
+            .session
+            .id;
+        let send = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"PPT是什么？怎么创建PPT？","presentationWorkflowVersion":1})).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), host.send(send))
+            .await
+            .expect("ordinary text must not wait for document isolation")
+            .unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("tool/model", false)
+            .unwrap()
+            .session
+            .id;
+        let deck = serde_json::from_value(json!({"sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck","presentationWorkflowVersion":1,"presentationStyleId":"auto"})).unwrap();
+        let mut deck_send = tokio::spawn({
+            let host = host.clone();
+            async move { host.send(deck).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut deck_send)
+                .await
+                .is_err(),
+            "explicit document work waits for the shared proof"
+        );
+        let mut other_deck_sends = Vec::new();
+        for (text, skill) in [
+            (
+                "请制作一份用于本机验收的4页16:9 Transformer介绍PPT：包含原生可编辑的自注意力公式。",
+                None,
+            ),
+            ("Transformer introduction", Some("ofox-office-pptx")),
+        ] {
+            let sid = host
+                .store(&identity().owner)
+                .unwrap()
+                .create("tool/model", false)
+                .unwrap()
+                .session
+                .id;
+            let send = serde_json::from_value(json!({
+                "sessionId":sid,"runId":id(),"operationId":id(),"text":text,
+                "presentationWorkflowVersion":1,"skill":skill
+            }))
+            .unwrap();
+            let mut pending = tokio::spawn({
+                let host = host.clone();
+                async move { host.send(send).await }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err(),
+                "a direct PPT request or selected PPT skill must share the proof: {text}"
+            );
+            other_deck_sends.push(pending);
+        }
+        host.generation.fetch_add(1, Ordering::SeqCst);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if env
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.r#type == "runtime_state")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion updates runtime capabilities without reopening chat");
+        let event = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.r#type == "runtime_state")
+            .cloned()
+            .unwrap();
+        assert_eq!(event.data["owner"], identity().owner);
+        assert_eq!(event.data["generation"], host.generation());
+        assert_eq!(deck_send.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        for pending in other_deck_sends {
+            assert_eq!(pending.await.unwrap().unwrap_err(), IDENTITY_CHANGED);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "the probe is single flight"
+        );
+    }
+    #[tokio::test]
+    async fn legacy_full_auto_question_with_a_generated_deck_does_not_wait_for_document_preparation(
+    ) {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store
+            .create_with_capabilities(
+                "tool/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(
+                    serde_json::from_value(json!({
+                        "id": id(),
+                        "name": "earlier-deck.pptx",
+                        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "sizeBytes": 0,
+                        "status": "ready",
+                        "origin": "generated"
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        host.set_permission(super::local::PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        host.start_document_preparation();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the controlled document probe started");
+        let send = serde_json::from_value(json!({
+            "sessionId": sid,
+            "runId": id(),
+            "operationId": id(),
+            "text": "Are you using the hosted or self-hosted version?\n1. Hosted (app.fizzy.do)\n2. Self-hosted\n哪个是global？",
+            "presentationWorkflowVersion": 1
+        }))
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), host.send(send)).await;
+        let pending = host.document_preparation.load(Ordering::SeqCst) == 1;
+        release.notify_one();
+        assert!(
+            pending,
+            "the optional proof was not released by the question"
+        );
+        result
+            .expect("a historical generated deck must not make a plain Full Auto question wait")
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn explicit_document_preparation_retries_a_revoked_proof_but_not_a_broken_runner() {
+        let (_config, _env, host) = fixture_with_env();
+        // A completed preparation is not a permanent capability grant. This
+        // inert runtime has no current Python proof, as after invalidation.
+        host.document_preparation.store(2, Ordering::SeqCst);
+        assert!(!host.python_offered());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let mut preparing = tokio::spawn({
+            let host = host.clone();
+            async move { host.wait_document_preparation().await }
+        });
+        let started = tokio::time::timeout(Duration::from_secs(1), entered.notified()).await;
+        if started.is_err() {
+            release.notify_one();
+        }
+        started.expect("explicit document work must reprove a revoked capability");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut preparing)
+                .await
+                .is_err(),
+            "the retry waits for the same single-flight proof"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), preparing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !host.python_offered(),
+            "a wait cannot grant unproven Python"
+        );
+
+        host.python_broken.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(1), host.wait_document_preparation())
+            .await
+            .expect("a broken runner stays disabled without another probe");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), entered.notified())
+                .await
+                .is_err(),
+            "a permanently broken runner must not repeat the native proof"
+        );
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_preparation_waits_for_both_document_engines() {
+        use crate::services::assistant::documents::engines::PythonEngine;
+
+        for (python, officecli, expected_failed) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            // No runtime directory: no native process can be started. A
+            // complete inventory must fail closed; a partial one waits without
+            // recording an isolation failure against either missing engine.
+            let (_config, host) = fixture();
+            host.engines
+                .set(Engines {
+                    python: python.then(|| PythonEngine {
+                        node: "unused-node".into(),
+                        runner: "unused-runner".into(),
+                        assets: "unused-assets".into(),
+                    }),
+                    officecli: officecli.then(|| "unused-officecli".into()),
+                    typst: None,
+                })
+                .unwrap();
+            host.prepare_document_engines().await;
+            assert_eq!(host.office_sandbox.failed(), expected_failed);
+            assert_eq!(host.python_sandbox.failed(), expected_failed);
+            assert!(!host.python_offered(), "unproven Python was offered");
+        }
+    }
+
+    #[tokio::test]
     async fn bootstrap_reports_python_availability() {
         let node = fixture_node_path();
         let python = json!({
@@ -7055,8 +8310,8 @@ while read line; do :; done"#,
         )
         .await;
         assert_eq!(boot["runtime"]["documents"]["python"], false);
-        // All there: offered on macOS, where sandbox-exec is; the engine
-        // exists nowhere else.
+        // All staged: macOS can use sandbox-exec. Empty Windows fixture
+        // executables never establish LPAC proof, so Python stays unavailable.
         let boot = boot_with(
             &[
                 "runtime/src/python/runner.mjs",

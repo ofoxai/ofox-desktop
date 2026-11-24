@@ -1,3 +1,4 @@
+import { useUsageCalendar } from "@/hooks/useUsageCalendar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLoadingFox } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
@@ -277,6 +278,7 @@ export function UsagePage({
       tab: effectiveTab,
       range,
       analysisSupported,
+      modern,
     }),
     [
       query,
@@ -286,10 +288,40 @@ export function UsagePage({
       range,
       visible,
       analysisSupported,
+      modern,
     ],
   );
   const refreshOwnerRef = useRef(refreshOwner);
   refreshOwnerRef.current = refreshOwner;
+  const calendarGeneration = useRef(0);
+  useUsageCalendar(
+    anchor,
+    visible && capabilities.isFetched && range.period !== "custom",
+    (now) => {
+      const generation = ++calendarGeneration.current;
+      if (modern) {
+        setAnchor(now);
+        return true;
+      }
+      // Legacy query keys do not contain the calendar window. Read only local
+      // statistics and publish its date after the same owner receives a reply.
+      const owner = refreshOwnerRef.current;
+      return state.overview.refetch().then(
+        (result) => {
+          if (
+            result.isError ||
+            !activeRef.current ||
+            refreshOwnerRef.current !== owner ||
+            calendarGeneration.current !== generation
+          )
+            return false;
+          setAnchor(now);
+          return true;
+        },
+        () => false,
+      );
+    },
+  );
   const manualRequested = useRef(false);
   const runRef = useRef<() => Promise<void>>(async () => undefined);
   runRef.current = async () => {

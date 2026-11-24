@@ -274,7 +274,7 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
                     .record_evidence
                     .get(&record.request_id)
                     .ok_or_else(|| invalid("recordEvidenceUnavailable"))?;
-                let mut current_estimate = data.catalog.estimate(
+                let mut current_estimate = data.catalog.estimate_with_ttl(
                     &record.model,
                     [
                         record.input_tokens,
@@ -282,6 +282,7 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
                         record.cache_read_tokens,
                         record.cache_creation_tokens,
                     ],
+                    evidence.cache_write_1h,
                     Some(1),
                 );
                 if !evidence.complete && current_estimate.known_cost_usd.is_some() {

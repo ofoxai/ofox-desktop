@@ -16,6 +16,21 @@ Artifacts are retained for 30 days and contain:
 - `build-provenance.json` recording version, full source SHA, size and SHA-256.
 - `SHA256SUMS.txt` and a short package description.
 
+The Windows job also uploads
+`assistant-parity-driver-windows-x86_64-<commit>`. This separate developer artifact
+contains `assistant_host-parity.exe`, its SHA-256, `driver-provenance.json` and a
+README. Cargo identifies exactly one release integration-test executable, and
+its build-script output must report the expected `OFOX_BUILD_SOURCE_SHA` and
+`OFOX_BUILD_SOURCE_CLEAN=true`. Compilation precedes the untracked installer
+output files; the driver artifact is assembled outside the checkout. No model
+test runs while producing it.
+
+The driver requires the same clean Git checkout and locked JavaScript dependency
+preparation on a native Windows 10/11 client. The bundled Node runs the strict
+controller; the client does not need Rust/MSVC. This is a developer Host test,
+separate from the offline probe and installed-app UI acceptance. See the
+[client instructions](document-engine-client-acceptance.md).
+
 The existing version metadata is retained. Preview installers use the normal
 application identifier and user data. macOS packages use an ad-hoc signature
 without Apple notarization; Windows packages are unsigned. Operating systems may

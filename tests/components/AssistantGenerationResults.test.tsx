@@ -457,6 +457,43 @@ describe("a generated document", () => {
     );
   });
 
+  it.each([
+    { button: "Save…", saved: false, moved: false, restored: true },
+    { button: "Save…", saved: false, moved: true, restored: false },
+    { button: "Save…", saved: true, moved: false, restored: false },
+    { button: "Save and open", saved: false, moved: false, restored: false },
+  ])(
+    "handles focus after native document save ($button, saved=$saved, moved=$moved)",
+    async ({ button, saved, moved, restored }) => {
+      let finish!: (result: boolean) => void;
+      const action = vi.fn(
+        () => new Promise<boolean>((resolve) => (finish = resolve)),
+      );
+      render(
+        <>
+          {documentView(document(), { onSave: action, onSaveAndOpen: action })}
+          <button type="button">Another action</button>
+        </>,
+      );
+      const trigger = screen.getByRole("button", { name: button });
+      const other = screen.getByRole("button", { name: "Another action" });
+      const nativeReturnFocus = moved ? other : trigger.ownerDocument.body;
+      await userEvent.click(trigger);
+      expect(trigger).toBeDisabled();
+      // JSDOM will not blur a disabled button directly. Use the other action
+      // to reproduce the native picker's return to the document or moved focus.
+      other.focus();
+      if (!moved) other.blur();
+      expect(nativeReturnFocus).toHaveFocus();
+      finish(saved);
+      await waitFor(() => {
+        expect(trigger).toBeEnabled();
+        expect(restored ? trigger : nativeReturnFocus).toHaveFocus();
+      });
+      expect(toasts.error).not.toHaveBeenCalled();
+    },
+  );
+
   it("shows an issues badge that lists them", async () => {
     documentCards(document({ issues: issues(2) }));
     const badge = screen.getByRole("button", { name: "2 issues" });

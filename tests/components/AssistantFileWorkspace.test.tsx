@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
@@ -77,6 +78,58 @@ const props = () => ({
 const pane = () =>
   screen.getByRole("complementary", { name: "File workspace" });
 const ready = () => within(pane()).findByRole("img");
+
+function TranscriptPreviewWorkspace({
+  files,
+}: {
+  files: AssistantAttachment[];
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  return (
+    <AssistantFileWorkspace
+      {...props()}
+      files={files}
+      selectedId={selectedId}
+      onSelect={setSelectedId}
+    >
+      {files.map((attachment) => (
+        <button
+          key={attachment.id}
+          type="button"
+          onClick={() => setSelectedId(attachment.id)}
+        >
+          Open transcript attachment {attachment.name}
+        </button>
+      ))}
+    </AssistantFileWorkspace>
+  );
+}
+
+async function openTranscriptPreview(width: number, files = [file]) {
+  const bounds = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockReturnValue({ width, right: width } as DOMRect);
+  const user = userEvent.setup();
+  render(<TranscriptPreviewWorkspace files={files} />);
+  const attachment = screen.getByRole("button", {
+    name: `Open transcript attachment ${file.name}`,
+  });
+  attachment.focus();
+  await user.keyboard("{Enter}");
+  return { attachment, bounds, user };
+}
+
+function deferPreviewManifest() {
+  let finish!: (value: FilePreviewManifest) => void;
+  api.manifest.mockImplementationOnce(
+    () =>
+      new Promise<FilePreviewManifest>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  return () => act(async () => finish(manifest));
+}
+
 const openActions = async () => {
   await userEvent.click(
     await screen.findByRole("button", { name: "More preview actions" }),
@@ -185,6 +238,120 @@ describe("real generated file workspace", () => {
     expect(pane()).not.toHaveClass("hidden");
     expect(api.page).toHaveBeenCalledTimes(1);
     bounds.mockRestore();
+  });
+
+  it("hands off focus from the narrow transcript preview and restores Files on Escape", async () => {
+    const finishManifest = deferPreviewManifest();
+    const { user } = await openTranscriptPreview(650);
+    await within(pane()).findByRole("status", { name: "Loading preview…" });
+    expect(
+      within(pane()).getByRole("heading", { name: file.name }),
+    ).toHaveFocus();
+
+    await finishManifest();
+    await ready();
+    expect(
+      within(pane()).getByRole("heading", { name: file.name }),
+    ).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("complementary", { name: "File workspace" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Files (1)" })).toHaveFocus();
+  });
+
+  it("keeps focus moved to the Files tab while the preview loads", async () => {
+    const finishManifest = deferPreviewManifest();
+    const { user } = await openTranscriptPreview(650);
+    await within(pane()).findByRole("status", { name: "Loading preview…" });
+    const filesTab = within(
+      screen.getByRole("group", { name: "Workspace view" }),
+    ).getByRole("button", { name: "Files" });
+    await user.click(filesTab);
+    expect(filesTab).toHaveFocus();
+
+    await finishManifest();
+    await ready();
+    expect(filesTab).toHaveFocus();
+  });
+
+  it("keeps focus on the transcript preview button in the wide split", async () => {
+    const finishManifest = deferPreviewManifest();
+    const { attachment } = await openTranscriptPreview(900);
+    await within(pane()).findByRole("status", { name: "Loading preview…" });
+    expect(attachment).toHaveFocus();
+
+    await finishManifest();
+    await ready();
+    expect(attachment).toBeVisible();
+    expect(attachment).toHaveFocus();
+  });
+
+  it("preserves the wide transcript button focus after closing a narrow preview", async () => {
+    const { attachment, bounds, user } = await openTranscriptPreview(650);
+    await ready();
+    expect(
+      within(pane()).getByRole("heading", { name: file.name }),
+    ).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "Files (1)" })).toHaveFocus();
+
+    bounds.mockReturnValue({ width: 900, right: 900 } as DOMRect);
+    fireEvent(window, new Event("resize"));
+    const finishManifest = deferPreviewManifest();
+    attachment.focus();
+    await user.keyboard("{Enter}");
+    await within(pane()).findByRole("status", { name: "Loading preview…" });
+    expect(screen.getByRole("separator")).toBeVisible();
+    expect(attachment).toHaveFocus();
+
+    await finishManifest();
+    await ready();
+    expect(attachment).toHaveFocus();
+  });
+
+  it("hands off focus when another attachment opens from narrow Chat", async () => {
+    const other = { ...file, id: "other", name: "Other deck.pptx" };
+    const { user } = await openTranscriptPreview(650, [file, other]);
+    await ready();
+    const views = screen.getByRole("group", { name: "Workspace view" });
+    await user.click(
+      within(views).getByRole("button", { name: en.assistant.chat }),
+    );
+    expect(pane()).toHaveClass("hidden");
+
+    api.manifest.mockImplementationOnce(() => new Promise(() => {}));
+    screen
+      .getByRole("button", {
+        name: `Open transcript attachment ${other.name}`,
+      })
+      .focus();
+    await user.keyboard("{Enter}");
+    await within(pane()).findByRole("status", { name: "Loading preview…" });
+    expect(pane()).not.toHaveClass("hidden");
+    expect(
+      within(pane()).getByRole("heading", { name: other.name }),
+    ).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "Files (2)" })).toHaveFocus();
+  });
+
+  it("moves focus when a resize hides the focused transcript", async () => {
+    const { attachment, bounds } = await openTranscriptPreview(900);
+    await ready();
+    expect(attachment).toHaveFocus();
+
+    bounds.mockReturnValue({ width: 650, right: 650 } as DOMRect);
+    fireEvent(window, new Event("resize"));
+    expect(screen.getByRole("button", { name: "Files" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      within(pane()).getByRole("heading", { name: file.name }),
+    ).toHaveFocus();
   });
 
   it.each([

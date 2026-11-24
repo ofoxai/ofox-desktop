@@ -10,11 +10,11 @@ use crate::services::assistant::{
     store::AssistantStore,
     types::{id, Attachment, Event as AssistantEvent},
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::collections::HashSet;
 use std::{
     io::{Cursor, Write},
@@ -460,7 +460,7 @@ fn preview_e2e_nine_html_reopens_keep_http_authority_version_and_keyless_boundar
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn jpeg_dimensions(bytes: &[u8]) -> (u16, u16) {
     assert!(bytes.starts_with(&[255, 216, 255]) && bytes.ends_with(&[255, 217]));
     let mut offset = 2usize;
@@ -487,6 +487,62 @@ fn jpeg_dimensions(bytes: &[u8]) -> (u16, u16) {
         offset += length;
     }
     panic!("JPEG dimensions were not found")
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+#[ignore = "Requires a task-private copy of the original issue #1733 deck"]
+async fn preview_e2e_issue_1733_renders_original_large_pages_without_changing_the_deck() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let case = checkout.join(".real-eval/issue-1733/original.pptx");
+    let bytes = std::fs::read(&case).unwrap();
+    let hash = digest(&bytes);
+    assert_eq!(
+        hash,
+        "42a455b294a4ac3694bae559d92fdd51ca80792f6799cdb82597e99c1dd842fa"
+    );
+    let fixture = Fixture::new(Some(checkout.join("assistant-runtime/resources")));
+    let request = fixture.add(PPTX, "large-page-regression.pptx", &bytes);
+    let manifest = fixture.host.file_preview(request.clone()).await.unwrap();
+    assert_eq!(manifest["totalPages"], 13);
+    assert_eq!(manifest["version"], hash);
+    let mut digests = HashSet::new();
+    for page in [2, 1, 3] {
+        let result = fixture
+            .host
+            .file_preview_page(PageRequest {
+                file: request.clone(),
+                version: hash.clone(),
+                page,
+                scale: 1,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("issue #1733 page {page}: {error}"));
+        assert_eq!(result["page"], page);
+        assert_eq!(result["version"], hash);
+        assert_eq!(result["mimeType"], "image/jpeg");
+        let jpeg = STANDARD
+            .decode(result["dataBase64"].as_str().unwrap())
+            .unwrap();
+        assert!(jpeg.len() <= 2 * 1024 * 1024);
+        assert_eq!(jpeg_dimensions(&jpeg), (1536, 864));
+        assert!(
+            digests.insert(digest(&jpeg)),
+            "page {page} must render its own content"
+        );
+    }
+    assert_eq!(digest(&std::fs::read(case).unwrap()), hash);
+    let staged = fixture
+        .store
+        .attachment_root(&fixture.sid)
+        .unwrap()
+        .join(request.attachment_id);
+    assert_eq!(digest(&std::fs::read(staged).unwrap()), hash);
+    fixture.assert_keyless();
 }
 
 #[cfg(target_os = "macos")]

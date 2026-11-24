@@ -154,6 +154,7 @@ impl AssistantHost {
                 })
                 .await?;
                 self.validate_run(run)?;
+                run.admit_presentation_deadline()?;
                 self.emit(
                     run,
                     "presentation_plan",

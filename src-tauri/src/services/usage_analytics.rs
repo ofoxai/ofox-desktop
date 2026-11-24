@@ -76,9 +76,10 @@ impl Sum {
             .saved_cost
             .checked_add(atom.saved_cost)
             .ok_or_else(overflow)?;
-        let mut estimate = catalog.estimate(
+        let mut estimate = catalog.estimate_with_ttl(
             &atom.model,
             atom.tokens,
+            atom.cache_write_1h,
             (!atom.archived).then_some(atom.requests),
         );
         if !atom.tokens_complete && estimate.known_cost_usd.is_some() {
@@ -535,5 +536,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(saved, "7");
+    }
+    #[test]
+    #[serial_test::serial]
+    fn dashboard_claude_hour_writes_price_overview_and_requests_from_the_same_evidence() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ttl-session.jsonl");
+        std::fs::write(&path, format!("{}\n", json!({"type":"assistant","sessionId":"ttl-session","timestamp":"2026-10-21T01:00:00Z","message":{"id":"ttl-message","role":"assistant","model":"ttl-test","stop_reason":"end_turn","content":[],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":1000000,"cache_creation":{"ephemeral_5m_input_tokens":400000,"ephemeral_1h_input_tokens":600000}}}}))).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let q = UsageQueryV1 {
+            version: 1,
+            start_ms: Some(start),
+            end_ms: start + 86400000,
+            tool_ids: vec![],
+            model_ids: vec![],
+            project_ids: vec![],
+            source_ids: vec![],
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            super::super::ofox_pricing::PriceCatalog::ingest_on(&conn,"ofox.ai",&json!({"data":[{"id":"ttl-test","pricing":{"prompt":"0.000005","completion":"0.000025","input_cache_read":"0.0000005","input_cache_write_5m":"0.00000625","input_cache_write_1h":"0.00001"}}]}),q.end_ms).unwrap();
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_cost_usd,latency_ms,status_code,created_at,data_source,session_id) VALUES('session:ttl-message','_session','claude','ttl-test',0,0,0,1000000,'123',0,0,?1,'session_log','ttl-session')",[start/1000+3600]).unwrap();
+        }
+        super::super::session_analytics_index::refresh_sources(
+            &db,
+            &[super::super::session_analytics_index::SourceSpec {
+                provider: "claude".into(),
+                path,
+                subagent: false,
+                project_file: None,
+                title_file: None,
+            }],
+        )
+        .unwrap();
+        let result = build_query_overview(
+            &db,
+            UsagePeriod::All,
+            q.clone(),
+            "ofox.ai",
+            q.end_ms,
+            &chrono::Utc,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .totals
+                .estimate
+                .as_ref()
+                .unwrap()
+                .known_cost_usd
+                .as_deref(),
+            Some("8.5"),
+            "600k hour + 400k five-minute writes need their respective prices"
+        );
+        let page = super::super::usage_requests::request_page_in(
+            &db,
+            q.clone(),
+            Default::default(),
+            super::super::usage_requests::Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            (&chrono::Utc, q.end_ms),
+        )
+        .unwrap();
+        assert_eq!(
+            page.data[0].current_estimate.known_cost_usd.as_deref(),
+            Some("8.5")
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn dashboard_missing_ttl_stays_partial_and_preserves_historical_amount() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let mut q = query();
+        q.tool_ids.clear();
+        q.model_ids.clear();
+        {
+            let conn = db.conn.lock().unwrap();
+            super::super::ofox_pricing::PriceCatalog::ingest_on(&conn,"ofox.ai",&json!({"data":[{"id":"unknown-ttl","pricing":{"prompt":"0.000005","completion":"0.000025","input_cache_write_5m":"0.00000625","input_cache_write_1h":"0.00001"}}]}),q.end_ms).unwrap();
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_creation_tokens,total_cost_usd,latency_ms,status_code,created_at,data_source,session_id) VALUES('session:old','_session','claude','unknown-ttl',1000000,0,1000000,'123',0,0,?1,'session_log','old')",[q.start_ms.unwrap()/1000+3600]).unwrap();
+        }
+        let page = super::super::usage_requests::request_page_in(
+            &db,
+            q.clone(),
+            Default::default(),
+            super::super::usage_requests::Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            (&chrono::Utc, q.end_ms),
+        )
+        .unwrap();
+        assert_eq!(
+            page.summary.estimate.as_ref().unwrap().availability,
+            "partial"
+        );
+        assert_eq!(
+            page.summary
+                .estimate
+                .as_ref()
+                .unwrap()
+                .known_cost_usd
+                .as_deref(),
+            Some("5")
+        );
+        assert_eq!(page.data[0].recorded_cost_usd.as_deref(), Some("123"));
+        assert_eq!(page.summary.total_tokens, 1000000);
     }
 }

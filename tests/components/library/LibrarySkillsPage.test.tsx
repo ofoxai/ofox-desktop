@@ -217,6 +217,47 @@ function renderPage() {
 const chip = (name: string, tool: string) =>
   screen.getByRole("button", { name: new RegExp(`^${name} · ${tool} · `) });
 
+it("shows partial skill scan failures while keeping healthy shared skills visible", async () => {
+  inventory.sources = [
+    {
+      sourceId: "failed-claude",
+      toolId: "claude",
+      label: "nativeSkills",
+      state: "unreadable",
+      reason: "library.inventoryLimit",
+      count: 1,
+      displayPath: "~/.claude/skills",
+    },
+    {
+      sourceId: "healthy-codex",
+      toolId: "codex",
+      label: "nativeSkills",
+      state: "ready",
+      reason: null,
+      count: 1,
+      displayPath: "~/.agents/skills",
+    },
+    {
+      sourceId: "missing-pi",
+      toolId: "pi",
+      label: "nativeSkills",
+      state: "missing",
+      reason: null,
+      count: 0,
+    },
+  ];
+  renderPage();
+  expect(
+    await screen.findByRole("button", { name: "导入 automate" }),
+  ).toBeVisible();
+  const warning = await screen.findByRole("status");
+  expect(warning).toHaveTextContent("Claude Code");
+  expect(warning).toHaveTextContent("~/.claude/skills");
+  expect(warning).toHaveTextContent(zh.library.inventoryLimit);
+  expect(warning).not.toHaveTextContent("~/.agents/skills");
+  expect(warning).not.toHaveTextContent("Pi");
+});
+
 it("the Ofox Assistant target offers auto and manual use", async () => {
   const assistant = {
     id: "ofox-assistant",

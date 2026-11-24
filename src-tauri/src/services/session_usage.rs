@@ -59,9 +59,41 @@ struct ParsedAssistantUsage {
     cache_read_tokens: u32,
     cache_creation_tokens: u32,
     cache_creation_1h_tokens: u32,
+    cache_write_ttl_known: bool,
     stop_reason: Option<String>,
     timestamp: Option<String>,
     session_id: Option<String>,
+}
+
+fn checked_cache_ttl(usage: &serde_json::Value) -> Result<(u32, bool), AppError> {
+    let total =
+        usage_source::checked_token(usage_source::number(usage, "cache_creation_input_tokens")?)?;
+    let read = |key: &str| -> Result<Option<u32>, AppError> {
+        usage
+            .get("cache_creation")
+            .and_then(|value| value.get(key))
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| AppError::Database("usage.cacheTtl.invalid".into()))
+                    .and_then(usage_source::checked_token)
+            })
+            .transpose()
+    };
+    let hour = read("ephemeral_1h_input_tokens")?;
+    let five = read("ephemeral_5m_input_tokens")?;
+    if hour.is_some_and(|n| n > total)
+        || five.is_some_and(|n| n > total)
+        || hour
+            .zip(five)
+            .is_some_and(|(h, m)| u64::from(h) + u64::from(m) != u64::from(total))
+    {
+        return Err(AppError::Database("usage.cacheTtl.conflict".into()));
+    }
+    Ok((
+        hour.unwrap_or_else(|| five.map(|n| total - n).unwrap_or(0)),
+        total == 0 || hour.is_some() || five.is_some(),
+    ))
 }
 
 /// 同步 Claude Code 会话日志到使用统计数据库
@@ -218,6 +250,7 @@ fn parse_claude_file(
                 None => return Ok(()),
             };
 
+            let (cache_creation_1h_tokens, cache_write_ttl_known) = checked_cache_ttl(usage)?;
             let parsed = ParsedAssistantUsage {
                 message_id: msg_id.clone(),
                 model: message
@@ -241,9 +274,8 @@ fn parse_claude_file(
                     usage,
                     "cache_creation_input_tokens",
                 )?)?,
-                cache_creation_1h_tokens: crate::proxy::usage::parser::claude_hour_cache_writes(
-                    usage,
-                ),
+                cache_creation_1h_tokens,
+                cache_write_ttl_known,
                 stop_reason: message
                     .get("stop_reason")
                     .and_then(|v| v.as_str())
@@ -324,7 +356,7 @@ pub(crate) fn hour_cache_writes(projects_dir: &Path) -> Vec<(PathBuf, Vec<HourWr
                             &m.message_id,
                         ),
                         created_at: created_at_of(m.timestamp.as_deref())?,
-                        hour: m.cache_creation_1h_tokens.min(m.cache_creation_tokens),
+                        hour: m.cache_creation_1h_tokens,
                         session_id: m.session_id,
                         model: m.model,
                     })
@@ -353,6 +385,7 @@ pub(crate) fn normalized_facts(
                 || m.cache_creation_tokens != 0
         })
         .map(|m| usage_source::NormalizedUsageFact {
+            cache_write_ttl_known: m.cache_write_ttl_known,
             request_id: format!("session:{}", m.message_id),
             native_key: (!m.message_id.is_empty()).then(|| {
                 usage_source::native_key(
@@ -757,6 +790,7 @@ mod tests {
 
         // 中间条目（无 stop_reason）
         let intermediate = ParsedAssistantUsage {
+            cache_write_ttl_known: true,
             message_id: "msg_1".to_string(),
             model: "claude-opus-4-6".to_string(),
             input_tokens: 3,
@@ -772,6 +806,7 @@ mod tests {
 
         // 最终条目（有 stop_reason）
         let final_entry = ParsedAssistantUsage {
+            cache_write_ttl_known: true,
             message_id: "msg_1".to_string(),
             model: "claude-opus-4-6".to_string(),
             input_tokens: 3,
@@ -959,5 +994,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!((source.as_str(), output), ("proxy", 10));
+    }
+
+    #[test]
+    fn dashboard_ttl_evidence_distinguishes_missing_zero_positive_and_invalid() {
+        use serde_json::json;
+        let mut value = json!({"cache_creation_input_tokens": 100});
+        assert_eq!(checked_cache_ttl(&value).unwrap(), (0, false));
+        value["cache_creation"] = json!({"ephemeral_1h_input_tokens": 0});
+        assert_eq!(checked_cache_ttl(&value).unwrap(), (0, true));
+        value["cache_creation"] =
+            json!({"ephemeral_1h_input_tokens": 60, "ephemeral_5m_input_tokens": 40});
+        assert_eq!(checked_cache_ttl(&value).unwrap(), (60, true));
+        value["cache_creation"] = json!({"ephemeral_5m_input_tokens": 40});
+        assert_eq!(checked_cache_ttl(&value).unwrap(), (60, true));
+        for invalid in [
+            json!({"ephemeral_1h_input_tokens": 101}),
+            json!({"ephemeral_1h_input_tokens": 60, "ephemeral_5m_input_tokens": 20}),
+            json!({"ephemeral_1h_input_tokens": -1}),
+            json!({"ephemeral_1h_input_tokens": "60"}),
+            json!({"ephemeral_1h_input_tokens": null}),
+        ] {
+            value["cache_creation"] = invalid;
+            assert!(checked_cache_ttl(&value).is_err());
+        }
+        assert_eq!(checked_cache_ttl(&json!({})).unwrap(), (0, true));
     }
 }

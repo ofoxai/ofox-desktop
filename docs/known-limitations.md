@@ -1,6 +1,251 @@
 # Known limitations and prior review dispositions
 
+## Desktop assistant capability acceptance (#1701)
+
+Verification snapshots remain memory-only; incomplete or legacy scopes stay
+unverified rather than guessing a tool identity. Preview persistence retry
+reuses files only within the current run, without durable cross-run recovery.
+The Windows LPAC adapter requires native verification against the delivery SHA;
+resource staging and compilation do not certify Python availability. Windows
+10/11 installed-client checks and the budgeted live-model campaign are separate
+gates. Missing credentials or client results remain pending. See the
+[implementation record](assistant-capability-1701.md).
+Extended-path handling covers runtime resources and document/backup reads and
+publication. Arbitrarily long process working directories are not certified;
+native launch failure keeps Python unavailable.
+
+Server 2022 build 20348 rejects the user-mode class-46 token query, including
+fixed-size buffers. The replacement LPAC check uses the actual suspended
+child token's authorization behavior with documented token duplication and
+AccessCheck APIs. This is a behavioral proof based on LPAC semantics, not a
+Microsoft-defined IsLPAC query contract. Its ordinary AppContainer controls
+and Windows 10/11 client validation remain required acceptance evidence.
+
+The Windows Node startup originally failed inside KernelBase DLL_PROCESS_ATTACH
+and reported STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
+debugger/manual-hold/Host-resume proof passed; the history below records how
+that was resolved. Native A-B-A run 44027445443 confirmed that adding registryRead alone
+still exits with the same status in all three verified, unassisted cases. This
+does not change production capabilities or grant Python admission. Fixed Nt
+entry/return observations now pair natively (runs 44058284863, 44062635550): the
+last completed operations create the ConDrv console Server/Reference handles,
+and no process creation follows before the failure. The exact failing operation
+is still unobserved. Unassisted A-B-A run 44068121826 shows that launching
+without a console (DETACHED_PROCESS) gets past KernelBase initialization while
+both CREATE_NO_WINDOW controls still fail, but Node then aborts with
+STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
+(WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Run 44076224990
+showed that the console-free launch plus the registryRead capability lets Node
+run normally under the same verified isolation. Run 44133006077 showed that
+registryRead also lets the token read HKCU\Environment, HKCU\Software and the
+HKCU root, while the runtime-only token cannot. A CI-only grant of the Winsock
+catalog subtree alone was insufficient (44142596063), and a debugger trace
+(44231498872) showed why: WSAStartup first opens the HKLM root key itself, which
+Windows grants an LPAC only through registryRead. Avoiding registryRead would
+require either an elevated, machine-wide ACL change on the HKLM root, which the
+per-user installer cannot make, or a custom Node/libuv build that tolerates the
+Winsock failure.
+
+Accepted residual risk (user decision, 2026-11-18): production launches detached
+with exactly {runtime, registryRead}. On default ACLs registryRead grants read
+on the HKLM root and, by inheritance, most of HKLM (not walked key by key), and
+on the current user's hive: native walks found 1802 of 3510 HKCU keys readable
+with it, against 4 (the container's own keys) without it, and it adds no write
+right. The sharpest consequence: HKCU\Environment often holds API keys (this
+app itself detects `ANTHROPIC_*`, `OPENAI_*` and `GEMINI_*` variables there), so a
+registry read bypasses the environment scrubbing applied to sandboxed children;
+HKCU\Software may hold other applications' credentials. A read needs native
+code: model-written Python runs in Pyodide/WASM inside Node, which has no
+registry API; only bundled native code (Node, OfficeCLI, the bundled Skia canvas
+addon) runs, newly written native modules and child processes are denied. The
+realistic path is therefore an exploit, most plausibly a malicious attachment
+parsed by OfficeCLI (file previews run it on user files). The network stays
+denied, but output files in the task directory and tool stdout/stderr (up to
+4 MiB for an SVG preview) are returned and can reach the remote model provider
+or the user. Every launch measures the HKLM root and the Winsock catalog (both
+must be readable) and the user's Environment and Software keys (measured, never
+decisive) on the actual suspended token, and refuses on any failed measurement;
+a profile without HKCU\Environment would therefore be refused. Only the trusted
+probe keeps these results as evidence. The native prerequisite test additionally
+checks that the runtime-only token reads none of the fixed keys and that
+registryRead adds no HKCU write right. Unassisted Server 2022 run
+[44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
+passed these controls (3504 keys visited, 1798 newly readable, zero added write
+rights and zero measurement errors). Node ran the fixed script through
+checkpoint 7 and timed out in the child-process denial check. In the subsequent
+[Server 2022 run](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733),
+the same request inherited stdio and returned `UNKNOWN` before the deadline.
+The functional gate rejected the result. A [follow-up kernel event check](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
+returned `no-match`. Its report combined an empty query with an event whose caller
+could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
+completed successfully and found no KernelMode event 4 during the fixed Node
+process's lifetime. On Windows 11 25H2 (build 26200.9974), the same fixed request
+returned `UNKNOWN` in a standard user's desktop session. A unique KernelMode
+event 4 matched the Node process creation time, caller, main thread, child
+image and arguments, confirming the child-process policy blocked that request.
+The Windows 11 event carries no Win32 return code. See the
+[early native diagnostics](assistant-capability-1701.md#windows-11-普通桌面的功能前置).
+
+On Server 2022, run
+[44514579681](https://github.com/ofoxai/ofox-desktop/actions/runs/44514579681)
+paired the fixed request's failed return with Win32 error 367
+(`ERROR_CHILD_PROCESS_BLOCKED`). The diagnostic's private-directory removal
+separately returned access denied (5), leaving its overall result inconclusive.
+The fixed-scope cleanup in `dbb96647` passed the Server 2022
+[follow-up diagnostic](https://github.com/ofoxai/ofox-desktop/actions/runs/44531568236).
+Its digest-verified artifact records `diagnosticRecorded: true` and
+`verdict: child-process-blocked`; this is diagnostic evidence, not release admission.
+The candidate adds a fixed Node-API probe to observe the native denial inside
+the same restricted Node process. Native Win11 regressions reproduce the CommonJS
+loader's denied ancestor realpath lookup for both the probe and Skia. The verified
+cached Node now preserves its main and dependency paths; both native modules load
+without granting ancestor access. The unassisted functional run passes the
+same-process child denial, filesystem, network and image controls, Skia, and
+Pyodide. A separate native comparison locates OfficeCLI's missing temporary
+directory under the scrubbed LOCALAPPDATA, rather than the real Windows profile:
+`home/Packages/<profile name>/AC/Temp`. The launcher prepares this private task
+subtree before resume, with existing task permissions and no extra ACL grant.
+Per-machine admission still requires the entire native functional gate.
+
+The first FCE release parity attempt stopped before any model request with
+`Host-resolved model gateway is not allowed`: the release Host correctly refused
+the harness's localhost transport under its application default policy. The
+failed attempt and zero-request ledger remain audit evidence. Driver packaging
+now requires a separate keyless, fixed-localhost release preflight; only the
+temporary TestEnv grants its registered strict localhost gateway. This check
+does not establish paid-model, document or installed-UI acceptance.
+Same-SHA Server 2022 and installed Win11 acceptance are tracked on
+[card #1723](https://app.fizzy.do/6179973/cards/1723); Windows 10 client evidence
+remains a separate requirement of the parent capability campaign.
+
+One macOS full sidecar run observed a shutdown assertion reporting a descendant
+alive at ordinary exit. The original trace cannot distinguish running, zombie,
+or failed observation. Targeted repetitions and the subsequent full run passed;
+test-only process-state diagnostics were added without weakening the assertion
+or changing production cleanup. The original failure remains unexplained.
+
+The accepted structured Office/deck fallback remains available when native
+Python admission fails; that fallback is not claimed to have LPAC isolation.
+Python-derived files, source edits and uploaded-file previews must remain on
+the proven isolation path. Job termination, time/output limits and serialized
+Pyodide are implemented; Job memory/CPU or whole-workspace disk quotas are not.
+Graceful engine cancellation/crash cleanup is implemented, with native test
+results still pending; a forcibly killed Host
+does not yet have a durable profile/workspace recovery journal.
+
+Document work checks the assistant turn deadline before starting an engine or
+admitting an attachment commit. The deadline handler signals an active Windows
+LPAC worker and waits for cleanup. A cache verification or atomic file commit
+already in progress can finish before the UI receives the timeout. The turn can
+retain attachments already committed and previews prepared before expiry. Record
+the turn outcome and the retained file checks separately during acceptance.
+
+A persisted, accepted presentation plan extends the ordinary 15-minute turn
+limit to a fixed one-hour ceiling measured from that turn's start. Re-freezing
+does not renew it. An inactive model stream still stops after five minutes;
+nonempty text, reasoning and streamed tool arguments renew that idle timer,
+while bounded Host document/media work is allowed to finish within its existing
+worker limits and the overall ceiling. Local configuration callbacks keep their
+original time budget. Large decks can still take several minutes to render and
+validate; this policy does not make rendering faster or automatically replay a
+timed-out paid request.
+
+Verification debt retention covers known tool mutations. A generic write/edit
+may commit before a later identity fence rejects its result; the encrypted
+change journal remains, but this slice does not add durable task recovery for
+that existing interruption window. External installers also keep their existing
+lifecycle limits: retaining unknown verification debt is not a promise that an
+opened Terminal installer or every platform-specific descendant has stopped.
+
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
+
+The local Mac/Windows assistant integration preserves task-scoped admission,
+plan progress and Host verification debt together. Its Mac checks do not certify
+the combined Windows installation or LPAC behavior. The native Windows gate and
+installed Windows acceptance remain pending. Subsequent local Mac installation
+acceptance is recorded below; it makes no additional live model call. See the
+[integration contract](mac-windows-assistant-integration.md).
+
+## Assistant task progress after a model rejection
+
+An installed macOS run retained its last checklist when a Chat Completions
+request returned HTTP 400 after seven successful plan updates. The earlier
+requests and the rejection have gateway correlation IDs. The actual upstream
+resource for each request remains unverified. The synthetic replay and Host
+persistence tests cover the failure behavior on both apexes. See the
+[task progress evidence](assistant-progress.md#follow-up-on-the-rejected-model-request).
+
+An isolated DeepSeek V4.1 Flash 1017 run emitted its initial checklist and
+lost the continuation before the test forwarder received an HTTP status.
+The account request detail includes the first request. Attribution of the
+disconnect remains open pending production ingress evidence. See the
+[continuation investigation](assistant-progress.md#continuation-investigation).
+
+The explicit PPTX workflow now requires a model-authored initial checklist.
+The isolated DeepSeek 1017 acceptance delivered three slides and displayed
+all four steps checked. One final visual-plan discrepancy was reported.
+General tool execution now uses the same per-turn task preparation boundary.
+Multi-operation work needs a visible plan; single-step preparation permits one
+operation. The semantic choice for a purely textual answer remains model-owned;
+answer length alone is not a reliable complexity classifier. Checklist completion
+is model-reported and is never inferred from a successful run. A provider declining
+the initial PPT checklist currently receives the standard model-failure UI. See the
+[native checklist acceptance](assistant-progress.md#automatic-checklist-native-acceptance-2026-11-19).
+
+Task preparation consumes the existing shared tool budget. A caller with a
+one-call execution limit can exhaust it on preparation before performing its
+requested operation; the installed Host currently supplies the normal twenty-call
+MCP budget. This change does not expand a caller's configured budget.
+
+The general non-PPT DeepSeek acceptance verified the actual production Host,
+packaged runtime, persisted 5/5 plan and generated CSV amounts. Its report still
+contains five recorded semantic defects, including a mistaken identifier and a
+reversed signed expression; a checked plan does not certify document correctness.
+The final isolated native window could not be attached after restart, so final
+GUI verification remains open. Earlier GUI checks cover progress and a direct
+simple answer before the last automatic-promotion correction. See the
+[general task verification](assistant-progress.md#general-task-promotion-and-final-verification).
+
+## Assistant task progress (2026-11-16)
+
+Task checklists are model-reported presentation. The shared plan tool and prompt
+guidance make multi-stage planning available without local configuration. The
+generic execution gate now requires a plan before multiple tool operations; a
+model may still omit one for purely textual work or leave it incomplete. The UI
+preserves those reported
+states rather than inferring success from tool returns or run completion.
+Historical summaries require new optional message metadata; older messages are
+not reconstructed into invented plans, and interrupted runs without an observed
+end time have no computed duration. Routine local operation records are live-only.
+See [the progress contract](assistant-progress.md) for persistence and validation.
+Browser verification uses actual components with synthetic data, and bundled
+runtime verification uses local mock gateways. An installed Mac build using
+GPT-6.1 Sol passed manual stop and conversation reopen. A separate run ended
+with HTTP 400 after several plan updates. Native Windows acceptance is pending.
+
+## Assistant local task scope
+
+The first version identifies direct, single-target diagnostic requests in
+Chinese, English and Japanese and the Tools page's predefined repair prompts.
+Open-ended local requests can still receive a conversational answer and a
+supported example. Repairs require the local configuration capability and a new
+explicit request after an uncertain outcome. Live input during a scoped local
+task enters the regular message queue for independent admission.
+
+Assistant configuration actions currently cover structured read-only
+diagnostics and repair via the managed launcher and binding writers. Generic
+terminal, directory search, skill scripts and arbitrary config writes are
+outside the model's tool set. A selected skill can read references inside its
+verified directory. The prior shell verification entry below describes the
+older tool surface and the underlying executors.
+
+The macOS host regression uses the original Fizzy question and an existing
+capability record in Full Auto. It exercises both apexes with a loopback
+provider, and the same test can assert the installed Codex version through
+the real native probe. This change was verified with Codex CLI 0.166.0.
+The timeout regression injects an unknown tool outcome and verifies an
+additional tool-free reply with the operation error retained. Live provider
+answer quality and the native Windows build are outside that evidence.
 
 ## Assistant command verification scope (2026-11-14)
 
@@ -34,12 +279,26 @@ can retain the same stamp. Such rewrites can keep serving cached values until
 a distinguishable filesystem revision is observed. The conflict and stale-source
 fixtures change size explicitly so they exercise an observable source mutation.
 
-## Presentation thumbnail fonts (2026-11-14)
+## Presentation thumbnail fonts (2026-11-21)
 
 CJK thumbnail rendering depends on an available font with the required glyphs.
-The English Windows CI image uses a pinned, explicitly selected Noto test font;
-its pixel checks do not establish system-font fallback on installations without
-CJK fonts. No additional font is bundled with the application.
+Skia does not provide per-glyph fallback when a source selects a Latin face such
+as Arial. The renderer now selects a CJK face for CJK text, using that same face
+for measurement and drawing while retaining requested Latin faces for Latin
+tokens. Native SVG text uses the same CJK selection; explicitly requested CJK
+faces keep priority. This is font substitution, not a guarantee of source-font
+metrics or identical PowerPoint layout. A native SVG text element that directly
+mixes scripts uses one selected face, so its Latin metrics can change. Separate
+Latin text runs retain their requested or inherited face.
+
+The English Windows CI image uses a pinned Noto test font. The glyph-difference
+regressions cover fallback with an available CJK face, not font availability on
+clients without CJK fonts. No additional font is bundled with the application.
+Source edits confined to the authorized slide XML preserve the other package
+members when the slide part paths and relationships remain stable. Structural
+edits still use the normal serializer and must pass the Host's source-preservation
+checks. Installed Windows LPAC rendering and the final client acceptance remain
+pending.
 
 ## Assistant catalog cache (2026-10-30)
 
@@ -444,9 +703,11 @@ What the files and previews are:
   establish complete native conversion. See the [source coverage audit](superpowers/research/2026-11-10-ppt-source-coverage-audit.md).
   The new workflow performs license/capability/requirements filtering before
   model design judgment, freezes the chosen style and page plans, and preserves
-  manual selection precedence through queues and retries. Actual model selection
-  quality has not been accepted; offline tests exercise its contracts. Draft
-  choices do not persist across app restarts.
+  manual selection precedence through queues and retries. A source-scoped
+  candidate lookup carries the exact attachment version and ordered target pages
+  into the first freeze. A new eligible lookup can change the scope before that
+  freeze. Actual model selection quality has not been accepted. Offline tests
+  exercise its contracts. Draft choices do not persist across app restarts.
   Enabled is not quality acceptance. HTML source layouts are only partially
   mapped; no HTML-to-editable-PPTX converter is implemented. System font
   substitutions preserve type roles, but target-OS CJK metrics, visual parity
@@ -482,8 +743,11 @@ What the files and previews are:
   checked against.
 - The file workspace previews owned input/generated PPTX by its actual OPC page
   order/count. It renders pages on demand through sandboxed OfficeCLI and a
-  bounded raster worker. At most page 1000 is renderable; a larger real total is
-  shown with the unrendered range. Persisted batches remain at most 60 JPEGs,
+  bounded raster worker. The on-demand path accepts up to 12 MiB of SVG per
+  page to accommodate embedded images and returns JPEGs up to 2 MiB. The
+  SVG budget for generation previews is 4 MiB per page. At most page 1000
+  is renderable, and the viewer shows the unrendered range for longer decks.
+  Persisted batches remain at most 60 JPEGs,
   while selected source page numbers can reach 1000. HTML uses an opaque scripted
   iframe on a token-scoped loopback endpoint, with external dependencies blocked
   and reported. Native WebView attack and Windows execution acceptance remain
@@ -493,6 +757,33 @@ What the files and previews are:
   serves only validated JPEG pages within the current attachment/session/account
   authority. Legacy attachments and failed rasterization keep save/open working
   without a preview. Word and Excel have no page preview.
+- The shared rasterizer reserves room for overlapping bottom-axis titles in
+  OfficeCLI charts whose axis and tick geometry it recognizes. This applies to
+  file-workspace pages, generated previews and model overviews. Native chart
+  layout and editing are verified with the exported presentation in Office.
+- Fizzy #1733 was reproduced with the original 13-page deck. On macOS 26.5.1
+  arm64, the Host regression first failed on page 1, then rendered distinct
+  JPEGs for pages 1, 2 and 3 with the fix. The 1.5.2 acceptance installation
+  built from `9c7e4803` and bundled OfficeCLI 1.0.160 displayed all three
+  pages in the file workspace, including the embedded pictures on pages 1
+  and 3. The source file hash matched before and after. The original deck
+  stays outside Git in the task-private fixture used by the opt-in Host test.
+  On the same Mac, typecheck, formatting and all-targets Clippy passed.
+  The full Rust suite passed 4,526 tests with 28 ignored, the frontend
+  passed 3,344 with one skipped, and runtime and search passed 805 and 102.
+  The #1733 Host fixture passed in a separate opt-in run. Windows now uses
+  the same 12 MiB capture limit for on-demand workspace pages. The opt-in
+  Host regression accepts a task-private copy on both platforms. Windows
+  verification with the original sample is pending.
+- The 2026-11-21 local Mac integration retains the large-page preview fix and
+  metadata-first Skills discovery while incorporating background document
+  preparation. Portable barrier regressions cover plain Full Auto questions
+  after a generated deck, explicit document waiting and recovery of an
+  invalidated proof. They do not establish Windows LPAC recovery behavior;
+  native Windows acceptance is being continued separately. Failed preparation
+  may be retried in the background on a later ordinary turn, whose reply does
+  not wait for it; broken Python runners remain disabled for the process.
+  See [the incremental Mac receipt](mac-windows-assistant-integration.md#incremental-mac-integration-2026-11-21).
 - OfficeCLI does not faithfully render native OMML. Math preview uses a temporary
   copy selecting the equation's existing compatibility fallback; the delivered
   PPTX retains native OMML. A preview of a fallback cannot establish editable
@@ -1610,6 +1901,78 @@ fully previewable; it is not a quality certification. Every style stays
   without a kicker, and a centred cover with `art` misaligns. Verified by two
   guarded real runs (record section 11), not in the installed app.
 - **Dropped model requests and unknown costs (2026-11-12).** A model request whose connection drops with no answer is asked again (three attempts in all); a drop before the request was written costs nothing. A request whose cost cannot be read no longer ends a task: it counts toward the task's cost limit at its ceiling (request bytes as input tokens plus a full-length answer) and its receipt stays "unknown", so the total shown remains incomplete. A retried request that had in fact reached the provider may be billed twice. Still ending a run: a model with no price at all (before any request), a web search with an unknown outcome or price, and an image with an unknown outcome outside a planned deck. Image requests (Rust host) do not yet tell a handshake drop from a sent request. Covered by runtime tests only; not yet exercised in the installed app.
+- **Model connection timeout.** The Assistant allows up to 30 seconds for TCP/TLS establishment on direct, proxied and proxy-bypass model requests. The title request still has its own eight-second deadline. Cancellation and the overall turn deadline also take precedence. The delayed-TLS tests run locally on bundled Node; installed-client and live-model continuation remain unverified.
 - **Deck images: count, reuse and backgrounds (2026-11-12).** The image setting is none / auto (a ceiling the model fills as it sees fit) / a set number, up to eight generated images a deck (and a reply). Pictures the conversation already holds (generated earlier, or from the user) are listed to the model each presentation turn and placed free as `user-image` visuals, so changing a deck keeps its images; a deck places at most twelve pictures. With images off, a picture the user's message asks for is still generated as an ordinary image and then placed. These are instructions to the model, not Host guarantees: it may still drop a picture, plan fewer than a set number, or generate an asked-for picture it then fails to place. One picture per page, so a page cannot carry both a background and a side image. A background image gets the page colour laid over it at 60%; very busy pictures can still leave small text hard to read. The running-steps list shows a failed step that was done again as "Retried".
 - **A reply that runs out of output while reasoning (2026-11-13).** When the model spends its whole output limit on reasoning (no text, no tool call), the runtime asks it again without showing a user message, twice at most; a run that still has no answer ends as an error instead of "completed". A long answer cut off at the limit is kept as it is. Office round trips of sampled decks were checked only with headless LibreOffice (which drops embedded chart workbooks and native equations on save) and one read-only open in an unactivated PowerPoint; editing, saving and reopening in WPS or an activated PowerPoint, and Windows, remain unverified.
 - **Presentation styles in real runs (2026-11-13).** All 24 catalog styles and navy now have a real generated deck (kept outside the repository; covers in `assets/readme/presentation-styles.webp`). On `architectural-plan` pages (title in a side panel), content across the panel edge or over its title is now refused with the regions to use; a real rerun laid every page out inside them, so the refusal itself is covered only by a test. Text in a code-drawn figure that names a Latin-only font now gets a CJK font of the same kind first; only covered by a test, not seen again in a real run. Two real runs failed on the provider's temporary refusals (request burst, server overload) and passed when run again.
+
+## Recovered working-tree changes (2026-11-15)
+
+Claude cache-write duration is retained only when native identity, model, second and all four token buckets agree with the ledger row. Legacy/archived rows without that evidence remain partial or unknown; the change does not reconstruct their TTL or rewrite saved charges. Other native readers retain their prior interpretation and receive only compatible metadata defaults. Synthetic sandbox tests do not certify real provider billing or Windows GUI behavior.
+
+The abandoned Assistant Vault prototype had a durable, context-bound pending marker before API-key creation. The current `ofox_api_keys` service does not persist that unknown-mint barrier: a timeout can leave an unidentified remote key, and a later explicit Send may create another. The old Vault/reset-setup UI is preserved as design evidence rather than transplanted into the current credential service. A future recovery design needs durable owner/region/issuer binding and an explicit, identity-fenced confirmation before clearing an uncertain attempt. No live keys were created or revoked for this consolidation.
+
+Assistant cached startup and ordinary text turns do not wait for the optional Windows document-isolation preparation. Until that shared preparation proves the current runtime, Python remains unavailable. A selected PPT style, PPTX reference, selected PPT skill, or clear opening command to create/edit a presentation waits for the shared proof before the first model schema is built. Text recognition covers narrow zh/en/ja commands from the current user turn only; ambiguous wording can use the explicit style or skill selector. Python document calls also wait, and the launcher rechecks execution admission. Preparation failures can be retried by a later operation. Source-level regression checks do not certify that a newly built desktop package has been installed and exercised on the user's machine.
+
+Calendar rollover, routing readiness and message-count regressions are verified through simulated UI and temporary native logs. New installed-app acceptance remains separate from these source checks; the installed release is not silently replaced during workspace consolidation.
+
+The CLIP repair accepts `process` as a model-input alias for the canonical plan
+relationship `sequence`, and Python `relation(kind="sequence")` as an alias for
+`process`. `spatial` is ambiguous and remains refused: choose a parallel
+comparison or explicit `fork_join()` connections. The bounded equation subset
+supports upright `\log` / `\exp` and literal ASCII `\mathcal` names as editable
+OMML script runs. Both inner and outer summands still need explicit braces;
+unsupported macros and double-escaped commands remain refused. Offline native
+generation and preview evidence does not certify a real-model deck or its
+PowerPoint graph/equation editing and save-reopen behavior.
+
+## Native skill discovery reads metadata before payload validation
+
+Native discovery now reads a bounded regular `SKILL.md` (at most 1 MiB) and stops
+descending once it finds a skill. Attached icons, scripts and other resources do
+not consume the discovery entry budget. Physical reader aliases reuse metadata;
+independent copies stay separate until full comparison on import. Metadata-only
+entries do not claim full content matches or payload differences. Different
+manifest bytes can establish a difference without reading attached resources.
+
+Discovery retains its 2,000-candidate, 10,000-discovery-entry and depth limits,
+with a 32 MiB aggregate metadata allowance. These are accounting limits, not a
+promise to bound every filesystem operation. Truncated/unreadable roots remain
+explicitly partial; oversized or unreadable manifests do not become empty roots.
+The former eight-failed-payload allowance is no longer relevant because payloads
+are not read during discovery. Existing managed-resource and receipt status
+checks may still inspect their payloads separately from native discovery.
+
+Import verifies manifest bytes, the canonical root target, routing, ticket and epoch, then
+freezes the selected current payload and retains the immutable artifact's full
+validation and checked publication. Resource edits after discovery are captured
+at import; manifest edits or canonical link-target changes invalidate the old selection. Replacing
+a directory at the same canonical path with the same manifest is captured as
+the current payload at import; discovery does not bind root inode identity. Large
+skills can therefore appear in discovery while still exceeding the separate
+artifact import limits. Removal validates the current selected payload before
+moving folders into backups; it does not promise an atomic hash CAS over all
+locations. No dependency or script is executed by discovery or import.
+
+Earlier installed macOS acceptance on 2026-11-20 verified both shared writing skills in
+the real resource library after replacing the local 1.5.2 App with the preceding
+rejected-payload isolation fix. It did not test this metadata-only change. The
+original signing identity and entitlements were retained. All 62 Assistant
+sessions, native history, attachments and user configuration were preserved;
+only the normal pricing, account-balance and usage-health caches refreshed. A
+full data snapshot and one rollback App were retained, and the duplicate build
+package was removed. No skill was imported or enabled during acceptance. Native
+Windows behavior and the exact-commit Windows gate remain unverified.
+
+The subsequent metadata-first 1.5.2 build (main executable digest prefix
+`19b95751`) was also installed locally. Native computer-use inspection confirmed
+both writing skills and the formerly rejected `ppt-master`, with neither old
+Claude Code nor OpenCode scan-limit warning. Discovery was verified; importing
+or executing these live skills was not attempted. In particular, listing
+`ppt-master` does not bypass the artifact's 10,000-entry/64 MiB import limits.
+The 106 ms / 100-entry native probe covered the real Claude and shared Agents
+roots under temporary application state, not full GUI startup. Session bytes
+and user settings were preserved, with only checked derived-cache refreshes;
+existing skill files were unchanged. A new writing-skill Python bytecode cache
+was retained without attributing its creator. Detailed checks and preservation
+scope are recorded in [the integration acceptance](mac-windows-assistant-integration.md#metadata-first-skills-installation-2026-11-20).

@@ -10,24 +10,12 @@ const samples = {
   save_skill: { name: "fixture", description: "Fixture", body: "Body" },
   use_skill: { name: "sample" },
   read_attachment: { id: "attachment", offset: 0, length: 10 },
-  read: { path: "config.json", offset: 1, limit: 10 },
-  ls: { path: "." },
-  find: { pattern: "*.json" },
-  write: { path: "config.json", content: "{}" },
-  edit: { path: "config.json", edits: [{ oldText: "old", newText: "new" }] },
-  bash: { command: "echo test" },
-  powershell: { command: "Write-Output test" },
-  grep: { pattern: "config", limit: 10 },
+  read: { path: "reference.md" },
   tool_status: { tool: "codex" },
   diagnose_in_folder: { tool: "codex" },
   verify_in_folder: { tool: "codex" },
   repair_launcher: { tool: "codex" },
   rebind_tool: { tool: "codex" },
-  install_tool: { tool: "codex" },
-  update_tool: { tool: "codex" },
-  uninstall_tool: { tool: "codex" },
-  set_tool_model: { tool: "codex", model: "openai/test" },
-  updatePlan: { steps: [{ step: "Check settings", status: "in_progress" }] },
   generate_image: { prompt: "a fox", n: 1, size: "1024x1024" },
   generate_video: { prompt: "a fox", duration: 5, material_use: "reference" },
   generate_speech: { text: "hello", language: "en" },
@@ -35,6 +23,13 @@ const samples = {
   web_fetch: { url: "https://example.com/" },
   create_document: { name: "notes.md", format: "md", content: "# Notes" },
   get_presentation_style: { id: "cartesian" },
+  updatePlan: {
+    steps: [
+      { step: "Compare the evidence", status: "in_progress" },
+      { step: "Report the results", status: "pending" },
+    ],
+  },
+  beginSingleStep: {},
 };
 
 // create_document's other content shape: an officecli batch.
@@ -53,11 +48,16 @@ for (const platform of ["macos", "windows"])
       const runtime = new AssistantRuntime();
       const context = {
         attachments: new Map([["attachment", {}]]),
+        localConfig: {
+          cwd: tmpdir(),
+          platform,
+          task: { tool: "codex", access: "configure" },
+        },
         params: {
           skills: [],
           apex: "ofox.io",
           apiKey: "synthetic-schema-only-credential",
-          localConfig: { cwd: tmpdir(), platform },
+          readSelectedSkill: true,
           webSearch: true,
           documents: {
             formats: [
@@ -98,7 +98,7 @@ for (const platform of ["macos", "windows"])
       const tools = runtime.tools(context, {
         input: vision ? ["text", "image"] : ["text"],
       });
-      assert.equal(tools.length, Object.keys(samples).length - 1);
+      assert.equal(tools.length, Object.keys(samples).length);
       for (const tool of tools) {
         assert.ok(tool.name in samples, tool.name);
         const args = structuredClone(samples[tool.name]);

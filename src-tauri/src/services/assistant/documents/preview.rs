@@ -107,7 +107,9 @@ pub(crate) async fn raster(
     folder: &Path,
     sources: &[PathBuf],
     sandbox: Option<&Path>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<(u32, Vec<u8>)>, String> {
+    super::runner::check_deadline(deadline)?;
     let runtime = runtime
         .canonicalize()
         .map_err(|_| "assistant_preview_unavailable")?;
@@ -160,8 +162,28 @@ pub(crate) async fn raster(
     .map_err(|_| "assistant_preview_unavailable")?;
     let home = temp.path().join("home");
     crate::config::create_private_dir_all(&home).map_err(|_| "assistant_preview_unavailable")?;
-    let node = loaded.node.to_string_lossy();
     let helper = helper.to_string_lossy();
+    #[cfg(windows)]
+    let output = {
+        // Existing raster callers supply a macOS executable (or None). On
+        // Windows the exact runtime's native proof is the authority instead.
+        let _ = sandbox;
+        super::runner::ensure_windows_document_engine_ready_until(&runtime, deadline).await?;
+        super::runner::run_windows_engine_limited_until(
+            &loaded.node,
+            &[&helper],
+            temp.path(),
+            &home,
+            &runtime,
+            Duration::from_secs(60),
+            8192,
+            deadline,
+        )
+        .await?
+    };
+    #[cfg(not(windows))]
+    let node = loaded.node.to_string_lossy();
+    #[cfg(not(windows))]
     let output = if let Some(sandbox) = sandbox {
         let doc = format!(
             "DOC={}",
@@ -179,7 +201,7 @@ pub(crate) async fn raster(
                 .map_err(|_| "assistant_preview_unavailable")?
                 .display()
         );
-        super::runner::run_engine_limited(
+        super::runner::run_engine_limited_until(
             sandbox,
             &[
                 "-D",
@@ -197,19 +219,21 @@ pub(crate) async fn raster(
             &home,
             Duration::from_secs(60),
             8192,
+            deadline,
         )
         .await?
     } else {
         if cfg!(target_os = "macos") {
             return Ok(vec![]);
         }
-        super::runner::run_engine_limited(
+        super::runner::run_engine_limited_until(
             &loaded.node,
             &[&helper],
             temp.path(),
             &home,
             Duration::from_secs(60),
             8192,
+            deadline,
         )
         .await?
     };

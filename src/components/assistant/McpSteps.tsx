@@ -2,7 +2,13 @@ import { useTranslation } from "react-i18next";
 import type { AssistantMcpStep } from "@/lib/api/assistant";
 import { LibraryResourceIcon } from "@/components/library/LibraryResourceIcon";
 
-export function McpSteps({ steps }: { steps: AssistantMcpStep[] }) {
+export function McpSteps({
+  steps,
+  showCostHint = true,
+}: {
+  steps: AssistantMcpStep[];
+  showCostHint?: boolean;
+}) {
   const { t } = useTranslation();
   return (
     <div className="my-2 space-y-1 text-note text-ink-muted">
@@ -31,7 +37,9 @@ export function McpSteps({ steps }: { steps: AssistantMcpStep[] }) {
           </li>
         ))}
       </ol>
-      <p className="text-ink-faint">{t("assistant.mcp.externalCost")}</p>
+      {showCostHint && (
+        <p className="text-ink-faint">{t("assistant.mcp.externalCost")}</p>
+      )}
     </div>
   );
 }

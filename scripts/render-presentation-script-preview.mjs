@@ -53,6 +53,7 @@ const environment = {
   HOME: path.join(stage, "isolated-home"),
   PATH: `${path.join(stage, "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
   OFFICECLI_NO_AUTO_RESIDENT: "1",
+  OFFICECLI_SKIP_UPDATE: "1",
 };
 function run(command, args, label) {
   const result = spawnSync(command, args, {

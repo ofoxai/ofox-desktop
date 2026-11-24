@@ -1,6 +1,6 @@
 import { SkillApprovalCard } from "./SkillResultCards";
 import { useId, useState } from "react";
-import { Check, ChevronDown, CircleDashed, Loader2 } from "lucide-react";
+import { CircleCheck, ChevronDown, CircleDashed, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantGenerationApproval,
@@ -28,8 +28,7 @@ export interface LocalPlanStep {
 const MODES = ["default", "autoEdit", "fullAuto"] as const;
 
 /**
- * The composer's `权限：默认 ▾`: how much the assistant may do on this
- * computer without asking. Full auto asks first.
+ * Controls approval for local operations that the current task can access.
  */
 export function PermissionControl({
   mode,
@@ -97,8 +96,8 @@ export function PermissionControl({
 }
 
 /**
- * Inside the reply a local configuration run is writing: what it is doing
- * now, a warning from the host, and its plan. Gone once the run ends.
+ * A reported task checklist, with host warnings kept outside its disclosure.
+ * A terminal checklist preserves unfinished steps without execution animation.
  */
 export function LocalTaskProgress({
   intent,
@@ -106,12 +105,16 @@ export function LocalTaskProgress({
   plan,
   showIntent = true,
   paused = false,
+  terminal = false,
+  collapsible = true,
 }: {
   intent: string | null;
   warning: string | null;
   plan: LocalPlanStep[];
   showIntent?: boolean;
   paused?: boolean;
+  terminal?: boolean;
+  collapsible?: boolean;
 }) {
   const { t } = useTranslation();
   const listId = useId();
@@ -120,7 +123,7 @@ export function LocalTaskProgress({
   const completed = plan.filter((step) => step.status === "completed").length;
   if ((!showIntent || !intent) && !warning && plan.length === 0) return null;
   return (
-    <div className="mt-2 min-w-0 w-full max-w-xl space-y-2 text-note text-ink-muted">
+    <div className="min-w-0 w-full space-y-2 text-ctl text-ink-muted">
       {showIntent && intent && <p className="break-words">{intent}</p>}
       {warning && (
         <p role="status" className="break-words text-warn">
@@ -128,63 +131,67 @@ export function LocalTaskProgress({
         </p>
       )}
       {plan.length > 0 && (
-        <div className="overflow-hidden rounded-list border border-line bg-card-2">
-          <button
-            type="button"
-            aria-label={t("assistant.local.plan")}
-            aria-describedby={countId}
-            aria-expanded={expanded}
-            aria-controls={listId}
-            onClick={() => setExpanded((open) => !open)}
-            className="flex w-full items-center gap-2 rounded-ctl px-3 py-2.5 text-left text-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60"
-          >
-            <span className="min-w-0 flex-1 font-medium">
-              {t("assistant.local.plan")}
-            </span>
-            <span
-              id={countId}
-              className="flex-none tabular-nums text-ink-muted"
+        <div className="overflow-hidden rounded-list border border-line bg-card">
+          {collapsible && (
+            <button
+              type="button"
+              aria-label={t("assistant.local.plan")}
+              aria-describedby={countId}
+              aria-expanded={expanded}
+              aria-controls={listId}
+              onClick={() => setExpanded((open) => !open)}
+              className="flex w-full items-center gap-2 rounded-ctl px-3 py-2.5 text-left text-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60"
             >
-              {completed}/{plan.length}
-            </span>
-            <ChevronDown
-              aria-hidden
-              className={cn(
-                "h-3.5 w-3.5 flex-none transition-transform duration-150 motion-reduce:transition-none",
-                !expanded && "-rotate-90",
-              )}
-            />
-          </button>
+              <span className="min-w-0 flex-1 font-medium">
+                {t("assistant.local.plan")}
+              </span>
+              <span
+                id={countId}
+                className="flex-none tabular-nums text-ink-muted"
+              >
+                {completed}/{plan.length}
+              </span>
+              <ChevronDown
+                aria-hidden
+                className={cn(
+                  "h-3.5 w-3.5 flex-none transition-transform duration-150 motion-reduce:transition-none",
+                  !expanded && "-rotate-90",
+                )}
+              />
+            </button>
+          )}
           <ol
             id={listId}
             role="list"
-            hidden={!expanded}
+            hidden={collapsible && !expanded}
             aria-label={t("assistant.local.plan")}
-            className="space-y-1 px-2 pb-2"
+            className={cn("space-y-1 px-3 pb-3", !collapsible && "pt-3")}
           >
             {plan.map((step, index) => {
               const current = step.status === "in_progress";
               const Icon =
                 step.status === "completed"
-                  ? Check
-                  : current && !paused
+                  ? CircleCheck
+                  : current && !paused && !terminal
                     ? Loader2
                     : CircleDashed;
               return (
                 <li
                   key={index}
-                  aria-current={current ? "step" : undefined}
-                  aria-busy={current ? !paused : undefined}
+                  aria-current={current && !terminal ? "step" : undefined}
+                  aria-busy={current ? !paused && !terminal : undefined}
                   className={cn(
-                    "flex items-start gap-2 rounded-ctl border px-2 py-1.5",
-                    current
-                      ? "border-line bg-card text-ink"
-                      : "border-transparent text-ink-muted",
+                    "flex min-w-0 items-start gap-2 py-1",
+                    current && !terminal ? "text-ink" : "text-ink-muted",
                   )}
                 >
                   <span
                     role="img"
-                    aria-label={t(`assistant.local.steps.${step.status}`)}
+                    aria-label={t(
+                      terminal && step.status !== "completed"
+                        ? "assistant.progress.unfinished"
+                        : `assistant.local.steps.${step.status}`,
+                    )}
                     className="mt-0.5 flex-none"
                   >
                     <Icon
@@ -193,6 +200,7 @@ export function LocalTaskProgress({
                         "h-3.5 w-3.5",
                         current &&
                           !paused &&
+                          !terminal &&
                           "animate-spin motion-reduce:animate-none",
                       )}
                     />

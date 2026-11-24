@@ -76,6 +76,8 @@ except FileNotFoundError:
     _SOURCE_META = None
 _SOURCE_PRS = None
 _SOURCE_SLIDE_IDS = None
+_SOURCE_BASELINE = None
+_SOURCE_TARGET_PARTS = set()
 
 def _set_theme(theme, language):
     for key, value in _LEGACY_THEME.items(): setattr(T, key, value)
@@ -292,7 +294,7 @@ def new_deck(title="", footer="", style="navy", language="zh"):
     return prs
 
 def _prepare_source():
-    global _SOURCE_PRS, _SOURCE_SLIDE_IDS
+    global _SOURCE_PRS, _SOURCE_SLIDE_IDS, _SOURCE_BASELINE, _SOURCE_TARGET_PARTS
     if _SOURCE_META is None or _SOURCE_PRS is not None: return
     with zipfile.ZipFile("/source.pptx") as archive:
         entries = archive.infolist()
@@ -306,7 +308,15 @@ def _prepare_source():
                 data = archive.read(entry).upper()
                 if b"<!DOCTYPE" in data or b"<!ENTITY" in data: raise ValueError("source DTD is unsupported")
     prs = Presentation("/source.pptx")
+    # The first access to prs.slides can rename slide parts. A byte-preserving
+    # edit needs the same part paths before and after that normalization.
+    original_parts = [str(prs.part.related_part(ref.rId).partname)[1:]
+                      for ref in prs._element.get_or_add_sldIdLst()]
     if len(prs.slides) != _SOURCE_META["totalPages"]: raise ValueError("source page count mismatch")
+    if original_parts == [str(slide.part.partname)[1:] for slide in prs.slides]:
+        _SOURCE_BASELINE = io.BytesIO()
+        prs.save(_SOURCE_BASELINE)
+        _SOURCE_TARGET_PARTS = {original_parts[page - 1] for page in _SOURCE_META["pageNumbers"]}
     style = _SELECTED_STYLE or "navy"
     prs._ofox_context = {"style": style, "theme": _STYLES.get(style), "language": "zh", "footer": "", "page": len(prs.slides)}
     _SOURCE_PRS = prs
@@ -328,6 +338,57 @@ def _validate_source(prs):
     if _SOURCE_META is None: return
     if prs is not _SOURCE_PRS or [slide.slide_id for slide in prs.slides] != _SOURCE_SLIDE_IDS:
         raise RuntimeError("source edit must preserve the original presentation, page count and slide IDs")
+
+
+def _slide_relationships(archive, slide_part):
+    folder, name = slide_part.rsplit("/", 1)
+    try:
+        root = etree.fromstring(archive.read(f"{folder}/_rels/{name}.rels"),
+                                parser=etree.XMLParser(resolve_entities=False, no_network=True))
+    except KeyError:
+        return set()
+    return {(rel.get("Id"), rel.get("Type"), rel.get("Target"), rel.get("TargetMode", "Internal"))
+            for rel in root if isinstance(rel.tag, str)}
+
+
+def _copy_slide_edits(original, baseline, revised, output):
+    names = set(baseline.namelist())
+    if names != set(revised.namelist()) or not _SOURCE_TARGET_PARTS.issubset(original.namelist()):
+        return False
+    if any(_slide_relationships(original, name) != _slide_relationships(baseline, name)
+           for name in _SOURCE_TARGET_PARTS):
+        return False
+    # Compare two serializations by the same library. Reusing the original
+    # members then avoids rewriting untouched notes, styles and slide XML.
+    for name in names - _SOURCE_TARGET_PARTS:
+        if baseline.read(name) != revised.read(name):
+            return False
+    changed = {}
+    for name in _SOURCE_TARGET_PARTS:
+        content = revised.read(name)
+        if baseline.read(name) != content:
+            changed[name] = content
+    with zipfile.ZipFile(output, "w") as archive:
+        for entry in original.infolist():
+            data = changed.get(entry.filename)
+            archive.writestr(entry, original.read(entry) if data is None else data)
+    return True
+
+
+def _save(prs, output):
+    if _SOURCE_BASELINE is None:
+        prs.save(output)
+        return
+    revised = io.BytesIO()
+    prs.save(revised)
+    with zipfile.ZipFile("/source.pptx") as original, zipfile.ZipFile(_SOURCE_BASELINE) as baseline, zipfile.ZipFile(revised) as candidate:
+        if _copy_slide_edits(original, baseline, candidate, output):
+            return
+    # A structural change still goes through the normal writer and the Host's
+    # source-preservation validation for dependent parts.
+    with open(output, "wb") as file:
+        file.write(revised.getbuffer())
+
 
 def _source_charts(prs):
     if _SOURCE_META is None: return None
@@ -1056,23 +1117,26 @@ class _LatexMath:
         if command in self.symbols: return self.symbols[command]
         if command in (",", ";", "!", " "): return " "
         if command == "quad": return "\u2003"  # fixed em-space; glyph width is font-dependent
-        if command in ("sin", "cos"): return {"roman": command}
+        if command in ("sin", "cos", "log", "exp"): return {"roman": command}
         if command in ("{", "}", "_", "%"): return command
         if command == "frac": return {"fraction": [self.argument(), self.argument()]}
         if command == "sqrt":
             if self.peek() != "{": raise ValueError("equation sqrt requires a braced radicand; indexed roots are unsupported")
             return {"sqrt": self.argument()}
-        if command in ("mathrm", "operatorname"):
-            if self.take() != "{": raise ValueError("equation upright names require a braced literal name")
+        if command in ("mathrm", "operatorname", "mathcal"):
+            label = "calligraphic" if command == "mathcal" else "upright"
+            if self.take() != "{": raise ValueError("equation " + label + " names require a braced literal name")
             letters = []
             while self.peek() != "}":
                 letter = self.take()
-                if not re.fullmatch(r"[A-Za-z0-9]", letter) or len(letters) >= 64:
-                    raise ValueError("equation upright names accept only 1–64 literal ASCII letters/digits, without nested macros or scripts")
+                pattern = r"[A-Za-z]" if command == "mathcal" else r"[A-Za-z0-9]"
+                if not re.fullmatch(pattern, letter) or len(letters) >= 64:
+                    allowed = "letters" if command == "mathcal" else "letters/digits"
+                    raise ValueError("equation " + label + " names accept only 1–64 literal ASCII " + allowed + ", without nested macros or scripts")
                 letters.append(letter)
             self.take()
-            if not letters: raise ValueError("equation upright names must not be empty")
-            return {"roman": "".join(letters)}
+            if not letters: raise ValueError("equation " + label + " names must not be empty")
+            return {"script" if command == "mathcal" else "roman": "".join(letters)}
         if command in ("hat", "widehat"): return {"hat": self.argument()}
         if command == "sum": return {"sum": ["", "", None]}
         if command in ("left", "right"):
@@ -1135,11 +1199,17 @@ def _math_node(expression, size):
     if kind == "sequence":
         if not isinstance(values, (list, tuple)) or not values: raise ValueError("equation sequence must be a nonempty list")
         return [part for value in values for part in _math_parts(value, size)]
-    if kind == "roman":
-        if not isinstance(values, str) or not re.fullmatch(r"[A-Za-z0-9]{1,64}", values):
-            raise ValueError("equation upright name must contain 1–64 literal ASCII letters/digits")
+    if kind in ("roman", "script"):
+        pattern = r"[A-Za-z]{1,64}" if kind == "script" else r"[A-Za-z0-9]{1,64}"
+        if not isinstance(values, str) or not re.fullmatch(pattern, values):
+            raise ValueError("equation calligraphic name must contain 1–64 literal ASCII letters" if kind == "script" else "equation upright name must contain 1–64 literal ASCII letters/digits")
         result = _math_node(values, size)
-        properties = node("rPr"); style = node("sty"); style.set(f"{{{_MATH_NS}}}val", "p")
+        properties = node("rPr")
+        if kind == "script":
+            # OMML encodes calligraphic ASCII letters as editable script runs.
+            # https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.math.script
+            script = node("scr"); script.set(f"{{{_MATH_NS}}}val", "script"); properties.append(script)
+        style = node("sty"); style.set(f"{{{_MATH_NS}}}val", "p")
         properties.append(style); result.insert(0, properties)
         return result
     if kind == "sqrt":
@@ -1173,7 +1243,7 @@ def _math_linear(expression):
     if isinstance(expression, (str, int, float)): return str(expression)
     kind, values = next(iter(expression.items()))
     if kind == "sequence": return "".join(map(_math_linear, values))
-    if kind == "roman": return values
+    if kind in ("roman", "script"): return values
     if kind == "sqrt": return "√(" + _math_linear(values) + ")"
     if kind == "hat": return _math_linear(values) + "\u0302"
     if kind == "sum":
@@ -1290,7 +1360,9 @@ def relation(slide, items, x, y, w, h, kind="process", size=15):
     """Editable process or comparison: native shapes, text and connectors.
     Comparison uses side-by-side columns; a process uses directional links."""
     _using(slide)
-    if kind not in ("process", "comparison"): raise ValueError("relation kind must be process or comparison")
+    if kind == "sequence": kind = "process"
+    if kind not in ("process", "comparison"):
+        raise ValueError("relation kind must be process, sequence (alias), or comparison; spatial is not a sequential relation. Use kind='comparison' for independent items, or fork_join() for parallel branches with a source and merge")
     if not isinstance(items, (list, tuple)) or not 2 <= len(items) <= 6 or any(not isinstance(item, str) for item in items):
         raise ValueError("relation needs 2 to 6 string labels; use steps/timeline for structured title/body items")
     _diagram_bounds(slide, x, y, w, h, "relation")

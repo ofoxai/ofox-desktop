@@ -512,14 +512,15 @@ test("OFOX_PYODIDE_BASE_URL replaces only the Pyodide CDN base of a wheel", () =
   );
 });
 
-test("the Python engine is offered on macOS only, and its npm package is pruned elsewhere", async (t) => {
+test("Python resources are staged on macOS and Windows x64, independently of sandbox admission", async (t) => {
   const downloads = await readJson(
     new URL("../../scripts/python-downloads.json", import.meta.url),
   );
   for (const [target, offered] of Object.entries({
     "darwin-arm64": true,
     "darwin-x64": true,
-    "win32-x64": false,
+    "win32-x64": true,
+    "win32-arm64": false,
     "linux-x64": false,
   }))
     assert.equal(pythonEngineOffered(target, downloads), offered, target);

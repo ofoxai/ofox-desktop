@@ -6,6 +6,8 @@ mod fix;
 pub(crate) mod math_preview;
 pub(crate) mod preview;
 pub mod runner;
+#[cfg(windows)]
+pub(crate) mod windows_sandbox;
 
 /// The tool a chat model makes a document with.
 pub const CREATE_DOCUMENT: &str = "create_document";

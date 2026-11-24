@@ -173,6 +173,7 @@ pub struct Atom {
     pub at_ms: i64,
     pub tokens: [u64; 4],
     pub tokens_complete: bool,
+    pub cache_write_1h: Option<u64>,
     pub requests: u64,
     pub saved_cost: Decimal,
     pub archived: bool,
@@ -196,6 +197,7 @@ pub struct Dataset {
 }
 #[derive(Serialize)]
 pub struct RecordEvidence {
+    pub cache_write_1h: Option<u64>,
     pub at_ms: i64,
     pub recorded_cost_usd: Option<String>,
     pub complete: bool,
@@ -209,6 +211,7 @@ fn checked_u64(value: i64) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
 }
 struct Record {
+    cache_write_1h: Option<u64>,
     row: RequestLogDetail,
     native_sid: Option<String>,
     at_ms: i64,
@@ -262,6 +265,7 @@ fn read_records(
         let status = row.get::<_, i64>(20)?;
         let created_at = row.get::<_, i64>(22)?;
         Ok(Record {
+            cache_write_1h: None,
             row: RequestLogDetail {
                 request_id: row.get(0)?,
                 provider_id: row.get(1)?,
@@ -406,6 +410,7 @@ fn native_records(input: &AnalyticsInput, query: &UsageQueryV1) -> Result<Vec<Re
                 Project::Unparsed => None,
             });
             Ok(Record {
+                cache_write_1h: Some(0),
                 row: RequestLogDetail {
                     request_id: format!("codex_native_v1:{}", fact.event_key),
                     provider_id: "_codex_session".into(),
@@ -521,7 +526,53 @@ pub fn read_dataset<Tz: TimeZone>(
     let projects = ProjectIndex::from_input(&input)?;
     options.projects = projects.options.clone();
     let mut records = read_records(&tx, &query, native_ready, saved_history)?;
+    let mut ttl_facts = BTreeMap::new();
+    for fact in input
+        .facts
+        .iter()
+        .filter(|fact| fact.tool_id == "claude" && fact.source_id == "session_log")
+    {
+        ttl_facts
+            .entry(fact.event_key.as_str())
+            .and_modify(|candidate| *candidate = None)
+            .or_insert(Some(fact));
+    }
     for record in &mut records {
+        record.cache_write_1h =
+            if record.row.app_type != "claude" || record.row.cache_creation_tokens == 0 {
+                Some(0)
+            } else if record.row.provider_id == "_session"
+                && record.row.data_source.as_deref() == Some("session_log")
+            {
+                record
+                    .native_sid
+                    .as_deref()
+                    .zip(record.row.request_id.strip_prefix("session:"))
+                    .and_then(|(sid, message)| {
+                        let event = session_analytics_index::key(
+                            "claude",
+                            &super::usage_source::native_key("claude", sid, message),
+                        );
+                        let fact = ttl_facts.get(event.as_str())?.as_ref()?;
+                        (fact.session_key.as_deref()
+                            == Some(session_analytics_index::key("claude", sid).as_str())
+                            && fact.model == record.row.model
+                            && fact.at_ms.div_euclid(1000) == record.row.created_at
+                            && fact.buckets
+                                == [
+                                    record.row.input_tokens,
+                                    record.row.output_tokens,
+                                    record.row.cache_read_tokens,
+                                    record.row.cache_creation_tokens,
+                                ]
+                            && fact.complete
+                            && fact.cache_write_ttl_known
+                            && fact.cache_write_1h <= fact.buckets[3])
+                            .then_some(fact.cache_write_1h)
+                    })
+            } else {
+                None
+            };
         let association = projects.associate(
             &record.row.app_type,
             &record.row.provider_id,
@@ -590,6 +641,7 @@ pub fn read_dataset<Tz: TimeZone>(
                 ],
                 requests: 1,
                 tokens_complete: record.usage_complete,
+                cache_write_1h: record.cache_write_1h,
                 saved_cost: parse_amount(&row.total_cost_usd)?,
                 archived: false,
                 session_key: record.session_key.clone(),
@@ -693,6 +745,7 @@ pub fn read_dataset<Tz: TimeZone>(
         }
         coverage.reasons.push("legacyLocalDate".into());
         atoms.push(Atom {
+            cache_write_1h: (tool != "claude" || tokens[3] == 0).then_some(0),
             tool,
             model,
             source: None,
@@ -809,6 +862,7 @@ pub fn read_dataset<Tz: TimeZone>(
             (
                 record.row.request_id.clone(),
                 RecordEvidence {
+                    cache_write_1h: record.cache_write_1h,
                     at_ms: record.at_ms,
                     recorded_cost_usd: (!record.canonical)
                         .then(|| record.row.total_cost_usd.clone()),
@@ -846,6 +900,7 @@ pub fn read_dataset<Tz: TimeZone>(
             atom.project_id,
             atom.tokens_complete
         ));
+        hash.update(format!("\0{:?}", atom.cache_write_1h));
     }
     hash.update(
         serde_json::to_vec(&catalog.coverage)
@@ -1010,5 +1065,81 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r == "unsupportedSource:not-a-reader"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovered_claude_ttl_requires_exact_native_identity_and_four_buckets() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("strict-ttl.jsonl");
+        let at = 1_790_000_001i64;
+        let timestamp = chrono::DateTime::from_timestamp(at, 0)
+            .unwrap()
+            .to_rfc3339();
+        std::fs::write(&path, format!("{}\n", serde_json::json!({
+            "type":"assistant", "sessionId":"strict-session", "timestamp":timestamp,
+            "message":{"id":"strict-message", "role":"assistant", "model":"strict-model",
+                "stop_reason":"end_turn", "content":[], "usage":{
+                    "input_tokens":10, "output_tokens":20, "cache_read_input_tokens":30,
+                    "cache_creation_input_tokens":100,
+                    "cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":60}
+                }}
+        }))).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_cost_usd,latency_ms,status_code,created_at,data_source,session_id) VALUES('session:strict-message','_session','claude','strict-model',10,20,30,100,'123',0,0,?1,'session_log','strict-session')",
+            [at],
+        ).unwrap();
+        super::super::session_analytics_index::refresh_sources(
+            &db,
+            &[super::super::session_analytics_index::SourceSpec {
+                provider: "claude".into(),
+                path,
+                subagent: false,
+                project_file: None,
+                title_file: None,
+            }],
+        )
+        .unwrap();
+        let q = UsageQueryV1 {
+            version: 1,
+            start_ms: Some((at - 1) * 1000),
+            end_ms: (at + 10) * 1000,
+            tool_ids: vec![],
+            model_ids: vec![],
+            project_ids: vec![],
+            source_ids: vec![],
+        };
+        let read =
+            || read_dataset(&db, q.clone(), None, "ofox.ai", q.end_ms, &chrono::Utc).unwrap();
+        let matched = read();
+        assert_eq!(
+            matched.record_evidence["session:strict-message"].cache_write_1h,
+            Some(60)
+        );
+        assert_eq!(matched.atoms[0].cache_write_1h, Some(60));
+        for mutation in [
+            "UPDATE proxy_request_logs SET input_tokens=11",
+            "UPDATE proxy_request_logs SET input_tokens=10,output_tokens=21",
+            "UPDATE proxy_request_logs SET output_tokens=20,cache_read_tokens=31",
+            "UPDATE proxy_request_logs SET cache_read_tokens=30,cache_creation_tokens=101",
+            "UPDATE proxy_request_logs SET cache_creation_tokens=100,model='other-model'",
+            "UPDATE proxy_request_logs SET model='strict-model',session_id='other-session'",
+            "UPDATE proxy_request_logs SET session_id='strict-session',created_at=created_at+1",
+            "UPDATE proxy_request_logs SET created_at=created_at-1,provider_id='other-provider'",
+        ] {
+            db.conn.lock().unwrap().execute(mutation, []).unwrap();
+            let mismatch = read();
+            assert_eq!(
+                mismatch.record_evidence["session:strict-message"].cache_write_1h, None,
+                "{mutation}"
+            );
+            assert_ne!(
+                mismatch.snapshot_version, matched.snapshot_version,
+                "{mutation}"
+            );
+            assert_eq!(mismatch.records[0].total_cost_usd, "123");
+        }
     }
 }

@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "assistant_host/parity.rs"]
+mod parity_eval;
+
 const KEY: &str = "synthetic-assistant-key-Q7v2Lm9X";
 const NEW_KEY: &str = "synthetic-assistant-key-replacement-T4n8";
 const MODEL: &str = "test/chat-model";
@@ -102,6 +105,8 @@ impl Request {
 struct Script {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<Request>>>,
+    admissions: Arc<Mutex<Vec<Request>>>,
+    strict_admission: Arc<AtomicBool>,
     titles: Arc<Mutex<VecDeque<Reply>>>,
     title_requests: Arc<Mutex<Vec<Request>>>,
 }
@@ -146,9 +151,19 @@ impl Gateway {
         self.script.titles.lock().unwrap().push_back(reply);
     }
 
-    /// Every request but titles.
+    /// User-scripted requests. Automatic fixture admission requests are recorded
+    /// separately, so older domain tests keep their operation/response indexes.
     fn requests(&self) -> Vec<Request> {
         self.script.requests.lock().unwrap().clone()
+    }
+
+    fn admission_requests(&self) -> Vec<Request> {
+        self.script.admissions.lock().unwrap().clone()
+    }
+
+    /// Admission regressions script the exact provider exchange themselves.
+    fn strict_admission(&self) {
+        self.script.strict_admission.store(true, Ordering::SeqCst);
     }
 
     fn title_requests(&self) -> Vec<Request> {
@@ -159,6 +174,47 @@ impl Gateway {
 /// A request for a generated title: it asks for at most 32 output tokens.
 fn is_title_request(body: &Value) -> bool {
     body["max_tokens"] == 32 || body["max_output_tokens"] == 32
+}
+
+fn scripted_work(reply: &Reply) -> bool {
+    match reply {
+        Reply::ToolCalls(calls) => calls
+            .iter()
+            .any(|(name, _)| !matches!(*name, "updatePlan" | "beginSingleStep")),
+        Reply::Wait(_, inner) => scripted_work(inner),
+        Reply::Answer(_) => true,
+        _ => false,
+    }
+}
+
+/// Domain fixtures act like a compliant provider at the generic task gate.
+/// The dedicated strict tests below observe the actual initial tool contract,
+/// bypass refusals and per-turn reset without this helper.
+fn fixture_admission(request: &Request, script: &Script) -> Option<Reply> {
+    if script.strict_admission.load(Ordering::SeqCst) {
+        return None;
+    }
+    let names = tool_names(request);
+    if names.len() != 2
+        || !names.iter().any(|name| name == "beginSingleStep")
+        || !names.iter().any(|name| name == "updatePlan")
+        || !script
+            .replies
+            .lock()
+            .unwrap()
+            .front()
+            .is_some_and(scripted_work)
+    {
+        return None;
+    }
+    script.admissions.lock().unwrap().push(request.clone());
+    Some(Reply::ToolCalls(vec![(
+        "updatePlan",
+        json!({"steps":[
+            {"step":"Perform the requested operation","status":"in_progress"},
+            {"step":"Review the result and report","status":"pending"}
+        ]}),
+    )]))
 }
 
 fn serve(stream: TcpStream, script: &Script) {
@@ -210,6 +266,8 @@ fn serve(stream: TcpStream, script: &Script) {
         script.title_requests.lock().unwrap().push(request);
         let scripted = script.titles.lock().unwrap().pop_front();
         scripted.unwrap_or_else(|| Reply::Error(400, json!({"error": {"message": "unscripted"}})))
+    } else if let Some(admission) = fixture_admission(&request, script) {
+        admission
     } else {
         script.requests.lock().unwrap().push(request.clone());
         let scripted = script
@@ -638,6 +696,21 @@ impl Environment for TestEnv {
             .ok_or_else(|| "assistant_unknown_apex".into())
     }
 
+    fn allows_local_gateway(&self, base_url: &str) -> bool {
+        let Some(port) = base_url.strip_prefix("http://localhost:") else {
+            return false;
+        };
+        port.parse::<u16>()
+            .is_ok_and(|number| number != 0 && number.to_string() == port)
+            && self
+                .state
+                .lock()
+                .unwrap()
+                .gateways
+                .values()
+                .any(|registered| registered == base_url)
+    }
+
     fn provider_prices<'a>(
         &'a self,
         _apex: &'a str,
@@ -713,7 +786,11 @@ async fn create(host: &AssistantHost) -> String {
 }
 
 async fn wait_for(env: &TestEnv, run_id: &str, kind: &str) -> Event {
-    let deadline = Instant::now() + Duration::from_secs(45);
+    wait_for_timeout(env, run_id, kind, Duration::from_secs(45)).await
+}
+
+async fn wait_for_timeout(env: &TestEnv, run_id: &str, kind: &str, timeout: Duration) -> Event {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(event) = env.events(run_id).into_iter().find(|e| e.r#type == kind) {
             return event;
@@ -734,6 +811,21 @@ async fn wait_for(env: &TestEnv, run_id: &str, kind: &str) -> Event {
 async fn turn(host: &Arc<AssistantHost>, env: &TestEnv, request: SendRequest) -> (String, Event) {
     let run = host.send(request).await.unwrap();
     let end = wait_for(env, &run.run_id, "run_end").await;
+    (run.run_id, end)
+}
+
+/// Windows Office turns perform several real LPAC launches and verified runtime
+/// reads. Bound these tests by the host's existing 15-minute run deadline.
+async fn office_turn(
+    host: &Arc<AssistantHost>,
+    env: &TestEnv,
+    request: SendRequest,
+) -> (String, Event) {
+    if !cfg!(windows) {
+        return turn(host, env, request).await;
+    }
+    let run = host.send(request).await.unwrap();
+    let end = wait_for_timeout(env, &run.run_id, "run_end", Duration::from_secs(15 * 60)).await;
     (run.run_id, end)
 }
 
@@ -796,10 +888,260 @@ fn assert_no_secret_in_events(env: &TestEnv, secrets: &[&str]) {
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[test]
+fn general_task_admission_tracks_non_ppt_delivery_then_answers_a_simple_followup() {
+    let bundle = runtime_dir().expect("prepare Node/Pi before assistant integration tests");
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        gateway.strict_admission();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let opening = json!([
+                {"step":"核对报名与到账记录","status":"in_progress"},
+                {"step":"保存对账明细","status":"pending"},
+                {"step":"保存异常报告并核查","status":"pending"}
+            ]);
+            let middle = json!([
+                {"step":"核对报名与到账记录","status":"completed"},
+                {"step":"保存对账明细","status":"completed"},
+                {"step":"保存异常报告并核查","status":"in_progress"}
+            ]);
+            let finished = json!([
+                {"step":"核对报名与到账记录","status":"completed"},
+                {"step":"保存对账明细","status":"completed"},
+                {"step":"保存异常报告并核查","status":"completed"}
+            ]);
+            gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":opening}))]));
+            gateway.reply(Reply::ToolCalls(vec![("create_document", json!({
+                "name":"reconciliation.csv","format":"csv",
+                "content":"id,due,received,delta\nA001,120,120,0\nA002,120,100,-20\n"
+            }))]));
+            gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":middle}))]));
+            gateway.reply(Reply::ToolCalls(vec![("create_document", json!({
+                "name":"exceptions.md","format":"md",
+                "content":"# 核对结果\nA002 少付 20 元，需核实剩余款项。\n"
+            }))]));
+            gateway.reply(Reply::ToolCalls(vec![("updatePlan", json!({"steps":finished}))]));
+            gateway.reply(Reply::Stream("已核对并交付明细和异常报告。".into()));
+            let (run, end) = turn(&host, &env, request(&sid,
+                "核对 A001 应收120到账120、A002 应收120到账100，输出对账 CSV 和异常 Markdown 报告。",
+                json!({}))).await;
+            assert_eq!(end.data["status"], "completed", "{end:?}");
+            assert!(gateway.admission_requests().is_empty(), "this regression scripts every real request");
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 6);
+            let names = tool_names(&requests[0]);
+            assert_eq!(names.len(), 2);
+            assert!(names.contains(&"updatePlan".into()));
+            assert!(names.contains(&"beginSingleStep".into()));
+            assert!(tool_names(&requests[1]).contains(&"create_document".into()));
+            assert!(!tool_names(&requests[1]).iter().any(|name| matches!(name.as_str(), "bash" | "write" | "diagnose_in_folder")));
+            let plans = of_type(&env, &run, "task_plan");
+            assert_eq!(plans.iter().map(|p| p["steps"].clone()).collect::<Vec<_>>(), [opening, middle, finished]);
+            let events = env.events(&run);
+            let first_plan = events.iter().position(|event| event.r#type == "task_plan").unwrap();
+            let first_write = events.iter().position(|event| event.r#type == "tool_start" && event.data["name"] == "create_document").unwrap();
+            assert!(first_plan < first_write);
+            let saved = host.get_session(&sid).await.unwrap();
+            assert_eq!(saved.attachments.len(), 2);
+            for (name, expected) in [("reconciliation.csv", "A002,120,100,-20"), ("exceptions.md", "A002 少付 20 元")] {
+                let file = saved.attachments.iter().find(|file| file.name == name).unwrap();
+                let bytes = std::fs::read(session_dir(config.path(), &sid).join("attachments").join(&file.id)).unwrap();
+                assert!(String::from_utf8(bytes).unwrap().contains(expected));
+            }
+            assert!(saved.messages.last().unwrap().task_progress.as_ref().unwrap().steps.iter().all(|step| step.status == "completed"));
+            gateway.reply(Reply::Stream("50。".into()));
+            let (followup, end) = turn(&host, &env, request(&sid, "840 减 790 是多少？", json!({}))).await;
+            assert_eq!(end.data["status"], "completed");
+            assert_eq!(gateway.requests().len(), 7, "simple question needs one model request");
+            assert!(of_type(&env, &followup, "task_plan").is_empty());
+            assert!(of_type(&env, &followup, "tool_start").is_empty());
+            let saved = host.get_session(&sid).await.unwrap();
+            let answer = saved.messages.iter().find(|message| message.role == "assistant" && message.run_id.as_deref() == Some(&followup)).unwrap();
+            assert!(answer.task_progress.as_ref().is_none_or(|progress| progress.steps.is_empty()), "{answer:?}");
+            assert_eq!(answer.content, "50。");
+            host.shutdown().await;
+            let reopened = AssistantHost::new(env.clone()).get_session(&sid).await.unwrap();
+            assert_eq!(reopened.attachments.len(), 2);
+            assert_eq!(reopened.messages.iter().filter(|message| message.task_progress.as_ref().is_some_and(|progress| !progress.steps.is_empty())).count(), 1);
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+    }
+}
+
+#[test]
+fn task_progress_without_local_access_is_persisted_by_the_bundled_runtime() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &runtime_dir, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            // With no local paths grant, the plan still runs and no shell or
+            // file tool is offered. It is presentation, not configuration access.
+            let steps = json!([
+                {"step":"Read sources","status":"completed"},
+                {"step":"Review output","status":"pending"}
+            ]);
+            gateway.reply(Reply::ToolCalls(vec![(
+                "updatePlan",
+                json!({"steps":steps}),
+            )]));
+            gateway.reply(Reply::Stream("Draft ready; review remains.".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Prepare a draft and review it", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let names = tool_names(&gateway.requests()[0]);
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "updatePlan")
+                    .count(),
+                1
+            );
+            assert!(!names
+                .iter()
+                .any(|name| matches!(name.as_str(), "read" | "write" | "bash" | "powershell")));
+            let plan_event = wait_for(&env, &run, "task_plan").await;
+            let detail = host.get_session(&sid).await.unwrap();
+            let reply = detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && m.run_id.as_deref() == Some(&run))
+                .unwrap();
+            let progress = serde_json::to_value(reply).unwrap()["taskProgress"].clone();
+            assert_eq!(progress["steps"], steps);
+            assert_eq!(plan_event.data["messageId"], reply.id);
+            assert_eq!(plan_event.data["startedAt"], progress["startedAt"]);
+            assert!(reply.completed_at.unwrap() >= progress["startedAt"].as_i64().unwrap());
+            let reopened = AssistantHost::new(env.clone())
+                .get_session(&sid)
+                .await
+                .unwrap();
+            let restored = reopened.messages.iter().find(|m| m.id == reply.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(restored).unwrap()["taskProgress"],
+                progress
+            );
+            assert_eq!(restored.completed_at, reply.completed_at);
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+        assert_no_secret_in_events(&env, &[KEY]);
+    }
+}
+
+#[test]
+fn a_rejected_model_request_keeps_the_last_task_plan_without_a_retry() {
+    let bundle = runtime_dir().expect("prepare Node/Pi before assistant integration tests");
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        let plans: Vec<_> = [
+            ["in_progress", "pending", "pending"],
+            ["completed", "in_progress", "pending"],
+            ["completed", "pending", "in_progress"],
+            ["completed", "in_progress", "pending"],
+            ["completed", "completed", "in_progress"],
+            ["completed", "pending", "in_progress"],
+            ["completed", "in_progress", "pending"],
+        ]
+        .into_iter()
+        .map(|[first, second, third]| {
+            json!([
+                {"step":"Confirm the topic","status":first},
+                {"step":"Write questions","status":second},
+                {"step":"Summarize findings","status":third},
+            ])
+        })
+        .collect();
+        for steps in &plans {
+            gateway.reply(Reply::ToolCalls(vec![(
+                "updatePlan",
+                json!({"steps":steps}),
+            )]));
+        }
+        gateway.reply(Reply::Error(
+            400,
+            json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "The requested item was created under a different resource."
+                }
+            }),
+        ));
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Prepare and review the findings", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "error");
+            assert_eq!(gateway.requests().len(), 8);
+            let events = env.events(&run);
+            assert!(!events.iter().any(|event| event.r#type == "retrying"));
+            let plan_events: Vec<_> = events
+                .iter()
+                .filter(|event| event.r#type == "task_plan")
+                .collect();
+            assert_eq!(
+                plan_events
+                    .iter()
+                    .map(|event| &event.data["steps"])
+                    .collect::<Vec<_>>(),
+                plans.iter().collect::<Vec<_>>()
+            );
+            let latest = plan_events.last().unwrap();
+            let reopened = AssistantHost::new(env.clone())
+                .get_session(&sid)
+                .await
+                .unwrap();
+            let reply = reopened
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == "assistant" && message.run_id.as_deref() == Some(&run)
+                })
+                .unwrap();
+            let progress = &serde_json::to_value(reply).unwrap()["taskProgress"];
+            assert_eq!(reply.status, "error");
+            assert_eq!(
+                reply.error_code.as_deref(),
+                Some("assistant_model_request_failed")
+            );
+            assert_eq!(progress["steps"], *plans.last().unwrap());
+            assert_eq!(latest.data["messageId"], reply.id);
+            assert_eq!(latest.data["startedAt"], progress["startedAt"]);
+            assert!(reply.completed_at.unwrap() >= progress["startedAt"].as_i64().unwrap());
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+        assert_no_secret_in_events(&env, &[KEY]);
+    }
+}
+
+#[test]
 fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
     };
+    // Tauri uses the canonical executable directory for installed resources.
+    #[cfg(windows)]
+    let runtime_dir = runtime_dir
+        .canonicalize()
+        .expect("canonical installed-style runtime path");
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
     let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
@@ -1252,30 +1594,42 @@ fn conversation_text_passes_byte_for_byte_and_only_the_key_is_scrubbed() {
 /// working folder after it).
 fn system_preamble(request: &Request) -> String {
     let prompt = request.body["messages"][0]["content"].as_str().unwrap();
-    prompt
+    let without_preparation = prompt
+        .lines()
+        .filter(|line| !line.starts_with("Task execution preparation:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    without_preparation
         .split("\n<cwd>")
         .next()
         .unwrap()
-        .trim_end()
+        .trim()
         .to_owned()
 }
 
 #[test]
 fn saved_settings_shape_the_next_message_and_can_turn_titles_off() {
-    let Some(runtime_dir) = runtime_dir() else {
+    let Some(bundle) = runtime_dir() else {
         return;
     };
+    let runtime_dir = title_runtime(&bundle);
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
-    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let env = TestEnv::new(config.path(), runtime_dir.path(), &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     runtime().block_on(async {
         // The defaults: no instructions, and the first answer asks for a title.
         let sid = create(&host).await;
         gateway.reply(Reply::Stream("Plain answer.".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "Hello", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Hello", json!({"uiLanguage":"en"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
         let plain = system_preamble(&gateway.requests()[0]);
+        assert!(plain.contains("App language: en."), "{plain}");
         assert!(!plain.contains("standing instructions"), "{plain}");
         title_requests(&gateway, 1).await;
 
@@ -1286,24 +1640,35 @@ fn saved_settings_shape_the_next_message_and_can_turn_titles_off() {
         }))
         .unwrap();
         host.set_preferences(settings).await.unwrap();
-        // From the next message on, in this conversation and a new one.
+        // The standing instruction applies even when the UI language changes.
         gateway.reply(Reply::Stream("Five, seven, five.".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "Again", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Again", json!({"uiLanguage":"ja"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
         let other = create(&host).await;
         gateway.reply(Reply::Stream("Autumn moonlight.".into()));
-        let (_, end) = turn(&host, &env, request(&other, "Hi", json!({}))).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&other, "Hi", json!({"uiLanguage":"ja"})),
+        )
+        .await;
         assert_eq!(end.data["status"], "completed");
-        for sent in &gateway.requests()[1..] {
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 3);
+        for sent in &requests[1..] {
             let instructed = system_preamble(sent);
+            let (preamble, instructions) = instructed.rsplit_once('\n').unwrap();
+            assert!(preamble.contains("App language: ja."), "{preamble}");
             assert!(
-                instructed.starts_with(&format!("{plain}\n")),
-                "{instructed}"
+                preamble.contains("The user's standing instructions"),
+                "{preamble}"
             );
-            assert!(
-                instructed.ends_with("\nAlways answer in haiku."),
-                "{instructed}"
-            );
+            assert_eq!(instructions, "Always answer in haiku.");
         }
         // Titles are off: the new conversation's first answer asks for none.
         no_more_title_requests(&gateway, 1).await;
@@ -3225,14 +3590,41 @@ fn of_type(env: &TestEnv, run: &str, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The text of the tool results the model was sent.
+/// User operation events, excluding task-plan presentation bookkeeping.
+fn tool_events(env: &TestEnv, run: &str, kind: &str) -> Vec<Value> {
+    of_type(env, run, kind)
+        .into_iter()
+        .filter(|event| event["name"] != "updatePlan" && event["name"] != "beginSingleStep")
+        .collect()
+}
+
+/// Substantive tool results sent to the model, excluding planning receipts.
+/// Admission traffic is checked explicitly by strict task-gate regressions.
 fn tool_results(request: &Request) -> Vec<String> {
-    request.body["messages"]
-        .as_array()
+    let messages = request.body["messages"].as_array();
+    let planning_calls: std::collections::HashSet<&str> = messages
         .into_iter()
         .flatten()
-        .filter(|m| m["role"] == "tool")
-        .map(|m| text_of(&m["content"]))
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .filter(|call| {
+            matches!(
+                call["function"]["name"].as_str(),
+                Some("updatePlan" | "beginSingleStep")
+            )
+        })
+        .filter_map(|call| call["id"].as_str())
+        .collect();
+    messages
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message["role"] == "tool"
+                && !message["tool_call_id"]
+                    .as_str()
+                    .is_some_and(|id| planning_calls.contains(id))
+        })
+        .map(|message| text_of(&message["content"]))
         .collect()
 }
 
@@ -3264,15 +3656,9 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         assert_eq!(end.data["status"], "completed");
         assert_eq!(
             tool_names(&gateway.requests()[0]),
-            [
-                "use_skill",
-                "find_skills",
-                "install_skill",
-                "save_skill",
-                "create_document",
-                "get_presentation_style"
-            ]
+            ["updatePlan", "beginSingleStep"]
         );
+        assert!(!gateway.requests()[0].body["messages"][0]["content"].as_str().unwrap().contains("\"name\":\"web_search\""));
         // The run says it could not search, although the switch is on.
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
@@ -3292,33 +3678,20 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[1]),
-            [
-                "use_skill",
-                "find_skills",
-                "install_skill",
-                "save_skill",
-                "create_document",
-                "get_presentation_style"
-            ]
+            ["updatePlan", "beginSingleStep"]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
+        // Restoring this conversation keeps its already registered plan tool
+        // before the web tools that have just become available.
         gateway.reply(Reply::Stream("Could search".into()));
         let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[2]),
-            [
-                "use_skill",
-                "find_skills",
-                "install_skill",
-                "save_skill",
-                "create_document",
-                "get_presentation_style",
-                "web_search",
-                "web_fetch"
-            ]
+            ["updatePlan", "beginSingleStep"]
         );
+        assert!(gateway.requests()[2].body["messages"][0]["content"].as_str().unwrap().contains("\"name\":\"web_search\""));
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], true);
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.usage["searchCount"], 0);
@@ -3390,17 +3763,9 @@ fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
         let requests = gateway.requests();
         assert_eq!(
             tool_names(&requests[0]),
-            [
-                "use_skill",
-                "find_skills",
-                "install_skill",
-                "save_skill",
-                "create_document",
-                "get_presentation_style",
-                "web_search",
-                "web_fetch"
-            ]
+            ["updatePlan", "beginSingleStep"]
         );
+        assert!(requests[0].body["messages"][0]["content"].as_str().unwrap().contains("\"name\":\"web_search\""));
         let prompt = requests[0].body["messages"][0]["content"].as_str().unwrap();
         assert!(prompt.contains("web_search searches the web for free through Exa"));
         assert!(!prompt.contains("paid search"));
@@ -3478,17 +3843,18 @@ fn a_search_keeps_its_sources_on_the_reply_and_adds_its_cost() {
         let kinds: Vec<String> = env
             .events(&run)
             .into_iter()
+            .filter(|event| event.data["name"] != "updatePlan")
             .map(|e| e.r#type)
             .filter(|kind| ["tool_start", "sources", "tool_end"].contains(&kind.as_str()))
             .collect();
         assert_eq!(kinds, ["tool_start", "sources", "tool_end"]);
         assert_eq!(
-            of_type(&env, &run, "tool_start")[0],
+            tool_events(&env, &run, "tool_start")[0],
             json!({"messageId": message_id, "name": "web_search",
-                   "toolCallId": of_type(&env, &run, "tool_start")[0]["toolCallId"],
+                   "toolCallId": tool_events(&env, &run, "tool_start")[0]["toolCallId"],
                    "args": {"query": "pi sdk"}})
         );
-        let tool_end = &of_type(&env, &run, "tool_end")[0];
+        let tool_end = &tool_events(&env, &run, "tool_end")[0];
         assert_eq!(
             (&tool_end["success"], &tool_end["code"]),
             (&json!(true), &Value::Null)
@@ -3535,10 +3901,11 @@ fn a_search_keeps_its_sources_on_the_reply_and_adds_its_cost() {
         assert_eq!(detail.usage["searchCount"], 1);
         // 0.014 + 1000 × 0.00000005 + 500 × 0.0000004
         assert_eq!(detail.usage["searchCostUsd"], "0.01425");
-        assert_eq!(detail.usage["modelRequests"], 2);
-        // Two model requests of 10 in, 5 out at 2 and 10 per million.
+        assert_eq!(detail.usage["modelRequests"], 3);
+        assert_eq!(gateway.admission_requests().len(), 1);
+        // Three model requests, including fixture planning, at the catalog rates.
         let models = decimal(&detail.usage["estimatedCostUsd"]) - 0.01425;
-        assert!((models - 0.00014).abs() < 1e-12, "{}", detail.usage);
+        assert!((models - 0.00021).abs() < 1e-12, "{}", detail.usage);
         assert_ne!(detail.usage["usageCoverage"], "incomplete");
         let native =
             std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
@@ -3578,7 +3945,7 @@ fn a_search_with_an_unknown_outcome_ends_the_run_and_leaves_the_cost_unknown() {
         let error = wait_for(&env, &run, "error").await;
         assert_eq!(error.data["code"], "assistant_search_outcome_unknown");
         assert_eq!(gateway.requests().len(), 3, "nothing after the search");
-        let tool_end = &of_type(&env, &run, "tool_end")[0];
+        let tool_end = &tool_events(&env, &run, "tool_end")[0];
         assert_eq!(tool_end["success"], false);
         assert_eq!(tool_end["code"], "search_outcome_unknown");
         assert!(of_type(&env, &run, "sources").is_empty());
@@ -3642,11 +4009,11 @@ fn a_run_may_read_the_pages_of_the_conversation_and_no_others() {
         assert!(last_three[0].contains(SERVER_REFUSED), "{last_three:?}");
         assert!(last_three[1].contains(SERVER_REFUSED), "{last_three:?}");
         assert!(last_three[2].contains(NOT_ALLOWED), "{last_three:?}");
-        let ends = of_type(&env, &run, "tool_end");
+        let ends = tool_events(&env, &run, "tool_end");
         assert!(ends
             .iter()
             .all(|e| e["name"] == "web_fetch" && e["code"] == "fetch_not_allowed"));
-        let starts = of_type(&env, &run, "tool_start");
+        let starts = tool_events(&env, &run, "tool_start");
         assert_eq!(starts[0]["args"], json!({"url": LINKED}));
         // No page and no second search went out.
         assert_eq!(
@@ -4254,14 +4621,48 @@ fn title_events(env: &TestEnv, sid: &str, runs: &[&str]) -> Vec<Value> {
         .collect()
 }
 
+/// The real chat/title runtime without document engines or their startup probes.
+fn title_runtime(bundle: &Path) -> tempfile::TempDir {
+    let fixture = tempfile::tempdir().unwrap();
+    let node = Path::new("node").join(if cfg!(windows) { "node.exe" } else { "node" });
+    std::fs::create_dir(fixture.path().join("node")).unwrap();
+    std::fs::copy(bundle.join(&node), fixture.path().join(&node)).unwrap();
+    std::fs::create_dir_all(fixture.path().join("runtime/src")).unwrap();
+    let entry = bundle.join("runtime/src/main.mjs");
+    assert!(entry.is_absolute());
+    std::fs::write(
+        fixture.path().join("runtime/src/main.mjs"),
+        format!(
+            "import {{ pathToFileURL }} from 'node:url';\nawait import(pathToFileURL({}).href);\n",
+            serde_json::to_string(&entry).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest["sdkVersion"]
+        .as_str()
+        .is_some_and(|version| !version.is_empty()));
+    manifest["engines"] = json!({});
+    std::fs::write(
+        fixture.path().join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let engines = cc_switch_lib::assistant::documents::engines::engines_at(fixture.path());
+    assert!(engines.officecli.is_none() && engines.python.is_none());
+    fixture
+}
+
 #[test]
 fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
     };
+    let title_bundle = title_runtime(&runtime_dir);
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
-    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let env = TestEnv::new(config.path(), title_bundle.path(), &[("ofox.ai", &gateway)]);
     let host = AssistantHost::new(env.clone());
     runtime().block_on(async {
         let sid = create(&host).await;
@@ -4279,6 +4680,7 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
         )
         .await;
         assert_eq!(end.data["status"], "completed");
+        let asked = title_requests(&gateway, 1).await;
         // A turn sent at once is not named again; it waits for the title,
         // which is being written into the native history.
         gateway.reply(Reply::Stream("Day two: Arashiyama.".into()));
@@ -4286,7 +4688,6 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
             .send(request(&sid, "And day two?", json!({})))
             .await
             .unwrap();
-        let asked = title_requests(&gateway, 1).await;
         // The second turn is held back until the title is written.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(gateway.requests().len(), 1, "the next turn waits");
@@ -4344,6 +4745,7 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
             host.get_session(&sid).await.unwrap().session.title,
             "Kyoto Trip Plan"
         );
+        host.shutdown().await;
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
@@ -6583,6 +6985,192 @@ fn picked_skill_replay_uses_current_body_and_explicit_clear_on_both_apexes() {
 
 #[test]
 #[serial_test::serial]
+fn legacy_full_auto_chat_opens_local_tools_only_for_the_current_codex_task() {
+    use cc_switch_lib::assistant::host::local::PermissionRequest;
+    const FIZZY: &str = "Are you using the hosted or self-hosted version?\n1. Hosted (app.fizzy.do)\n2. Self-hosted\nEnter a number between 1 and 2:\n\n哪个是global？";
+    let bundle = runtime_dir().expect("prepare Node/Pi before assistant integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for apex in ["ofox.ai", "ofox.io"] {
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        *env.local_paths.lock().unwrap() =
+            Some(cc_switch_lib::assistant::tools::context::LocalPaths {
+                home: home.path().canonicalize().unwrap(),
+                config_roots: vec![],
+                shell_files: vec![],
+                skill: bundle
+                    .join("runtime/skills/local-config/SKILL.md")
+                    .canonicalize()
+                    .unwrap(),
+            });
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = host
+                .create_session(
+                    serde_json::from_value(json!({
+                        "capabilities": [{"id": "local_config", "version": 1}],
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .id;
+            host.set_permission(
+                serde_json::from_value::<PermissionRequest>(json!({
+                    "sessionId": sid, "mode": "fullAuto", "confirmedFullAccess": true,
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            gateway.reply(Reply::Stream("选 1，Hosted 是官方在线版。".into()));
+            let (chat, end) = turn(&host, &env, request(&sid, FIZZY, json!({}))).await;
+            assert_eq!(end.data["status"], "completed");
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 1);
+            let advertised = |r: &Request, name: &str| {
+                r.body["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|t| t["function"]["name"] == name)
+            };
+            for tool in [
+                "bash",
+                "powershell",
+                "grep",
+                "tool_status",
+                "diagnose_in_folder",
+            ] {
+                assert!(
+                    !advertised(&requests[0], tool),
+                    "{tool} was visible for ordinary chat"
+                );
+            }
+            assert!(!env.events(&chat).iter().any(|e| e.r#type == "tool_start"));
+            assert_eq!(
+                host.get_session(&sid)
+                    .await
+                    .unwrap()
+                    .messages
+                    .last()
+                    .unwrap()
+                    .content,
+                "选 1，Hosted 是官方在线版。"
+            );
+
+            gateway.reply(Reply::ToolCalls(vec![(
+                "diagnose_in_folder",
+                json!({"tool":"codex"}),
+            )]));
+            gateway.reply(Reply::Stream("已检查 Codex。".into()));
+            let (diagnosis, end) = turn(
+                &host,
+                &env,
+                request(&sid, "检查本机 Codex 当前模型", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed", "{end:?}");
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 3);
+            assert!(advertised(&requests[1], "diagnose_in_folder"));
+            for tool in [
+                "bash",
+                "powershell",
+                "grep",
+                "repair_launcher",
+                "rebind_tool",
+                "install_tool",
+            ] {
+                assert!(
+                    !advertised(&requests[1], tool),
+                    "{tool} was visible for read-only diagnosis"
+                );
+            }
+            let tool_events: Vec<_> = env
+                .events(&diagnosis)
+                .into_iter()
+                .filter(|event| matches!(event.r#type.as_str(), "tool_start" | "tool_end"))
+                .map(|event| (event.r#type, event.data))
+                .collect();
+            let results = tool_results(&requests[2]);
+            let content = results.first().unwrap();
+            let probe: Value = serde_json::from_str(content).unwrap_or_else(|error| {
+                panic!("Codex probe failed ({error}): {content}, {tool_events:?}")
+            });
+            assert!(
+                tool_events.iter().any(|(kind, data)| {
+                    kind == "tool_end"
+                        && data["name"] == "diagnose_in_folder"
+                        && data["success"] == true
+                }),
+                "{tool_events:?}"
+            );
+            assert_eq!(probe["tool"], "codex");
+            assert!(probe.get("installed").is_some());
+            if let Ok(expected) = std::env::var("OFOX_ASSISTANT_TEST_CODEX_VERSION") {
+                assert_eq!(probe["verified"], true, "{probe}");
+                assert_eq!(probe["version"], expected, "{probe}");
+            }
+
+            gateway.reply(Reply::Stream("选 1。".into()));
+            let (_, end) = turn(&host, &env, request(&sid, FIZZY, json!({}))).await;
+            assert_eq!(end.data["status"], "completed");
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 4);
+            assert!(!advertised(&requests[3], "diagnose_in_folder"));
+
+            let plain = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "diagnose_in_folder",
+                json!({"tool":"codex"}),
+            )]));
+            gateway.reply(Reply::Stream("已检查这台机器的 Codex。".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&plain, "检查我这台机器的 Codex 当前模型", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            assert!(env.events(&run).iter().any(|event| {
+                event.r#type == "tool_end"
+                    && event.data["name"] == "diagnose_in_folder"
+                    && event.data["success"] == true
+            }));
+            assert_eq!(gateway.requests().len(), 6);
+
+            let gate = Arc::new(AtomicBool::new(false));
+            gateway.reply(Reply::Wait(
+                gate.clone(),
+                Box::new(Reply::Stream("需要修复。".into())),
+            ));
+            let active = host
+                .send(request(&sid, "帮我诊断并修复 Codex。", json!({})))
+                .await
+                .unwrap();
+            let steer = serde_json::from_value(json!({
+                "sessionId": sid, "runId": active.run_id, "operationId": active.operation_id,
+                "id": uuid::Uuid::new_v4().to_string(), "text": FIZZY,
+                "expectedOwner": owner(), "expectedGeneration": host.generation(),
+            }))
+            .unwrap();
+            let result = host.steer(steer).await;
+            gate.store(true, Ordering::SeqCst);
+            assert_eq!(result.unwrap_err(), "assistant_local_task_in_progress");
+            assert_eq!(
+                wait_for(&env, &active.run_id, "run_end").await.data["status"],
+                "completed"
+            );
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn picked_skill_manual_reference_grant_and_tools_false_guidance() {
     let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
     let _sandbox = cc_switch_lib::test_sandbox::sandbox();
@@ -6688,8 +7276,8 @@ fn skill_tools_real_bridge_save_click_refresh_then_same_turn_use_on_both_apexes(
             assert!(db.get_all_installed_skills().unwrap().is_empty());assert!(!cc_switch_lib::assistant_target::skills_dir().join("bridge-fixture").exists());
             let respond:ApprovalRequest=serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"once","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap();host.respond_approval(respond).await.unwrap();
             let end=wait_for(&env,&run.run_id,"run_end").await;assert_eq!(end.data["status"],"completed","{end:?}");let calls=gateway.requests();assert_eq!(calls.len(),3);
-            let tool=calls[1].body["messages"].as_array().unwrap().iter().find(|m|m["role"]=="tool").expect("save result reaches the next model turn");
-            let result:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();assert_eq!(result["saved"],true);assert_eq!(result["usable"],true);assert!(result.get("refresh").is_none(),"host-only refresh must not be model content");
+            let results=tool_results(&calls[1]);let tool=results.first().expect("save result reaches the next model turn");
+            let result:Value=serde_json::from_str(tool).unwrap();assert_eq!(result["saved"],true);assert_eq!(result["usable"],true);assert!(result.get("refresh").is_none(),"host-only refresh must not be model content");
             assert!(calls[2].text().contains(prefix.trim()),"same-turn use must return the saved body");assert!(calls[2].text().contains("Scripts cannot run here."));
             assert_eq!(db.get_all_installed_skills().unwrap().len(),1);assert_eq!(cc_switch_lib::assistant_target::list_assistant_skills(&db,&Default::default()).unwrap()[0].origin,Some(cc_switch_lib::assistant_target::SkillOrigin::AssistantCreated));
             let detail=host.get_session(&sid).await.unwrap();assert_eq!(detail.messages.last().unwrap().content,"Saved and used in this turn");
@@ -6954,8 +7542,8 @@ fn assistant_mcp_no_local_twenty_tool_budget_includes_existing_skill_tools() {
             let events=env.events(&run);let starts:Vec<_>=events.iter().filter(|event|event.r#type=="tool_start").collect();
             assert_eq!(starts.len(),20,"actual Host no-local params must retain twenty tools, capability={local_capability}");
             assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(),15,"call21 never executes");
-            assert_eq!(starts.iter().filter(|event|event.data["name"]=="use_skill").count(),4,"existing tool20 executes");
-            assert_eq!(gateway.requests()[20].body["tool_choice"],"none");
+            assert_eq!(starts.iter().filter(|event|event.data["name"]=="use_skill").count(),3,"one plan and nineteen domain operations fit the shared twenty-tool budget");
+            assert_eq!(gateway.requests()[19].body["tool_choice"],"none");
             assert!(!gateway.requests()[0].body["tools"].as_array().unwrap().iter().any(|tool|tool["function"]["name"]=="read"));
         });
     }
@@ -7196,6 +7784,7 @@ mod documents {
         args: Value,
         next: Vec<Reply>,
     ) -> Outcome {
+        let office = matches!(args["format"].as_str(), Some("pptx" | "xlsx" | "docx"));
         let config = tempfile::tempdir().unwrap();
         let gateway = Gateway::start();
         let env = TestEnv::new(config.path(), bundle, &[("ofox.ai", &gateway)]);
@@ -7212,7 +7801,12 @@ mod documents {
                 gateway.reply(reply);
             }
             gateway.reply(Reply::Stream("The document is ready.".into()));
-            let (run, end) = turn(&host, &env, request(&sid, "Make the document", json!({}))).await;
+            let request = request(&sid, "Make the document", json!({}));
+            let (run, end) = if office {
+                office_turn(&host, &env, request).await
+            } else {
+                turn(&host, &env, request).await
+            };
             let detail = host.get_session(&sid).await.unwrap();
             host.shutdown().await;
             (sid, run, end, detail)
@@ -8091,6 +8685,46 @@ mod presentation_workflow {
     }
 
     #[test]
+    fn auto_selected_presentation_waits_for_its_delivery_receipt() {
+        let bundle = runtime_dir().expect("prepare Node/Pi before assistant integration tests");
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        gateway.reply(Reply::ToolCalls(vec![(
+            "updatePlan",
+            json!({"steps":[
+                {"step":"Outline the slides","status":"completed"},
+                {"step":"Save and attach the slides","status":"completed"}
+            ]}),
+        )]));
+        gateway.reply(Reply::Stream("The outline is ready.".into()));
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Make a short slide deck",
+                    json!({"presentationWorkflowVersion":1,"presentationStyleId":"auto"}),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let plan = of_type(&env, &run, "task_plan");
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0]["steps"][0]["status"], "completed");
+            assert_eq!(plan[0]["steps"][1]["status"], "pending");
+            let detail = host.get_session(&sid).await.unwrap();
+            assert!(detail.attachments.is_empty());
+            let reply = detail.messages.last().unwrap();
+            let progress = reply.task_progress.as_ref().unwrap();
+            assert_eq!(progress.steps[1].status, "pending");
+        });
+    }
+
+    #[test]
     fn workflow_host_reports_authorized_image_budget_without_sending_images() {
         let Some(bundle) = runtime_dir() else {
             return;
@@ -8106,6 +8740,10 @@ mod presentation_workflow {
         });
         let run = runtime().block_on(async {
             let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "updatePlan",
+                json!({"steps":[{"step":"Inspect the presentation budget","status":"in_progress"},{"step":"Report the budget","status":"pending"}]}),
+            )]));
             gateway.reply(Reply::ToolCalls(vec![(
                 "freeze_presentation_plan",
                 proposed,
@@ -8141,7 +8779,7 @@ mod presentation_workflow {
             }),
             "Explicit authorization must remain visible without authorizing a provider call"
         );
-        assert_eq!(gateway.requests().len(), 2);
+        assert_eq!(gateway.requests().len(), 3);
         assert!(gateway
             .requests()
             .iter()
@@ -8166,42 +8804,55 @@ mod presentation_workflow {
         let gateway = Gateway::start();
         let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
         let host = AssistantHost::new(env.clone());
-        let (sid, run, detail) =
-            runtime().block_on(async {
-                let sid = create(&host).await;
-                gateway.reply(Reply::ToolCalls(vec![
-                    ("use_skill", json!({"name":"ofox-office-pptx"})),
-                    ("freeze_presentation_plan", plan()),
-                ]));
-                gateway.reply(Reply::Answer(create_after_freeze));
-                gateway.reply(Reply::Stream("The planned local document is ready.".into()));
-                let (run,end) = turn(&host,&env,request(&sid,"Make the three-slide fixture",json!({
-                "presentationWorkflowVersion":1,
-                "presentationStyleId":"cartesian",
-                "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
-            }))).await;
-                assert_eq!(
-                    end.data["status"],
-                    "completed",
-                    "{:?} {:?}",
-                    of_type(&env, &run, "error"),
-                    gateway
-                        .requests()
-                        .iter()
-                        .map(tool_results)
-                        .collect::<Vec<_>>()
-                );
-                let detail = host.get_session(&sid).await.unwrap();
-                host.shutdown().await;
-                (sid, run, detail)
-            });
+        let (sid, run, detail) = runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "updatePlan",
+                json!({"steps":[{"step":"Prepare the slides","status":"in_progress"},{"step":"Save the PPTX","status":"pending"}]}),
+            )]));
+            gateway.reply(Reply::ToolCalls(vec![
+                ("use_skill", json!({"name":"ofox-office-pptx"})),
+                ("freeze_presentation_plan", plan()),
+            ]));
+            gateway.reply(Reply::Answer(create_after_freeze));
+            gateway.reply(Reply::Stream("The planned local document is ready.".into()));
+            let (run, end) = office_turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Make the three-slide fixture",
+                    json!({
+                        "presentationWorkflowVersion":1,
+                        "presentationStyleId":"cartesian",
+                        "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                end.data["status"],
+                "completed",
+                "{:?} {:?}",
+                of_type(&env, &run, "error"),
+                gateway
+                    .requests()
+                    .iter()
+                    .map(tool_results)
+                    .collect::<Vec<_>>()
+            );
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, detail)
+        });
         let requests = gateway.requests();
         assert_eq!(
             requests.len(),
-            3,
-            "freeze, planned document calls, final response"
+            4,
+            "initial checklist, freeze, planned document calls, final response"
         );
-        let offered = tool_names(&requests[0]);
+        assert_eq!(tool_names(&requests[0]), ["updatePlan"]);
+        let offered = tool_names(&requests[1]);
         assert!(offered.contains(&"freeze_presentation_plan".to_owned()));
         assert!(offered.contains(&"get_presentation_candidates".to_owned()));
         assert!(requests

@@ -130,6 +130,7 @@ mod tests {
             buckets: [n, 2, 3, 4],
             complete,
             cache_write_1h: 0,
+            cache_write_ttl_known: true,
         }
     }
 

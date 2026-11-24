@@ -44,7 +44,11 @@ impl Child {
             self.child.stderr().take()
         }
     }
-    pub fn spawn(mut command: tokio::process::Command) -> Result<Self, String> {
+    pub fn spawn(command: tokio::process::Command) -> Result<Self, String> {
+        Self::spawn_io(command).map_err(|_| "assistant_process_start_failed".into())
+    }
+
+    pub(super) fn spawn_io(mut command: tokio::process::Command) -> std::io::Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -54,10 +58,10 @@ impl Child {
         {
             use std::os::unix::process::CommandExt;
             command.as_std_mut().process_group(0);
-            let child = command
-                .spawn()
-                .map_err(|_| "assistant_process_start_failed")?;
-            let group = child.id().ok_or("assistant_process_start_failed")?;
+            let child = command.spawn()?;
+            let group = child
+                .id()
+                .ok_or_else(|| std::io::Error::other("missing live child process id"))?;
             Ok(Self {
                 child,
                 group,
@@ -74,9 +78,7 @@ impl Child {
                 .wrap(CreationFlags(CREATE_NO_WINDOW))
                 .wrap(JobObject);
             Ok(Self {
-                child: wrapper
-                    .spawn()
-                    .map_err(|_| "assistant_process_start_failed")?,
+                child: wrapper.spawn()?,
                 stopped: false,
             })
         }
@@ -92,6 +94,25 @@ impl Child {
         let _ = self.child.start_kill();
         self.stopped = true;
     }
+    /// Observe only the direct process. On Windows, waiting on the wrapper
+    /// also drains completion messages needed for the owned Job's cleanup.
+    pub(super) async fn exit_before_cleanup(
+        &mut self,
+        wait_after_eof: bool,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        #[cfg(unix)]
+        let child = &mut self.child;
+        #[cfg(windows)]
+        let child = self.child.inner_mut();
+        if wait_after_eof {
+            if let Ok(status) = tokio::time::timeout(Duration::from_millis(400), child.wait()).await
+            {
+                return status.map(Some);
+            }
+        }
+        child.try_wait()
+    }
+
     pub async fn stop(&mut self) {
         self.kill();
         let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;

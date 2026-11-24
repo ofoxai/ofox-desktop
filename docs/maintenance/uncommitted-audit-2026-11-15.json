@@ -1,0 +1,1989 @@
+{
+  "baseline": "45ac53d40e7acf6d11e806550e98c392e42d62d8",
+  "scope": "170 pending path occurrences in five legacy checkouts; recovered means relevant fragments, not wholesale replacement of the current file",
+  "counts": {
+    "covered": 36,
+    "obsolete_design": 1,
+    "superseded": 44,
+    "covered_with_different_design": 10,
+    "recovered": 45,
+    "preserved_design": 1,
+    "unfinished_experiment": 7,
+    "historical_record": 1,
+    "demo_only": 2,
+    "recovered_documentation": 3,
+    "preserved_reference": 14,
+    "covered_by_current_interfaces": 4,
+    "local_artifact": 2
+  },
+  "paths": [
+    {
+      "origin": "codex-compat",
+      "path": ".cursor/rules/ofox-apex.mdc",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Current AGENTS endpoint rules and the committed plan/research already cover this content; old copies only retain stale completion status or personal-path links.",
+      "evidence": [
+        "AGENTS.md",
+        "docs/superpowers/plans/2026-10-13-cli-model-conflict-and-key-records.md",
+        "docs/superpowers/research/2026-11-09-ppt-design-system-research.md"
+      ]
+    },
+    {
+      "origin": "codex-compat",
+      "path": "docs/superpowers/plans/2026-10-13-cli-model-conflict-and-key-records.md",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Current AGENTS endpoint rules and the committed plan/research already cover this content; old copies only retain stale completion status or personal-path links.",
+      "evidence": [
+        "AGENTS.md",
+        "docs/superpowers/plans/2026-10-13-cli-model-conflict-and-key-records.md",
+        "docs/superpowers/research/2026-11-09-ppt-design-system-research.md"
+      ]
+    },
+    {
+      "origin": "codex-compat",
+      "path": "docs/superpowers/research/2026-11-09-ppt-design-system-research.md",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Current AGENTS endpoint rules and the committed plan/research already cover this content; old copies only retain stale completion status or personal-path links.",
+      "evidence": [
+        "AGENTS.md",
+        "docs/superpowers/plans/2026-10-13-cli-model-conflict-and-key-records.md",
+        "docs/superpowers/research/2026-11-09-ppt-design-system-research.md"
+      ]
+    },
+    {
+      "origin": "codex-compat",
+      "path": "docs/superpowers/specs/2026-11-06-config-repair-agent-design.md",
+      "status": "??",
+      "decision": "obsolete_design",
+      "reason": "The document explicitly marks itself obsolete; current local-config capability and approval model replace it.",
+      "evidence": [
+        "AGENTS.md",
+        "docs/superpowers/plans/2026-10-13-cli-model-conflict-and-key-records.md",
+        "docs/superpowers/research/2026-11-09-ppt-design-system-research.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "LESSONS.md",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "README.md",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "assistant-runtime/README.md",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "assistant-runtime/src/runtime.mjs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "assistant-runtime/test/fixtures/stdio-acceptance.mjs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "assistant-runtime/test/protocol.test.mjs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "assistant-runtime/test/runtime.test.mjs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "docs/builtin-assistants.md",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "docs/known-limitations.md",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "scripts/assistant-smoke.mjs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/commands/assistant.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/commands/ofox_auth.rs",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/lib.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/ofox_api_keys.rs",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/ofox_auth.rs",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/ofox_secret.rs",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/capabilities.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/catalog.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/host.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/mod.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/web.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/OnboardingApp.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered partial-binding, retry-selection and in-flight navigation guards with failing baseline and passing regression tests.",
+      "evidence": [
+        "src/OnboardingApp.tsx",
+        "tests/components/OnboardingApp.test.tsx",
+        "tests/components/AddToolsDialog.test.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/ConfirmDialog.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The extra focus ref only served the old credential retry dialog; current dialogs and focus owners differ, so no unused prop is added.",
+      "evidence": [
+        "src/components/ConfirmDialog.tsx",
+        "src/components/assistant/AssistantPage.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/assistant/AccountAssistantPanel.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/assistant/AssistantAuthorization.tsx",
+      "status": " D",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/assistant/AssistantPage.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/console/AddToolsDialog.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered partial-binding, retry-selection and in-flight navigation guards with failing baseline and passing regression tests.",
+      "evidence": [
+        "src/components/console/AddToolsDialog.tsx",
+        "tests/components/OnboardingApp.test.tsx",
+        "tests/components/AddToolsDialog.test.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/onboarding/LoginPage.tsx",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/components/onboarding/ToolDiscoveryPage.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered partial-binding, retry-selection and in-flight navigation guards with failing baseline and passing regression tests.",
+      "evidence": [
+        "src/components/onboarding/ToolDiscoveryPage.tsx",
+        "tests/components/OnboardingApp.test.tsx",
+        "tests/components/AddToolsDialog.test.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/i18n/locales/en.json",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old credential-vault/search-disabled strings are tied to replaced APIs. Existing main strings remain; only relevant recovered pricing text is added in all three locales.",
+      "evidence": [
+        "src/i18n/locales/zh.json",
+        "src/i18n/locales/en.json",
+        "src/i18n/locales/ja.json"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/i18n/locales/ja.json",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old credential-vault/search-disabled strings are tied to replaced APIs. Existing main strings remain; only relevant recovered pricing text is added in all three locales.",
+      "evidence": [
+        "src/i18n/locales/zh.json",
+        "src/i18n/locales/en.json",
+        "src/i18n/locales/ja.json"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/i18n/locales/zh.json",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old credential-vault/search-disabled strings are tied to replaced APIs. Existing main strings remain; only relevant recovered pricing text is added in all three locales.",
+      "evidence": [
+        "src/i18n/locales/zh.json",
+        "src/i18n/locales/en.json",
+        "src/i18n/locales/ja.json"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/lib/accountKeys.ts",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/lib/api/assistant.ts",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src/lib/api/ofoxAuth.ts",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/components/AddToolsDialog.test.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered partial-binding, retry-selection and in-flight navigation guards with failing baseline and passing regression tests.",
+      "evidence": [
+        "tests/components/AddToolsDialog.test.tsx",
+        "tests/components/OnboardingApp.test.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/components/AssistantPage.test.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/components/LoginPageLocal.test.tsx",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/lib/accountKeys.test.ts",
+      "status": " M",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "docs/assistant-roadmap.md",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "The later main assistant/runtime implementation replaces this prototype delta.",
+      "evidence": [
+        "docs/agent-wiring.md",
+        "docs/assistant-acceptance.md",
+        "docs/assistant-roadmap.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "src-tauri/src/services/assistant/credentials.rs",
+      "status": "??",
+      "decision": "preserved_design",
+      "reason": "Distinct durable unknown-mint barrier is not in current key service. Keep the old Vault design as a reference and document the current limitation; do not label it behaviorally covered.",
+      "evidence": [
+        "src-tauri/src/ofox_api_keys.rs",
+        "docs/known-limitations.md"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/components/OnboardingApp.test.tsx",
+      "status": "??",
+      "decision": "recovered",
+      "reason": "Recovered partial-binding, retry-selection and in-flight navigation guards with failing baseline and passing regression tests.",
+      "evidence": [
+        "tests/components/OnboardingApp.test.tsx",
+        "tests/components/AddToolsDialog.test.tsx"
+      ]
+    },
+    {
+      "origin": "assistant-prototype",
+      "path": "tests/unit/ofoxLoginContract.test.ts",
+      "status": "??",
+      "decision": "covered_with_different_design",
+      "reason": "Main uses the ordinary four OAuth scopes, dedicated per-owner assistant key and explicit assistant logout report. The old alternate Vault/retry-setup API is not restored; its uncertain-mint gap is recorded separately.",
+      "evidence": [
+        "src-tauri/src/ofox_auth.rs",
+        "src-tauri/src/ofox_api_keys.rs",
+        "src/lib/accountKeys.ts"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "LESSONS.md",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "docs/usage-native-validation-2026-10-18.md",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/Cargo.lock",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/Cargo.toml",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/src/services/ofox_pricing.rs",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/src/services/session_analytics.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered count-only native message projection; legacy activity semantics remain and 3 regression tests verify counts, sparse membership and input validation.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_core.rs"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/src/services/session_analytics_advanced.rs",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/src/services/session_analytics_core.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Recovered count-only native message projection; legacy activity semantics remain and 3 regression tests verify counts, sparse membership and input validation.",
+      "evidence": ["src-tauri/src/services/session_analytics_core.rs"]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "src-tauri/src/services/session_native_activity.rs",
+      "status": " M",
+      "decision": "unfinished_experiment",
+      "reason": "Old SHA assembly/numeric-price/timezone-cache performance experiments lack a completed implementation/current benchmark. Preserve source and tests without changing current dependencies or claiming speedups.",
+      "evidence": [
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/Cargo.toml",
+        "docs/usage-native-validation-2026-10-18.md"
+      ]
+    },
+    {
+      "origin": "magpie-ux",
+      "path": "HANDOFF-codex.md",
+      "status": "??",
+      "decision": "historical_record",
+      "reason": "Delivery/handoff history is preserved in the private backup; it contains historical machine paths and is not active product source.",
+      "evidence": ["docs/usage-native-validation-2026-10-18.md"]
+    },
+    {
+      "origin": "model-demo",
+      "path": "src/demo.html",
+      "status": "??",
+      "decision": "demo_only",
+      "reason": "Standalone mocked demo entry points are not referenced by the current app build; preserve as design artifacts in the backup.",
+      "evidence": ["index.html", "src/main.tsx", "vite.config.ts"]
+    },
+    {
+      "origin": "model-demo",
+      "path": "src/demo.tsx",
+      "status": "??",
+      "decision": "demo_only",
+      "reason": "Standalone mocked demo entry points are not referenced by the current app build; preserve as design artifacts in the backup.",
+      "evidence": ["index.html", "src/main.tsx", "vite.config.ts"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/known-limitations.md",
+      "status": " M",
+      "decision": "recovered_documentation",
+      "reason": "Old ledger adds calendar, official pricing, interaction, library loading and dashboard evidence. Main covers official pricing/interactions/date picker and contains substantial later release limitations; append only genuinely newly implemented TTL/calendar/library limits.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_analytics.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/usage-session-analytics.md",
+      "status": " M",
+      "decision": "recovered_documentation",
+      "reason": "Interaction/source details are already main; cache TTL-knownness remains missing. Update pricing evidence semantics only if TTL patch lands.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src-tauri/src/services/session_usage.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/commands/library.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old moves instruction/MCP/summary/skills filesystem projections off command execution and avoids CLI waits. Main read-only list_discovery is already stronger than old probe shortcut; preserve it.",
+      "evidence": [
+        "src-tauri/src/commands/library.rs",
+        "src-tauri/src/services/library/inventory.rs",
+        "src-tauri/src/services/library/inventory_skills.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/commands/usage_overview.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old optional rank_selection command routes overview to selected grouped totals. Main Requests already has different current selection schema; overview rank-leader design is deferred.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/codex_native.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Old adds tool-call projection plus native timing/origin feature and a four-compaction regression. Tool projection and compaction conservation already covered; current tests cover embedded/record-only, separate counter domains and duplicate revalidation. Timing feature is outside current contract.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "docs/usage-requests-alignment.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/library/inventory.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old resolves Skill roots once in fenced inventory scan instead of per candidate. Main still calls skills::locations for each candidate.",
+      "evidence": [
+        "src-tauri/src/commands/library.rs",
+        "src-tauri/src/services/library/inventory.rs",
+        "src-tauri/src/services/library/inventory_skills.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/library/inventory_skills.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old introduces locations_with_roots so one inventory scan can reuse resolved roots; keep existing locations wrapper for other callers.",
+      "evidence": [
+        "src-tauri/src/commands/library.rs",
+        "src-tauri/src/services/library/inventory.rs",
+        "src-tauri/src/services/library/inventory_skills.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/library/inventory_tests.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old adds an ignored manual 100-Skill inventory benchmark. It is not evidence of an achieved speedup (old notes show no improvement); use bounded sandbox regression for root reuse if implementing performance item.",
+      "evidence": [
+        "src-tauri/src/commands/library.rs",
+        "src-tauri/src/services/library/inventory.rs",
+        "src-tauri/src/services/library/inventory_skills.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/mod.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old wires official_pricing and usage_request_evidence. official_pricing already main; old general native evidence module is outside current accepted contract.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "docs/usage-requests-alignment.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/ofox_pricing.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Manufacturer fallback and context tiers already main. Remaining old estimate_with_ttl and partial propagation fix known-zero vs unknown/invalid TTL and positive unsupported add-on costs.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/pricing_sync.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Independent manufacturer price refresh through sync_pricing_inner is already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old interaction summarization is already main. Remaining TTL-knownness must reach session estimates and consistent partial totals; old native request-evidence map is unnecessary for accepted contract.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src-tauri/src/services/session_usage.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_api.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Old delta only adds fixture defaults for tool evidence and native request evidence. Tool fixture field already main; omitted request-evidence field belongs to intentionally unported feature.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "docs/usage-requests-alignment.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_codex.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old maps Codex request evidence, known TTL and tool scan. Tool scan already main; only any new TTL compatibility initializer belongs with patch A.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_core.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds serde-default cache_write_ttl_known to UsageFact plus initializer; main stores hour count without knownness.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_dsh.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old identity-excluding-evidence merge and same-generation route-conflict test exclusively support unported service/timing evidence; current canonical usage identity logic must stay.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md",
+        "src-tauri/src/services/session_analytics_dsh.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_hermes.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Hermes CallScan deduplication/conflicting-call invalidation and completeness are already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_index.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old Claude cache projects TTL-knownness plus tools and native timing. Main tools projection is covered; main CLAUDE_PARSER_VERSION=3 needs a new current version for TTL-only change, not old bundled version6.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_legacy.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds TTL knownness to legacy facts and fixture defaults. Tool fixtures covered; native request-evidence fixture unnecessary.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_listing.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds three fixture fields; tool evidence already main, only compatible TTL-knownness default follows core patch.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_messages.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Tool-only assistant blocks counted independently from visible messages already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_native.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old attach_request_evidence and parsed-map wiring serve removed feature; any new UsageFact TTL initializer must follow current normalized fact semantics.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_openclaw.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old delta only calls native::attach_request_evidence for OpenClaw, outside current observed timing contract.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_opencode.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old OpenCode tool calls projection already main. Native evidence map is unneeded; any TTL initializer follows new core representation.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src-tauri/src/services/session_usage.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_parity_tests.rs",
+      "status": " M",
+      "decision": "covered_by_current_interfaces",
+      "reason": "Old parity adds evidence/TTL fixture fields and expands CSV to old26 columns. Current CSV has17 columns including cache-inclusive total; preserve its contract and add only justified TTL evidence checks.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_pi.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Old active-owned-branch interaction collection already main. Remaining attach_request_evidence call is unaccepted older feature.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "docs/usage-requests-alignment.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_workbuddy.rs",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Old transcript tool scan already main. Remaining native::attach_request_evidence is outside current accepted contract.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "docs/usage-requests-alignment.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old checked_cache_ttl distinguishes absent, explicitly zero, positive and inconsistent sub-buckets; main defaults absent hours to zero and clamps, losing evidence.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_codex.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_dsh.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_gemini.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_hermes.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_openclaw.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_opencode.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_pi.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_usage_workbuddy.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old adds normalized native request evidence plus TTL-knownness. Preserve current adapter/token identity; initialize or propagate only the new TTL representation with correct source semantics. Old evidence-from-metadata/identity exclusions are not needed.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_analytics.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old combines TTL pricing fix with overview rank selection and grouped Top5/Other. Current Requests has newer grouping; overview redesign is real but deferred product evaluation.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_data.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old enriches rows/atoms with native evidence, TTL and rank filters. Port only Claude TTL with exact session/model/event-second/all4-bucket identity, same snapshot receipt, preserving stored historical charges and current canonical selection.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_data_native_tests.rs",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old new tests assert native timing/origin propagation and old evidence CSV freeze; native timing is intentionally unported and frozen snapshot behavior is already tested under current request dashboard.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_overview.rs",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old adds checked cache-inclusive total to legacy overview UsageTotals. Current Requests already has inclusive total; overview redesign is not yet accepted and session-analysis totalTokens retains fresh+output meaning.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_requests.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Manufacturer fallback and frozen page/detail/CSV estimates already main. Remaining row TTL semantics should use current snapshot catalog; old service filters/rank structure conflict with newer request dashboard.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_source.rs",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old NormalizedUsageFact adds request evidence/TTL and fact_identity_value removes evidence from identity. TTL evidence remains useful; current identity must not be changed to adopt unused native timing.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/console/ManageToolDialog.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Clear short unbind confirmation, restore limitations and preservation copy already main byte-for-byte.",
+      "evidence": ["src/components/console/ManageToolDialog.tsx"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/console/ToolsPanel.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old replaces plain pending text with generic LoadingState; later main FoxLoader/first-load design covers the user need.",
+      "evidence": [
+        "src/components/ui/fox-loader.tsx",
+        "docs/known-limitations.md",
+        "src/components/library/LibrarySkillsPage.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/library/LibraryMcpTable.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old waits for routing settings, reads only active view, applies30s freshness and disables focus refetch. Main has newer native actions and display-only retained observations; merge gates into current components.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/library/LibraryPage.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old active-gated summary and30s freshness avoids repeated sibling tab reads; main currently refetches when visited.size grows.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/library/LibrarySection.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old waits for routing settings, reads only active view, applies30s freshness and disables focus refetch. Main has newer native actions and display-only retained observations; merge gates into current components.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/library/LibrarySkillsPage.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old waits routing settings, gates hidden tabs, separates saved-list and native scan, reserves/re-measures native region after ticket renewal/hidden completion. Main FoxLoader covers initial saved-list visual but misses these lifecycle gates.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/library/useLibraryInventory.ts",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old derives pending when requested key changes before effect-set loading; same-key expired ticket remains retryable and not permanently pending. Main only returns loading set in effect.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/sessions/SessionUsageSummary.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Manufacturer API fallback estimate explanation already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/sessions/SessionsPage.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old replaces plain pending text with generic LoadingState; later main FoxLoader/first-load design covers the user need.",
+      "evidence": [
+        "src/components/ui/fox-loader.tsx",
+        "docs/known-limitations.md",
+        "src/components/library/LibrarySkillsPage.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/ui/segmented.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Segmented-control UI changes already main byte-for-byte.",
+      "evidence": ["src/components/ui/segmented.tsx"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/BalanceTrendCard.tsx",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old independent14-day balance history chart and daily burn/runway summary are not main; current has simple Sparkline. Parent explicitly holds this genuine enhancement for product evaluation.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageBars.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Continuous long trends, null gaps, real zero, straight areas and exact keyboard values already main via trendAreas.",
+      "evidence": [
+        "src/components/usage-overview/UsageBars.tsx",
+        "tests/components/usage/UsageBars.test.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageBreakdownList.tsx",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old nullable totals/share-bar handling supports cache-inclusive checked arithmetic in deferred overview layout. Main legacy totals are checked by current backend; no independent missing UI defect established.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageDistributions.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Compact distribution labels, exact boundary/count/share and unavailable-zero separation already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageKpis.tsx",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old cost-first/cache-inclusive overview and known-priced leaders are genuine unmerged UI. Requests already has richer summary; overview redesign held for product evaluation.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsagePage.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Old page combines calendar, grouped overview, request refresh policy and loading redesign. Main already has date picker, advanced request dashboard, staged refresh and actual-snapshot captions; only independent day/timezone rollover is current priority.",
+      "evidence": [
+        "src/components/usage-overview/UsagePage.tsx",
+        "src/hooks/useUsageVisibility.ts",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageRequests.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old grouped trend and quiet first-page automatic renewal differ from current explicit frozen snapshots. Main newer dedicated chart/selection/day focus, snapshot-wide denominators, complete CSV and load-latest behavior supersede old implementation.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageSessions.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Session shape/Skills/tool insights and explicit fresh-input+output basis already main.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src/components/usage-overview/UsageSessions.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageSourceAlert.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Official fallback metadata/message already main. Old explicit additionalUnitsUnsupported hint remains useful with pricing partial fix; do not introduce unrelated dashboard labels.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_usage.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage/RequestDetailPanel.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old adds native timing/service/generation speed presentation. Main intentionally removed provider/speed and already shows manufacturer estimate basis and unsupported dimensions. Do not replace; optional TTL details require their own accepted copy.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md",
+        "src-tauri/src/services/official_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/hooks/useUsageOverview.ts",
+      "status": " M",
+      "decision": "covered_by_current_interfaces",
+      "reason": "Old adds overview rank-selection key and request refresh behavior plus staged query reads. Main already has newer staged refresh coordinator; preserve its lifecycle. Calendar hook may need only current page integration.",
+      "evidence": [
+        "src/components/usage-overview/UsagePage.tsx",
+        "src/hooks/useUsageVisibility.ts",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/i18n/locales/en.json",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Unbind, date picker, official fallback, distributions and interactions copy is already main. New overview/balance and native provider/speed copy belongs to deferred/removed features. Add only any TTL partial/library/calender strings actually referenced by new implementation.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_analytics.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/i18n/locales/ja.json",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Unbind, date picker, official fallback, distributions and interactions copy is already main. New overview/balance and native provider/speed copy belongs to deferred/removed features. Add only any TTL partial/library/calender strings actually referenced by new implementation.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_analytics.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/i18n/locales/zh.json",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Unbind, date picker, official fallback, distributions and interactions copy is already main. New overview/balance and native provider/speed copy belongs to deferred/removed features. Add only any TTL partial/library/calender strings actually referenced by new implementation.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_analytics.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/api/usageOverview.ts",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old adds inclusive totals, GroupedUsageTrend and overview rankSelection API/key. Requests newer dashboard contract already covers its grouping; overview-specific extension is deferred.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/usageEstimate.ts",
+      "status": " M",
+      "decision": "preserved_reference",
+      "reason": "Old >=100-dollar two-decimal formatting is a small real polish delta; main already handles unknown, partial suffix, true zero and very small amounts. Not required for3 minimal correctness patches.",
+      "evidence": [
+        "src/lib/usageEstimate.ts",
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/usageRequestEvidence.ts",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old prioritizes inferred native timing and adds generation-speed lower-bound/provider presentation. Main conservative observed status/latency logic and later removed UI supersede this design.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/usageWorkbench.ts",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old validates top-level modelId/toolId/serviceCategories. Main uses current selection plus dayStartMs and dashboard matching; copying old schema breaks frozen-query contract.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/types/sessionAnalytics.ts",
+      "status": " M",
+      "decision": "covered",
+      "reason": "AnalyticsToolStat/AnalyticsInteractions and interaction field already main.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/types/usage.ts",
+      "status": " M",
+      "decision": "covered_by_current_interfaces",
+      "reason": "Old combines inclusive totals/grouped trend/request-evidence/speed and TTL. Current request dashboard types supersede old shape; add only TTL-compatible fields needed by accepted patch and avoid unused evidence declarations.",
+      "evidence": [
+        "src-tauri/src/services/session_usage.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/usage_requests.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/types/usageQuery.ts",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Manufacturer pricing coverage fields already main; old modelId/toolId/serviceCategories additions are replaced by newer selection/day focus schema.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/ManageToolDialog.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Unbind preview/cancel/user-edits regression tests already main byte-for-byte.",
+      "evidence": ["tests/components/ManageToolDialog.test.tsx"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/library/LibrarySkillsPage.test.tsx",
+      "status": " M",
+      "decision": "covered_by_current_interfaces",
+      "reason": "Old tests distinguish saved/native loading, wait routing settings, reserve native height on renewal/expiry and remeasure hidden completion. Keep new current Assistant/actions/UI fixtures and FoxLoader labels.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/sessions/SessionRow.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Manufacturer fallback session summary expectation already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageAnalysisPage.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Native rebuild kept out of layout and frozen-snapshot refresh behavior already main. Actual-snapshot caption is implemented and main has newer delayed/failure/owner-change coordinator regressions.",
+      "evidence": [
+        "tests/components/usage/UsageAnalysisPage.test.tsx",
+        "src/components/usage-overview/UsagePage.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageAvailability.test.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old additions mostly adapt to old upgraded KPI DOM and changed quiet refresh policy. Current availability tests explicitly distinguish unreadable and real zero, plus current request dashboard contract.",
+      "evidence": [
+        "tests/components/usage/UsageAvailability.test.tsx",
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageBars.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Long continuous trend keyboard exactness and missing-day test already main.",
+      "evidence": ["tests/components/usage/UsageBars.test.tsx"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageInsights.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Compact sub-minute distribution label expectation already main and underlying distribution component identical.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsagePage.test.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "App calendar/tool options/unbind/staged background refresh already main; retain current request/overview shell tests. Add only midnight/wake with collection disabled and frozen saved audit guard, adapting current page ownership.",
+      "evidence": [
+        "src/components/usage-overview/UsagePage.tsx",
+        "src/hooks/useUsageVisibility.ts",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageRequestEvidence.test.tsx",
+      "status": " M",
+      "decision": "superseded",
+      "reason": "Old tests require generation-speed column, floor formatting and snapshot speed capability; later user expressly removed output-speed/provider UI.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageRequests.test.tsx",
+      "status": " M",
+      "decision": "covered",
+      "reason": "Manufacturer frozen details, region/query/page reset, explicit latest and whole-snapshot group focus are covered by newer current tests. Old native service/timing/speed assertions are obsolete; quiet auto-replacement differs from accepted freeze behavior.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageSourceAlert.test.tsx",
+      "status": " M",
+      "decision": "recovered",
+      "reason": "Official fallback vs unpriced test already main. Positive base pricing with unsupported extra dimensions still needs explicit partial hint regression.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs",
+        "src-tauri/src/services/session_usage.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/library-loading.md",
+      "status": "??",
+      "decision": "recovered_documentation",
+      "reason": "Old document contains useful readiness/freshness/ticket and projection-worker design, but old LoadingState and skip-CLI approach have current replacements.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/usage-dashboard-upgrade.md",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "Draft acceptance/design documents describe a different overview/request dashboard and provider/speed evidence features. Current request dashboard and later user removals supersede them. Extract TTL/calendar facts into current docs; balance/grouped overview remains product evaluation.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/usage-official-price-fallback.md",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Manufacturer API fallback contract, offline snapshot and limitations already exist byte-for-byte in main.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "docs/usage-workbench-round2.md",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "Draft acceptance/design documents describe a different overview/request dashboard and provider/speed evidence features. Current request dashboard and later user removals supersede them. Extract TTL/calendar facts into current docs; balance/grouped overview remains product evaluation.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "node_modules",
+      "status": "??",
+      "decision": "local_artifact",
+      "reason": "Untracked symlink to another local release checkout dependency/build cache. No source functionality; retain backup only and never commit/import.",
+      "evidence": ["node_modules"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/fixtures/manufacturer-api-prices-2026-10-21.json",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Verified manufacturer catalog, first-party-only fixture, offline/cache fallback, aliases and provenance already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/official_pricing.rs",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Verified manufacturer catalog, first-party-only fixture, offline/cache fallback, aliases and provenance already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/official_pricing.rs",
+        "src-tauri/src/services/ofox_pricing.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/session_analytics_interactions.rs",
+      "status": "??",
+      "decision": "covered",
+      "reason": "CallScan deduplication, privacy-limited call metadata, cohort shapes/Skills/tool/category/week summaries already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/src/services/usage_request_evidence.rs",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "New896-line native Codex/Claude timing, route classification, service conflicts and generation-speed inference is real unmerged work, but supports provider/speed presentation later explicitly removed. Main conservative observed timing contract intentionally does not infer these values; absent same-name file is not a defect.",
+      "evidence": [
+        "docs/usage-requests-alignment.md",
+        "docs/usage-request-evidence.md"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src-tauri/target",
+      "status": "??",
+      "decision": "local_artifact",
+      "reason": "Untracked symlink to another local release checkout dependency/build cache. No source functionality; retain backup only and never commit/import.",
+      "evidence": ["src-tauri/target"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/ui/date-picker.tsx",
+      "status": "??",
+      "decision": "covered",
+      "reason": "App local-calendar popover and strict local YYYY-MM-DD parser already main byte-for-byte; this does not provide autonomous day rollover.",
+      "evidence": [
+        "src/components/ui/date-picker.tsx",
+        "src/lib/calendarDate.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/ui/loading-state.tsx",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "Old38-line skeleton/spinner primitive is superseded by current FoxLoader and first-load shell behavior.",
+      "evidence": [
+        "src/components/ui/fox-loader.tsx",
+        "docs/known-limitations.md",
+        "src/components/library/LibrarySkillsPage.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/BalanceHistoryChart.tsx",
+      "status": "??",
+      "decision": "preserved_reference",
+      "reason": "New192-line real-time balance history chart is absent main; keyboard/pointer actual samples and2h gap segments represent real unmerged work. Keep in backup pending product evaluation.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageGroupedTrend.tsx",
+      "status": "??",
+      "decision": "preserved_reference",
+      "reason": "New501-line grouped chart has cost/tokens/records, Top5/exact Other and keyboard/table behavior. Current Requests has a newer dedicated chart and must not be replaced; only potential overview use is unmerged.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/components/usage-overview/UsageInteractions.tsx",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Session shapes, explicit Skill provenance and complete-cohort tool/category/week insights already main byte-for-byte.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/hooks/useUsageCalendar.ts",
+      "status": "??",
+      "decision": "recovered",
+      "reason": "New50-line hook provides local-date/timezone-offset key, midnight/minute scheduling and focus/visibility recalibration independent of collection interval; no main equivalent.",
+      "evidence": [
+        "src/components/usage-overview/UsagePage.tsx",
+        "src/hooks/useUsageVisibility.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/calendarDate.ts",
+      "status": "??",
+      "decision": "covered",
+      "reason": "App local-calendar popover and strict local YYYY-MM-DD parser already main byte-for-byte; this does not provide autonomous day rollover.",
+      "evidence": [
+        "src/components/ui/date-picker.tsx",
+        "src/lib/calendarDate.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/usageTotals.ts",
+      "status": "??",
+      "decision": "superseded",
+      "reason": "New20-line four-bucket inclusive helper is already semantically provided for current Requests by requestTokenTotal/backend row_tokens. Potential overview extension is deferred; do not duplicate helpers merely because same named file is absent.",
+      "evidence": [
+        "src/components/usage-overview/UsageRequests.tsx",
+        "src-tauri/src/services/usage_requests/dashboard.rs",
+        "src/lib/usageRequestDashboard.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "src/lib/usageTrend.ts",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Null-gap/real-zero straight-segment area helper already main byte-for-byte.",
+      "evidence": ["src/lib/usageTrend.ts"]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/library/LibraryLoading.test.tsx",
+      "status": "??",
+      "decision": "recovered",
+      "reason": "New old tests cover sibling readiness/focus/freshness and initial feedback; actual pending-query contract useful, skeleton markup superseded.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/ui/DatePicker.test.tsx",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Old tests already main byte-for-byte; corresponding date picker/distribution/interaction/trend behavior present.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src/components/ui/date-picker.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageDashboardUpgrade.test.tsx",
+      "status": "??",
+      "decision": "preserved_reference",
+      "reason": "New six cases specify old overview redesign (inclusive totals/cost leaders/balance scope/grouped charts). Genuine design work preserved in backup, not suitable for immediate restore over current request dashboard.",
+      "evidence": [
+        "src/components/usage-overview/UsageKpis.tsx",
+        "src/components/usage-overview/BalanceTrendCard.tsx",
+        "src/components/usage-overview/UsageRequests.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageDistributions.test.tsx",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Old tests already main byte-for-byte; corresponding date picker/distribution/interaction/trend behavior present.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src/components/ui/date-picker.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/components/usage/UsageInteractions.test.tsx",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Old tests already main byte-for-byte; corresponding date picker/distribution/interaction/trend behavior present.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src/components/ui/date-picker.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/hooks/useLibraryInventory.test.tsx",
+      "status": "??",
+      "decision": "recovered",
+      "reason": "New tests assert pending in first committed rescan frame and expired same-key ticket retryable. Main lacks same file and no equivalent first-frame helper assertion found.",
+      "evidence": [
+        "src/components/library/LibrarySkillsPage.tsx",
+        "src/components/library/LibrarySection.tsx",
+        "src/components/library/LibraryMcpTable.tsx"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/hooks/useUsageCalendar.test.tsx",
+      "status": "??",
+      "decision": "recovered",
+      "reason": "New tests cover midnight without collection, inactive resume/custom dates fixed, timezone-offset change with no collection tick. Main has visibility tests but no calendar clock coverage.",
+      "evidence": [
+        "src/components/usage-overview/UsagePage.tsx",
+        "src/hooks/useUsageVisibility.ts"
+      ]
+    },
+    {
+      "origin": "usage-dashboard",
+      "path": "tests/lib/usageTrend.test.ts",
+      "status": "??",
+      "decision": "covered",
+      "reason": "Old tests already main byte-for-byte; corresponding date picker/distribution/interaction/trend behavior present.",
+      "evidence": [
+        "src-tauri/src/services/session_analytics.rs",
+        "src-tauri/src/services/session_analytics_interactions.rs",
+        "src/components/ui/date-picker.tsx"
+      ]
+    }
+  ]
+}

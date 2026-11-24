@@ -143,6 +143,7 @@ pub(crate) fn normalized_fact(
         .map(u64::from),
         complete,
         cache_write_1h: 0,
+        cache_write_ttl_known: fact.cache_write_ttl_known,
     })
 }
 

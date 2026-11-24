@@ -368,6 +368,7 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
         facts.insert(
             native_key.clone().unwrap_or_else(|| request_id.clone()),
             NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id,
                 native_key,
                 session_id: session_id.clone(),

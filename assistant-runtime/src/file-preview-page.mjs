@@ -11,16 +11,22 @@ import {
 } from "./document-preview.mjs";
 import { thumbnailFromSvg } from "./thumbnails.mjs";
 
+// Match FILE_PAGE_SVG_LIMIT in the Rust file workspace. The envelope also
+// needs room for JSON escaping and the two numeric request fields.
+const FILE_PAGE_SVG_LIMIT = 12 * 1024 * 1024;
+const FILE_PAGE_INPUT_LIMIT = 2 * FILE_PAGE_SVG_LIMIT + 1024;
+
 export async function renderFilePage(input, render = thumbnailFromSvg) {
   assert.ok(
     Number.isInteger(input?.page) && input.page >= 1 && input.page <= 1000,
   );
   assert.ok(input.scale === 1 || input.scale === 2);
-  assert.ok(safeSvg(input.svg));
+  assert.ok(safeSvg(input.svg, FILE_PAGE_SVG_LIMIT));
   const svg = normalizeOfficeArrowheads(
-    normalizeOfficePatternImages(input.svg),
+    normalizeOfficePatternImages(input.svg, FILE_PAGE_SVG_LIMIT),
+    FILE_PAGE_SVG_LIMIT,
   );
-  assert.ok(safeSvg(svg));
+  assert.ok(safeSvg(svg, FILE_PAGE_SVG_LIMIT));
   const maxEdge = 1536 * input.scale;
   const result = await render(Buffer.from(svg), {
     maxBytes: 2 * 1024 * 1024,
@@ -63,7 +69,7 @@ if (
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
 ) {
   const bytes = await readFile("file-preview-input.json");
-  assert.ok(bytes.length <= 6 * 1024 * 1024);
+  assert.ok(bytes.length <= FILE_PAGE_INPUT_LIMIT);
   const result = await renderFilePage(JSON.parse(bytes.toString("utf8")));
   await writeFile("file-preview.jpg", result.bytes, {
     flag: "wx",

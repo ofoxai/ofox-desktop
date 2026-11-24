@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { safeSvg } from "../src/document-preview.mjs";
 import { renderFilePage } from "../src/file-preview-page.mjs";
 
 const svg =
@@ -22,6 +23,22 @@ test("page 70 is independently rendered at requested quality", async () => {
   );
   assert.equal(calls, 1);
   assert.deepEqual([found.width, found.height], [3072, 1728]);
+});
+
+test("file workspace renders pages larger than the saved SVG limit", async () => {
+  const source = svg.replace(
+    "</svg>",
+    `<!--${"x".repeat(8 * 1024 * 1024)}--></svg>`,
+  );
+  assert.equal(safeSvg(source), false);
+  const found = await renderFilePage(
+    { page: 3, scale: 1, svg: source },
+    (bytes) => {
+      assert.equal(bytes.toString(), source);
+      return jpeg;
+    },
+  );
+  assert.deepEqual([found.width, found.height], [1536, 864]);
 });
 
 test("active SVG and unsupported resource requests never reach the raster addon", async () => {
@@ -47,6 +64,14 @@ test("active SVG and unsupported resource requests never reach the raster addon"
       svg: svg.replace(
         "<rect",
         '<image href="https://example.test/exfil"/><rect',
+      ),
+    },
+    {
+      page: 1,
+      scale: 1,
+      svg: svg.replace(
+        "</svg>",
+        `<!--${"x".repeat(12 * 1024 * 1024)}--></svg>`,
       ),
     },
   ])

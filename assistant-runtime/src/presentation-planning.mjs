@@ -5,6 +5,7 @@ import { Check } from "typebox/value";
 import { ADAPTED_STYLES } from "./deck/catalog.mjs";
 import { THEME_NAMES } from "./deck/theme.mjs";
 import { imageSize } from "./deck/image.mjs";
+import { normalizePresentationPlanInput } from "./presentation-plan-input.mjs";
 
 const object = (properties) =>
   Type.Object(properties, { additionalProperties: false });
@@ -185,13 +186,14 @@ export const PRESENTATION_SLIDE_SCHEMA = object({
       Type.String({
         enum: ["left", "right", "top", "bottom", "center", "none"],
         description:
-          "Where the page's title and text sit; the image keeps that part of the page clear (or visually quiet for a background).",
+          "Image visuals only. Where the page's title and text sit; the image keeps that part of the page clear (or visually quiet for a background).",
       }),
     ),
     aspect: Type.Optional(
       Type.String({
         enum: ["16:9", "4:3", "1:1", "3:4", "9:16"],
-        description: "Aspect ratio of the region the image fills on the page.",
+        description:
+          "Image visuals only. Aspect ratio of the region the image fills on the page.",
       }),
     ),
   }),
@@ -225,6 +227,29 @@ export const FREEZE_PRESENTATION_SCHEMA = object({
   }),
   source: Type.Optional(PRESENTATION_SOURCE_SCHEMA),
 });
+const MODEL_FREEZE_PRESENTATION_SCHEMA = {
+  ...FREEZE_PRESENTATION_SCHEMA,
+  properties: {
+    ...FREEZE_PRESENTATION_SCHEMA.properties,
+    slides: {
+      ...FREEZE_PRESENTATION_SCHEMA.properties.slides,
+      items: {
+        ...PRESENTATION_SLIDE_SCHEMA,
+        properties: {
+          ...PRESENTATION_SLIDE_SCHEMA.properties,
+          relationship: Type.String({
+            enum: [
+              ...PRESENTATION_SLIDE_SCHEMA.properties.relationship.enum,
+              "process",
+            ],
+            description:
+              "Page information relationship. Use sequence for ordered steps; process is accepted as an explicit alias and normalized to sequence before validation and Host freezing. Spatial does not imply a sequential graph. Python relation(kind='process' or 'sequence') is a separate diagram helper.",
+          }),
+        },
+      },
+    },
+  },
+};
 export const CATALOG_REVISION = createHash("sha256")
   .update(
     readFileSync(
@@ -770,6 +795,7 @@ export function createPresentationPlanning(runtime, context) {
     return null;
   let frozen = null;
   let freezing = false;
+  let candidateSourceKey;
   const shownPlan = () => ({
     status: "frozen",
     planId: frozen.planId,
@@ -831,6 +857,15 @@ export function createPresentationPlanning(runtime, context) {
           documents,
           args.source,
         );
+        if (result.status === "eligible") {
+          if (!frozen && !freezing)
+            candidateSourceKey = JSON.stringify(canonical(args.source ?? null));
+          if (args.source) {
+            result.source = clone(args.source);
+            result.nextAction +=
+              " Include this exact source, version and ordered pageNumbers in freeze_presentation_plan.";
+          }
+        }
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
           details: result,
@@ -840,10 +875,18 @@ export function createPresentationPlanning(runtime, context) {
     runtime.wrapTool(
       context,
       "freeze_presentation_plan",
-      "Submit a structured PPTX page plan and a style from nonempty eligible candidates for authoritative Host freezing. User manual choice has priority. Native editing is independent of prior target-application round-trip certification. If no candidate is eligible, explain the constraint conflict instead of repeating an unchanged rejected freeze or skipping this tool. A plan grants no image budget: the returned visualBudget is the Host-approved freeze-time snapshot. If canAttempt is true, do not request the same authorization again; every image call still needs Host price/budget checks. Unavailable images follow each page's fallback.",
-      FREEZE_PRESENTATION_SCHEMA,
+      "Submit a structured PPTX page plan and a style from nonempty eligible candidates for authoritative Host freezing. User manual choice has priority. For non-image visuals, omit placement, textZone and aspect. Native editing is independent of prior target-application round-trip certification. If no candidate is eligible, explain the constraint conflict instead of repeating an unchanged rejected freeze or skipping this tool. A plan grants no image budget: the returned visualBudget is the Host-approved freeze-time snapshot. If canAttempt is true, do not request the same authorization again; every image call still needs Host price/budget checks. Unavailable images follow each page's fallback.",
+      MODEL_FREEZE_PRESENTATION_SCHEMA,
       async (given, signal, toolCallId) => {
-        const args = clone(given);
+        const args = normalizePresentationPlanInput(given);
+        if (
+          !frozen &&
+          candidateSourceKey !== undefined &&
+          candidateSourceKey !== JSON.stringify(canonical(args.source ?? null))
+        )
+          throw invalid(
+            "Freeze must match the source scope of the latest eligible candidates. Use the same attachment version and ordered pageNumbers for source edits. Get eligible candidates for the intended scope before changing it.",
+          );
         const candidates = checkedPlan(args, documents);
         const request = {
           ...clone(args),

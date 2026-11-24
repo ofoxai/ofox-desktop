@@ -2,7 +2,24 @@
 //! environment, a private home, bounded output and a deadline.
 use crate::services::assistant::process::{self, Child};
 use std::{io, path::Path, time::Duration};
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::Instant};
+
+#[cfg(windows)]
+pub use super::windows_sandbox::{
+    ensure_windows_document_engine_ready, ensure_windows_document_engine_ready_until,
+    probe_windows_document_engines, run_windows_engine_limited, run_windows_engine_limited_until,
+    verify_windows_document_engines, windows_document_engine_proven,
+    windows_document_sandbox_receipts,
+};
+
+pub(in crate::services::assistant) const RUN_TIMEOUT: &str = "assistant_run_timeout";
+
+pub(super) fn check_deadline(deadline: Option<Instant>) -> Result<(), String> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(RUN_TIMEOUT.into());
+    }
+    Ok(())
+}
 
 /// How long one engine run may take before it is killed.
 pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -59,6 +76,19 @@ pub async fn run_engine_limited(
     timeout: Duration,
     limit: usize,
 ) -> Result<EngineOutput, String> {
+    run_engine_limited_until(exe, args, cwd, home, timeout, limit, None).await
+}
+
+pub(super) async fn run_engine_limited_until(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    timeout: Duration,
+    limit: usize,
+    deadline: Option<Instant>,
+) -> Result<EngineOutput, String> {
+    check_deadline(deadline)?;
     let packages = home.join(TYPST_PACKAGES);
     std::fs::create_dir_all(&packages).map_err(|_| "assistant_process_start_failed")?;
     let mut command = tokio::process::Command::new(exe);
@@ -88,6 +118,7 @@ pub async fn run_engine_limited(
         command.env(name, DEAD_PROXY);
     }
     command.env("NO_PROXY", "").env("no_proxy", "");
+    check_deadline(deadline)?;
     let mut child = Child::spawn(command)?;
     drop(child.take_stdin());
     let stdout = child
@@ -98,7 +129,9 @@ pub async fn run_engine_limited(
         .ok_or("assistant_command_outcome_unknown")?;
     let stdout = tokio::spawn(process::bounded_output(stdout, limit));
     let stderr = tokio::spawn(process::bounded_output(stderr, limit));
-    let (status, timed_out) = match tokio::time::timeout(timeout, child.child.wait()).await {
+    let engine_deadline = Instant::now() + timeout;
+    let wait_until = deadline.map_or(engine_deadline, |at| at.min(engine_deadline));
+    let (status, timed_out) = match tokio::time::timeout_at(wait_until, child.child.wait()).await {
         Ok(status) => (
             status
                 .map_err(|_| "assistant_command_outcome_unknown")?
@@ -111,6 +144,7 @@ pub async fn run_engine_limited(
         }
     };
     let (stdout, stderr) = tokio::join!(drained(stdout), drained(stderr));
+    check_deadline(deadline)?;
     // Output that cannot be read after a normal exit leaves the outcome
     // unknown; after a kill it only means the engine said less.
     let (stdout, stderr) = if timed_out {

@@ -243,7 +243,7 @@ export interface AssistantBootstrap {
     reason: string | null;
     version: string | null;
     /** Document formats the runtime can make; absent when it makes none. */
-    documents?: { formats: string[] };
+    documents?: { formats: string[]; python?: boolean };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */
@@ -570,7 +570,19 @@ export interface AssistantFileReference {
   page: number | null;
 }
 
+export interface AssistantTaskStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** Host-kept presentation only, never proof of execution or a permission. */
+export interface AssistantTaskProgress {
+  startedAt: number;
+  steps: AssistantTaskStep[];
+}
+
 export interface AssistantMessage {
+  taskProgress?: AssistantTaskProgress;
   fileReferences?: AssistantFileReference[];
   presentationPlan?: {
     planId?: string;
@@ -1092,12 +1104,19 @@ export interface AssistantSwitchVersionRequest {
  */
 export type AssistantRunEvent =
   | {
+      type: "runtime_state";
+      data: {
+        owner: string;
+        generation: number;
+        runtime: AssistantBootstrap["runtime"];
+      };
+    }
+  | {
       type: "task_plan";
       data: {
-        steps: {
-          step: string;
-          status: "pending" | "in_progress" | "completed";
-        }[];
+        steps: AssistantTaskStep[];
+        messageId?: string;
+        startedAt?: number;
       };
     }
   | { type: "task_status"; data: { cost?: number; warning?: string } }
@@ -1693,7 +1712,9 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_cost_limit: "localCostLimit",
   assistant_cost_unavailable: "localCostUnavailable",
   assistant_verification_required: "localVerificationRequired",
+  assistant_verification_target_limit: "localVerificationTargetLimit",
   assistant_invalid_plan: "localInvalidPlan",
+  assistant_plan_required: "planRequired",
   assistant_operation_denied: "operationDenied",
   assistant_file_unreadable: "localFileUnreadable",
   assistant_file_too_large: "localFileTooLarge",
@@ -1701,7 +1722,9 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_path_denied: "localPathDenied",
   assistant_scan_limit: "localScanLimit",
   assistant_local_unavailable: "localUnavailable",
+  assistant_local_scope_changed: "localScopeChanged",
   assistant_command_outcome_unknown: "localCommandUnknown",
+  assistant_local_task_in_progress: "localTaskInProgress",
   assistant_mutation_outcome_unknown: "localMutationUnknown",
   assistant_local_partial_change: "localPartialChange",
   assistant_journal_unavailable: "localJournalUnavailable",
@@ -1795,6 +1818,12 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_declined: "mediaDeclined",
   assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
   assistant_document_failed: "documentFailed",
+  assistant_document_sandbox_unavailable: "documentSandboxUnavailable",
+  assistant_document_sandbox_unproven_runtime: "documentSandboxUnavailable",
+  assistant_document_sandbox_runtime_changed: "documentSandboxUnavailable",
+  assistant_document_sandbox_unsafe_file: "documentUnsafeFile",
+  assistant_document_sandbox_cancelled: "stopped",
+  assistant_document_sandbox_cleanup_failed: "documentCleanupFailed",
   assistant_preview_unavailable: "mediaReadFailed",
   assistant_presentation_plan_invalid: "presentationPlanInvalid",
   assistant_presentation_source_unavailable: "presentationSourceUnavailable",
