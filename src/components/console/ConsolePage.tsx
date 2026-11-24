@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { useOfoxAccount } from "@/hooks/useOfoxAccount";
+import { useSessionPreload } from "@/hooks/useSessionPreload";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
 import { ToolsPanel } from "./ToolsPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -128,6 +129,7 @@ type ShellProps = ConsolePageProps & {
 };
 
 function ConsoleShell({
+  active = true,
   boundTools,
   onBoundToolsChanged,
   localOnly = false,
@@ -136,6 +138,7 @@ function ConsoleShell({
   settingsButtonRef,
 }: ShellProps) {
   const { t } = useTranslation();
+  useSessionPreload(active);
   // One shell in both modes, so switching local ↔ signed-in keeps every
   // page mounted. The account query never fetches by itself, so local mode
   // loads nothing; only the signed-in pages are handed the account.

@@ -2,7 +2,11 @@ import { useEffect } from "react";
 import userEvent from "@testing-library/user-event";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  onlineManager,
+} from "@tanstack/react-query";
 import {
   fireEvent,
   render,
@@ -21,6 +25,7 @@ import {
 import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
 import * as clipboard from "@/lib/clipboard";
 import * as platform from "@/lib/platform";
+import { useSessionPreload } from "@/hooks/useSessionPreload";
 
 const apexState = vi.hoisted(() => ({ apex: "ofox.ai", isLoading: false }));
 vi.mock("@/hooks/useOfoxApex", () => ({ useOfoxApex: () => apexState }));
@@ -499,6 +504,104 @@ it("locates a stable analysis key beyond the first hundred without reading or re
   expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
   expect(sessionsApi.resume).not.toHaveBeenCalled();
+});
+
+it("waits for the startup cache refresh before consuming a missing location", async () => {
+  let finish!: (rows: ManagedSession[]) => void;
+  vi.spyOn(sessionsApi, "list").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  client.setQueryData(["sessions", "ofox.ai"], [session("old")]);
+  render(
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <RefreshControl />
+        <SessionsPage />
+      </ShellProvider>
+    </QueryClientProvider>,
+  );
+  await userEvent.click(screen.getByText("locate-analysis-session"));
+  expect(
+    screen.queryByText(zh.usageSessions.managerMissing),
+  ).not.toBeInTheDocument();
+  await act(async () =>
+    finish([{ ...session("new"), sessionKey: "analytics-target" }]),
+  );
+  const target = await screen.findByRole("button", { name: /title-new/ });
+  await waitFor(() => expect(target).toHaveFocus());
+});
+
+it("waits for the region before opening a prefetched session query", async () => {
+  apexState.apex = "ofox.ai";
+  apexState.isLoading = true;
+  vi.spyOn(sessionsApi, "list").mockResolvedValue([session("io")]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  client.setQueryData(["sessions", "ofox.io"], [session("io")]);
+  const element = () => (
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <SessionsPage />
+      </ShellProvider>
+    </QueryClientProvider>
+  );
+  const view = render(element());
+  expect(sessionsApi.list).not.toHaveBeenCalled();
+  apexState.apex = "ofox.io";
+  apexState.isLoading = false;
+  view.rerender(element());
+  expect(screen.getByText("title-io")).toBeVisible();
+  await waitFor(() => expect(sessionsApi.list).toHaveBeenCalledTimes(1));
+  expect(client.getQueryData(["sessions", "ofox.ai"])).toBeUndefined();
+});
+
+it("refreshes the cached location through local IPC while offline", async () => {
+  let finish!: (rows: ManagedSession[]) => void;
+  const list = vi.spyOn(sessionsApi, "list").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  client.setQueryData(["sessions", "ofox.ai"], [session("old")]);
+  onlineManager.setOnline(false);
+  const view = render(
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <RefreshControl />
+        <SessionsPage />
+      </ShellProvider>
+    </QueryClientProvider>,
+  );
+  try {
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByText("locate-analysis-session"));
+    expect(
+      screen.queryByText(zh.usageSessions.managerMissing),
+    ).not.toBeInTheDocument();
+    await act(async () =>
+      finish([{ ...session("offline"), sessionKey: "analytics-target" }]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /title-offline/ }),
+      ).toHaveFocus(),
+    );
+  } finally {
+    view.unmount();
+    client.clear();
+    onlineManager.setOnline(true);
+  }
 });
 
 it("opens an independent reader and returns to the unchanged list without eager content reads", async () => {
@@ -1106,3 +1209,84 @@ it("greets the first load of the session list with the fox", async () => {
     await screen.findByRole("status", { name: zh.pages.sessions.loading }),
   ).toBeVisible();
 });
+
+it("opens the silently warmed session list immediately while refreshing it", async () => {
+  const list = vi
+    .spyOn(sessionsApi, "list")
+    .mockResolvedValue([session("warm")]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  function Console({ visited }: { visited: boolean }) {
+    useSessionPreload(true);
+    return visited ? <SessionsPage /> : <div>Tools first</div>;
+  }
+  const element = (visited: boolean) => (
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <Console visited={visited} />
+      </ShellProvider>
+    </QueryClientProvider>
+  );
+  const view = render(element(false));
+  await waitFor(() =>
+    expect(client.getQueryData(["sessions", "ofox.ai"])).toEqual([
+      session("warm"),
+    ]),
+  );
+  // Opening the tab must not wait for another native scan to finish.
+  list.mockReturnValue(new Promise(() => undefined));
+  view.rerender(element(true));
+  expect(screen.getByText("title-warm")).toBeVisible();
+  expect(
+    screen.queryByRole("status", { name: zh.pages.sessions.loading }),
+  ).not.toBeInTheDocument();
+  await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+});
+
+it.each(["pending", "error"] as const)(
+  "recovers a %s startup preload when the user opens sessions",
+  async (state) => {
+    let finish!: (rows: ManagedSession[]) => void;
+    const list = vi.spyOn(sessionsApi, "list");
+    if (state === "pending")
+      list.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    else list.mockRejectedValueOnce(new Error("temporary scan failure"));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    function Console({ visited }: { visited: boolean }) {
+      useSessionPreload(true);
+      return visited ? <SessionsPage /> : <div>Tools first</div>;
+    }
+    const element = (visited: boolean) => (
+      <QueryClientProvider client={client}>
+        <ShellProvider openSettings={() => undefined}>
+          <Console visited={visited} />
+        </ShellProvider>
+      </QueryClientProvider>
+    );
+    const view = render(element(false));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    if (state === "error") {
+      await waitFor(() =>
+        expect(client.getQueryState(["sessions", "ofox.ai"])?.status).toBe(
+          "error",
+        ),
+      );
+      list.mockResolvedValue([session("recovered")]);
+    }
+    view.rerender(element(true));
+    if (state === "pending") {
+      expect(list).toHaveBeenCalledTimes(1);
+      await act(async () => finish([session("recovered")]));
+    }
+    expect(await screen.findByText("title-recovered")).toBeVisible();
+    expect(list).toHaveBeenCalledTimes(state === "pending" ? 1 : 2);
+  },
+);

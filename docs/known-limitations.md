@@ -1976,3 +1976,35 @@ and user settings were preserved, with only checked derived-cache refreshes;
 existing skill files were unchanged. A new writing-skill Python bytecode cache
 was retained without attributing its creator. Detailed checks and preservation
 scope are recorded in [the integration acceptance](mac-windows-assistant-integration.md#metadata-first-skills-installation-2026-11-20).
+
+## Session preloading and first visible reply (2026-11-24)
+
+The active console schedules a silent session-list read after resolving its
+region. It shares the page's local IPC query, including offline operation, and
+retains that startup snapshot in memory for a later first visit. Opening the
+page still refreshes stale data; a location missing from the startup snapshot
+waits for that refresh. The page, transcript reader and content search are not
+mounted by preloading. Hiding/unmounting cancels pending idle/timer scheduling;
+an already-started native scan continues and may fill its original region's
+cache. This is an in-process cache, not a persistent startup index.
+
+Assistant text and reasoning previously held at least 64 UTF-16 code units
+before emitting a delta. The stream now retains only a suffix that could become
+a known credential, with run-local matching tables. The Host's existing credential
+classification also protects short PINs/passwords while exempting plain
+settings. Overlapping matches are masked together before publishing raw-text
+boundaries. A pathological repetitive private-value stream exceeding the pending
+bound is refused rather than retained without limit. Split surrogate pairs
+remain together. This removes an avoidable
+display delay; it does not shorten model inference or network connection time.
+Earlier provider sanitization can still replace a complete long credential
+before this partitioner sees it. Prefix overlap between two such long values
+can leave a suffix visible in both the baseline and this increment; the raw
+partitioner's overlap checks do not certify that earlier path.
+
+Regression fixtures use the prepared Node 22.23.4 and Pi SDK 1.5.0 with synthetic
+SSE and temporary sessions. No live billed provider or newly installed desktop
+has been exercised for this increment. Native Windows latency remains
+unverified, including PPT generation/preview, SDK cold start and the Windows
+document-isolation proof. These changes do not establish that all reported
+Windows slowness is fixed or that Windows performance matches macOS.

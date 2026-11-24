@@ -452,6 +452,111 @@ test("conversation text passes byte for byte; only the run's own key is replaced
   );
 });
 
+for (const kind of ["text", "thinking"]) {
+  test(`a short streamed ${kind} appears before the provider finishes`, async (t) => {
+    const params = await sandbox(t);
+    let firstChunk;
+    const started = new Promise((resolve) => {
+      firstChunk = resolve;
+    });
+    let delivered;
+    const shown = new Promise((resolve) => {
+      delivered = resolve;
+    });
+    let finish;
+    const events = [];
+    const runtime = new AssistantRuntime({
+      emit: (event) => {
+        events.push(event);
+        if (event.type === `${kind}_delta`) delivered(event.data.delta);
+      },
+      fetch: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              const send = (value) =>
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${JSON.stringify(value)}\n\n`,
+                  ),
+                );
+              send({
+                id: "short",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      [kind === "text" ? "content" : "reasoning_content"]:
+                        "你好，已收到。",
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              });
+              finish = () => {
+                if (kind === "thinking")
+                  send({
+                    id: "short",
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { content: "Done." },
+                        finish_reason: null,
+                      },
+                    ],
+                  });
+                send({
+                  id: "short",
+                  choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                  usage: {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                  },
+                });
+                controller.enqueue(
+                  new TextEncoder().encode("data: [DONE]\n\n"),
+                );
+                controller.close();
+              };
+              firstChunk();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    t.after(() => runtime.close());
+    const running = runtime.run({
+      ...params,
+      model: { ...model, reasoning: true },
+      thinkingLevel: "high",
+    });
+    await started;
+    let timer;
+    try {
+      const first = await Promise.race([
+        shown,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("short text was withheld until completion")),
+            1000,
+          );
+        }),
+      ]);
+      assert.equal(first, "你好，已收到。");
+      assert.equal(
+        events.some((event) => event.type === "message_end"),
+        false,
+      );
+    } finally {
+      clearTimeout(timer);
+      finish();
+      await running;
+    }
+  });
+}
+
 test("a key split across streamed deltas never reaches an event", async (t) => {
   const params = await sandbox(t);
   const events = [];
@@ -482,6 +587,52 @@ test("a key split across streamed deltas never reaches an event", async (t) => {
     false,
   );
 });
+
+for (const kind of ["text", "thinking"]) {
+  test(`a short MCP PIN split across ${kind} deltas is never exposed`, async (t) => {
+    const pin = "418731";
+    const params = {
+      ...(await sandbox(t)),
+      knownSecrets: [pin],
+      mcp: {
+        servers: {
+          fixture: {
+            enabled: false,
+            command: "never-run",
+            env: { PIN: pin, DEBUG: "1" },
+          },
+        },
+      },
+      model: { ...model, reasoning: true },
+      thinkingLevel: "high",
+    };
+    const events = [];
+    const runtime = new AssistantRuntime({
+      emit: (event) => events.push(event),
+      fetch: async () =>
+        new Response(
+          ["PIN: 418", "731 DEBUG=1"]
+            .map(
+              (content) =>
+                `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: { [kind === "text" ? "content" : "reasoning_content"]: content }, finish_reason: null }] })}\n\n`,
+            )
+            .join("") +
+            (kind === "thinking"
+              ? `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: { content: "Done." }, finish_reason: null }] })}\n\n`
+              : "") +
+            `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    t.after(() => runtime.close());
+    assert.equal((await runtime.run(params)).status, "completed");
+    const deltas = events
+      .filter((event) => event.type === `${kind}_delta`)
+      .map((event) => event.data.delta);
+    assert.equal(deltas.join(""), "PIN: *** DEBUG=1");
+    assert.equal(deltas.join("").includes(pin), false);
+  });
+}
 
 test("an earlier key of the run handed over as knownSecrets is replaced too", async (t) => {
   const refused = "refused-credential-of-this-run-0123456789";
@@ -3135,9 +3286,8 @@ test("reasoning end is signalled when the text begins, before its held-back text
               chunk({ role: "assistant", reasoning_content: "Short thought" }),
             );
             await new Promise((resolve) => setTimeout(resolve, 50));
-            // Shorter than the tail the runtime holds back for key scrubbing:
-            // it is forwarded only when the text ends.
-            controller.enqueue(chunk({ content: "Answer" }));
+            // A possible credential prefix stays private until text ends.
+            controller.enqueue(chunk({ content: token.slice(0, 15) }));
             await new Promise((resolve) => setTimeout(resolve, 300));
             controller.enqueue(chunk({}, "stop"));
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -3215,9 +3365,12 @@ test("reasoning start is signalled at once, before its held-back text", async (t
       new Response(
         new ReadableStream({
           async start(controller) {
-            // Shorter than the tail the runtime holds back for key scrubbing.
+            // A possible credential prefix needs buffering even in reasoning.
             controller.enqueue(
-              chunk({ role: "assistant", reasoning_content: "Short thought" }),
+              chunk({
+                role: "assistant",
+                reasoning_content: token.slice(0, 15),
+              }),
             );
             await new Promise((resolve) => setTimeout(resolve, 300));
             controller.enqueue(chunk({ content: "Answer" }));
@@ -3368,7 +3521,10 @@ test("tool preparation is visible while arguments stream, before any execution a
     );
     assert.equal(calls.length, 0, "the Host has not executed a tool");
     const activity = events.filter((event) => event.type === "model_activity");
-    assert.ok(activity.length > 0, "streamed arguments must renew model liveness");
+    assert.ok(
+      activity.length > 0,
+      "streamed arguments must renew model liveness",
+    );
     assert.deepEqual(Object.keys(activity[0].data), ["bytes"]);
     assert.ok(activity[0].data.bytes > 0);
   } finally {

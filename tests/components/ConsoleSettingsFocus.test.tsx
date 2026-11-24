@@ -10,11 +10,13 @@ import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import ConsolePage from "@/components/console/ConsolePage";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
 
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: unknown) => void>(),
 }));
+const client = new QueryClient();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(null),
@@ -72,6 +74,7 @@ vi.mock("@/components/UserAvatar", () => ({ UserAvatar: () => null }));
 vi.mock("@/components/OfoxApexSwitch", () => ({ OfoxApexSwitch: () => null }));
 
 beforeEach(async () => {
+  client.clear();
   mocks.listeners.clear();
   localStorage.clear();
   i18n.addResourceBundle("zh", "translation", zh, true, true);
@@ -85,12 +88,14 @@ beforeEach(async () => {
 
 function fixture(active = true, mounted = true) {
   return (
-    <ThemeProvider defaultTheme="light">
-      <button>其他窗口操作</button>
-      <div hidden={!active}>
-        {mounted && <ConsolePage active={active} boundTools={[]} localOnly />}
-      </div>
-    </ThemeProvider>
+    <QueryClientProvider client={client}>
+      <ThemeProvider defaultTheme="light">
+        <button>其他窗口操作</button>
+        <div hidden={!active}>
+          {mounted && <ConsolePage active={active} boundTools={[]} localOnly />}
+        </div>
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }
 

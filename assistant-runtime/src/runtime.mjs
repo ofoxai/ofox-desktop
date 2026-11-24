@@ -27,6 +27,7 @@ import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
 import { modelActivity } from "./model-activity.mjs";
 import { modelTransport } from "./model-transport.mjs";
+import { createStreamScrubber } from "./stream-secrets.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -2325,21 +2326,15 @@ export class AssistantRuntime {
       let pendingThinking = "";
       // Whether reasoning is under way and has said it started.
       let thinkingStarted = false;
-      // Hold back a tail long enough to hold any credential split across
-      // deltas until the rest of it arrives and it can be replaced whole.
+      // Hold only a potential credential prefix, so a short ordinary reply
+      // can be shown before its stream finishes. Host keys may change mid-run.
+      const scrubStream = createStreamScrubber(secrets);
       const flush = (type, final = false) => {
-        // A Host tool may accept a longer replacement key mid-run.
-        const retain = Math.max(
-          64,
-          ...secrets.map((secret) => secret.length - 1),
-        );
         const source = type === "text_delta" ? pendingText : pendingThinking;
-        const safe = scrubSecrets(source, secrets);
-        const length = final ? safe.length : Math.max(0, safe.length - retain);
-        if (length)
-          this.notify(context, type, { delta: safe.slice(0, length) });
-        if (type === "text_delta") pendingText = safe.slice(length);
-        else pendingThinking = safe.slice(length);
+        const { ready, pending } = scrubStream(source, final);
+        if (ready) this.notify(context, type, { delta: ready });
+        if (type === "text_delta") pendingText = pending;
+        else pendingThinking = pending;
       };
       // Reasoning stopped: the model began its text or a tool call, or the
       // block or message ended (Chat Completions ends its blocks only with
@@ -2438,7 +2433,9 @@ export class AssistantRuntime {
         if (event.type === "message_update") {
           const update = event.assistantMessageEvent;
           if (
-            ["text_delta", "thinking_delta", "toolcall_delta"].includes(update.type)
+            ["text_delta", "thinking_delta", "toolcall_delta"].includes(
+              update.type,
+            )
           )
             activity(update.delta);
           if (update.type === "text_delta") {

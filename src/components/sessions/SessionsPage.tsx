@@ -12,6 +12,7 @@ import {
   type SessionSubagent,
 } from "@/lib/api/sessions";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { sessionListOptions } from "@/lib/query/sessionQueries";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
 import { useSessionContentSearch } from "@/hooks/useSessionContentSearch";
 import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
@@ -49,11 +50,11 @@ export function SessionsPage({
   const { active, sessionLocation, consumeSessionLocation } = useShell();
   const client = useQueryClient();
   const { apex, isLoading: apexLoading } = useOfoxApex();
-  const sessionQueryKey = ["sessions", apex] as const;
+  const sessionOptions = sessionListOptions(apex);
+  const sessionQueryKey = sessionOptions.queryKey;
   const query = useQuery({
-    queryKey: sessionQueryKey,
-    queryFn: sessionsApi.list,
-    retry: false,
+    ...sessionOptions,
+    enabled: !apexLoading,
   });
   const trashQuery = useQuery({
     queryKey: ["session-trash"],
@@ -183,6 +184,9 @@ export function SessionsPage({
     const row = sessions.find(
       (session) => session.sessionKey === sessionLocation.key,
     );
+    // A startup snapshot can predate the target. Keep its location request
+    // until the fresh list arrives rather than consuming a cached miss.
+    if (apexLoading || (!row && query.isFetching)) return;
     setLocationMissing(!row);
     if (row) {
       setAgent("all");
@@ -214,6 +218,8 @@ export function SessionsPage({
     active,
     sessionLocation,
     query.isSuccess,
+    query.isFetching,
+    apexLoading,
     sessions,
     consumeSessionLocation,
   ]);
