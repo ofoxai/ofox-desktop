@@ -869,6 +869,14 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     /--out \$raw\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
   );
   assert.match(workflow, /\$null -ne \$report\.diagnostic/);
+  assert.match(
+    workflow,
+    /cargo build --locked --release .*--bin verify_document_engine/,
+  );
+  assert.match(
+    workflow,
+    /Copy-Item src-tauri\/target\/release\/verify_document_engine\.exe/,
+  );
   const sha = "a".repeat(40);
   assert.equal(
     successfulProbe(

@@ -95,9 +95,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw "$out/windows-sandbox.log"
           if ($log -notmatch '(?m)^running 2 tests\s*$' -or $log -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;') { throw 'Expected exactly two passing native tests' }
-          cargo build --locked --manifest-path src-tauri/Cargo.toml --bin verify_document_engine
+          # Measure the production optimization profile. Debug hashing can be
+          # much slower and cannot establish installed-client latency.
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin verify_document_engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item src-tauri/target/debug/verify_document_engine.exe "$out/verify_document_engine.exe"
+          Copy-Item src-tauri/target/release/verify_document_engine.exe "$out/verify_document_engine.exe"
           $raw = "$env:RUNNER_TEMP/document-engine-private-$env:GITHUB_RUN_ATTEMPT.json"
           & "$out/verify_document_engine.exe" --runtime "$pwd/assistant-runtime/resources" --out $raw
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
