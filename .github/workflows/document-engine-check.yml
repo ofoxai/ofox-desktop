@@ -8,6 +8,10 @@ on:
         description: Run only the native unchanged-input copyback regression
         type: boolean
         default: false
+      memory_only:
+        description: Run only the native cold-runtime memory regression
+        type: boolean
+        default: false
   # Register this new workflow without changing main. Only edits to this file
   # on this one development branch bootstrap a run; source changes stay manual.
   push:
@@ -76,7 +80,7 @@ jobs:
       # The runner's first Cargo command is the exact synthetic ACL test. A
       # failure stops immediately; subsequent fixed filters must run >0 tests.
       - name: ACL prerequisite then focused native regressions
-        if: ${{ inputs.copyback_only != true }}
+        if: ${{ inputs.copyback_only != true && inputs.memory_only != true }}
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
         env:
@@ -95,6 +99,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw "$out/windows-sandbox.log"
           if ($log -notmatch '(?m)^running 2 tests\s*$' -or $log -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;') { throw 'Expected exactly two passing native tests' }
+      - name: Native cold-runtime memory regression
+        if: ${{ inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $env:CARGO_TERM_COLOR = 'never'
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::cold_runtime_cache_keeps_peak_memory_bounded -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/windows-sandbox.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw "$out/windows-sandbox.log"
+          if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing native memory test' }
+      - name: Profile optimized fixed document engines
+        if: ${{ inputs.copyback_only == true || inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
           # Measure the production optimization profile. Debug hashing can be
           # much slower and cannot establish installed-client latency.
           cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin verify_document_engine

@@ -5,6 +5,97 @@ use super::*;
 mod module_load;
 mod office_load;
 
+#[test]
+#[serial_test::serial]
+fn cold_runtime_cache_keeps_peak_memory_bounded() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "services::assistant::documents::windows_sandbox::tests::cold_runtime_cache_memory_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("TMP", temporary.path())
+        .env("TEMP", temporary.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "COLD_CACHE_MEMORY_UNBOUNDED: isolated native regression failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("OFOX_COLD_CACHE_MEMORY_OK"));
+}
+
+// A fresh process makes the native peak-commit counter independent of all
+// other unit tests. Its only large input is a newly created synthetic file.
+#[test]
+#[ignore = "invoked in an isolated process by the bounded-memory regression"]
+#[serial_test::serial]
+fn cold_runtime_cache_memory_child() {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+
+    let sandbox = crate::test_sandbox::sandbox();
+    let private_temp = std::env::temp_dir().canonicalize().unwrap();
+    assert!(sandbox
+        .home()
+        .canonicalize()
+        .unwrap()
+        .starts_with(&private_temp));
+    let public = sandbox.home().join("synthetic-public-runtime");
+    fs::create_dir(&public).unwrap();
+    let resource = public.join(format!("resource-{}", uuid::Uuid::new_v4()));
+    let mut file = File::create(&resource).unwrap();
+    let chunk = [0u8; 64 * 1024];
+    for _ in 0..(384 * 1024 / 64) {
+        file.write_all(&chunk).unwrap();
+    }
+    drop(file);
+    let mut baseline = PROCESS_MEMORY_COUNTERS::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut baseline,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+        .unwrap();
+    }
+    let capability = RuntimeCapability::new().unwrap();
+    let cached = cache_runtime(&public, &capability, &current_user().unwrap()).unwrap();
+    assert!(cached
+        .root
+        .canonicalize()
+        .unwrap()
+        .starts_with(private_temp));
+    assert_eq!(
+        fs::metadata(cached.root.join(resource.file_name().unwrap()))
+            .unwrap()
+            .len(),
+        384 * 1024 * 1024
+    );
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+        .unwrap();
+    }
+    // Only this test's UUID-bearing content-addressed cache is removed.
+    fs::remove_dir_all(&cached.root).unwrap();
+    assert!(
+        counters.PeakPagefileUsage.saturating_sub(baseline.PeakPagefileUsage) < 192 * 1024 * 1024,
+        "COLD_CACHE_MEMORY_UNBOUNDED: peak committed bytes {}, baseline {}, for a 384 MiB synthetic runtime",
+        counters.PeakPagefileUsage, baseline.PeakPagefileUsage
+    );
+    println!("OFOX_COLD_CACHE_MEMORY_OK");
+}
+
 fn runtime() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources")
 }

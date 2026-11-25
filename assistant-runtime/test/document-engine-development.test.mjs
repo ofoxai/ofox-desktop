@@ -824,7 +824,7 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     .join("\n");
   assert.equal(
     triggers,
-    '  workflow_dispatch:\n    inputs:\n      copyback_only:\n        description: Run only the native unchanged-input copyback regression\n        type: boolean\n        default: false\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
+    '  workflow_dispatch:\n    inputs:\n      copyback_only:\n        description: Run only the native unchanged-input copyback regression\n        type: boolean\n        default: false\n      memory_only:\n        description: Run only the native cold-runtime memory regression\n        type: boolean\n        default: false\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
   // The WSAStartup trace is answered (run 44231498872) and registryRead is

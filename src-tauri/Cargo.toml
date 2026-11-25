@@ -152,4 +152,4 @@ security-framework = "=3.7.0"
 # Test-only CDB diagnostic checks the published x64 OBJECT_ATTRIBUTES binding.
 # Same pinned crate as the runtime dependency; release builds keep their features.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-windows = { version = "=0.62.2", default-features = false, features = ["Wdk_Foundation"] }
+windows = { version = "=0.62.2", default-features = false, features = ["Wdk_Foundation", "Win32_System_ProcessStatus"] }
