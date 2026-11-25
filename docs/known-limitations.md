@@ -2059,3 +2059,38 @@ below the viewport. Ordinary stream-to-history projection already follows the
 end correctly and remains covered. The reported Windows screenshot's down
 arrow is consistent with being away from the end, but its exact cause and
 whether an answer existed below it still require client confirmation.
+
+### Windows PPTX performance and closeout acceptance (2026-11-25)
+
+An installed Windows client's saved PPTX turn took 21 minutes 27 seconds after
+admission. Two create/preview calls each took about 7 minutes 17 seconds; the
+delivery call took 42 seconds. Its ten-page file was ready before the final
+model request failed with HTTP 200 and the SDK error
+`failed to execute HTTP request to provider API`. File readiness alone does
+not establish successful turn completion, nor does HTTP 200 prove an intact
+provider stream. The original raw SSE framing was not captured.
+
+Windows native regression `45575104188` demonstrated that unchanged sandbox
+inputs were rewritten. `03eaee19` skips those replacements after complete
+output validation and checks existing host paths even when skipping writes.
+Two native tests passed in `45581322294`, including host edits/deletions,
+hardlinks, junctions and dangling junctions. This removes redundant writes;
+it does not remove fresh runtime integrity checks or full output scans.
+That run's diagnostic executable used debug optimization. Its phase timings
+cannot establish installed release latency; the developer workflow now builds
+the verifier with the production release profile. Full Win11 generation and
+saved-file acceptance of the final fix remain pending.
+
+The runtime's bounded closeout recovery applies only after the Host confirms
+PPTX delivery, on OpenAI-compatible calls with the exact SDK error above,
+HTTP 200 and no output activity or content. One recovery is available for the
+current delivery state; already completed tools are not replayed. It shares
+the existing three-HTTP-attempt ceiling, records the failed request as unknown
+with no inferred zero fee, and rechecks budget, cancellation and turn ownership.
+This scope can include a model call after a post-delivery plan update. It is
+not a general chat retry or a guarantee that every provider error recovers.
+The pinned SDK discards some in-stream error codes/types. An authentication
+or quota error with this identical message cannot be distinguished at this
+layer and may consume the same single recovery. Structured gateway evidence
+would be required for a stronger classification. Installed Windows recovery
+and exact-SHA release acceptance are not yet certified.

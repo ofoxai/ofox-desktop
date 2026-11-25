@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { LocalTask } from "../src/local-task.mjs";
 import { pdfPages } from "./fixtures/pdf.mjs";
 import {
   probeGuideline,
@@ -4246,6 +4247,294 @@ test("honours Retry-After up to 10 seconds on 429 and stops after two retries", 
     assert.equal(events.filter((e) => e.type === "retrying").length, 2);
     await runtime.close();
   }
+});
+
+test("a delivered PPTX recovers one empty provider failure without delivering the file again", async (t) => {
+  const params = await sandbox(t);
+  const calls = [],
+    requests = [],
+    events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    retrySleep: async () => {},
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "delivered-deck",
+          name: "deck.pptx",
+          bytes: 1234,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        },
+        issues: [],
+      };
+    },
+    fetch: withPlanningOpening(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      if (requests.length === 1)
+        return toolStream("create_document", {
+          name: "deck.pptx",
+          format: "pptx",
+          fromPreview: "checked-preview",
+        });
+      if (requests.length === 2)
+        return new Response(
+          'data: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "x-request-id": "failed-summary",
+            },
+          },
+        );
+      return stream("The deck is ready.");
+    }),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...params,
+    documents: { formats: ["pptx"], python: true },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "create_document");
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[2].messages, requests[1].messages);
+  const raw = await readFile(params.sessionFile, "utf8");
+  const receipts = raw
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .filter((e) => e.customType === "ofox-desktop-request")
+    .map((e) => e.data);
+  assert.deepEqual(
+    receipts.slice(-2).map((e) => [e.httpStatus, e.status]),
+    [
+      [200, "unknown"],
+      [200, "completed"],
+    ],
+  );
+  assert.equal(receipts.at(-2).estimatedCostUsd, null);
+  assert.equal(receipts.at(-2).requestId, "failed-summary");
+  assert.equal(
+    result.entries.filter(
+      (e) => e.role === "assistant" && e.stopReason === "error",
+    ).length,
+    0,
+  );
+  assert.equal(events.filter((e) => e.type === "retrying").length, 1);
+  assert.deepEqual(
+    result.entries
+      .filter((e) => e.role === "assistant")
+      .map((e) => e.stopReason),
+    ["toolUse", "toolUse", "stop"],
+  );
+});
+
+const pptConnectionError = () =>
+  new Response(
+    'data: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+    {
+      headers: {
+        "content-type": "text/event-stream",
+        "x-request-id": "closeout-failure",
+      },
+    },
+  );
+
+async function startPptCloseout(
+  t,
+  {
+    reply,
+    apex = "ofox.io",
+    retrySleep = async () => {},
+    afterDelivery,
+    emit,
+  } = {},
+) {
+  const params = {
+    ...(await sandbox(t)),
+    apex,
+    documents: { formats: ["pptx"], python: true },
+    model: { ...model, pricingKnown: true, cost: { input: 1, output: 1 } },
+  };
+  const calls = [],
+    requests = [],
+    events = [];
+  const runtime = new AssistantRuntime({
+    ...(retrySleep ? { retrySleep } : {}),
+    emit: (event) => {
+      events.push(event);
+      emit?.(event);
+    },
+    hostCall: async (call) => {
+      calls.push(call);
+      afterDelivery?.(runtime.runs.get(params.runId));
+      return {
+        status: "completed",
+        file: {
+          id: "checked-deck",
+          name: "deck.pptx",
+          bytes: 1234,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        },
+        issues: [],
+      };
+    },
+    fetch: withPlanningOpening(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      if (requests.length === 1)
+        return toolStream("create_document", {
+          name: "deck.pptx",
+          format: "pptx",
+          fromPreview: "checked-preview",
+        });
+      return reply(requests.length - 2);
+    }),
+  });
+  t.after(() => runtime.close());
+  return {
+    runtime,
+    params,
+    calls,
+    requests,
+    events,
+    running: runtime.run(params),
+  };
+}
+
+test("delivered PPTX recovery works on both apexes and keeps one extra HTTP dispatch at most", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const fixture = await startPptCloseout(t, {
+      apex,
+      reply: (index) => (index === 0 ? pptConnectionError() : stream("Ready")),
+    });
+    assert.equal((await fixture.running).status, "completed");
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.requests.length, 3);
+  }
+  for (const reply of [
+    () => pptConnectionError(),
+    (index) =>
+      index === 0
+        ? pptConnectionError()
+        : Response.json({ error: { message: "busy" } }, { status: 503 }),
+  ]) {
+    const fixture = await startPptCloseout(t, { reply });
+    assert.equal((await fixture.running).status, "error");
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.requests.length, 3);
+    assert.equal(fixture.events.filter((e) => e.type === "retrying").length, 1);
+  }
+  const exhausted = await startPptCloseout(t, {
+    reply: (index) =>
+      index < 2
+        ? Response.json({ error: { message: "busy" } }, { status: 503 })
+        : pptConnectionError(),
+  });
+  assert.equal((await exhausted.running).status, "error");
+  assert.equal(exhausted.requests.length, 4); // One delivery plus the existing three-dispatch ceiling.
+});
+
+test("PPTX recovery refuses ordinary failures, partial output and absent delivery", async (t) => {
+  for (const response of [
+    () => Response.json({ error: { message: "invalid key" } }, { status: 401 }),
+    () =>
+      new Response('data: {"error":{"message":"insufficient quota"}}\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    () =>
+      new Response(
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Partial"},"finish_reason":null}]}\n\ndata: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  ]) {
+    const fixture = await startPptCloseout(t, { reply: response });
+    assert.equal((await fixture.running).status, "error");
+    assert.equal(fixture.requests.length, 2);
+  }
+  let count = 0;
+  const runtime = new AssistantRuntime({
+    retrySleep: async () =>
+      assert.fail("ordinary chat is not a delivered PPTX"),
+    fetch: async () => {
+      count++;
+      return pptConnectionError();
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(await sandbox(t))).status, "error");
+  assert.equal(count, 1);
+});
+
+test("PPTX recovery checks budget and queued input without counting a failed attempt twice", async (t) => {
+  const limits = {
+    maxDurationSeconds: 60,
+    maxToolCalls: 20,
+    maxCostUsd: 0.0001,
+  };
+  let task;
+  const limited = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    afterDelivery: (context) => {
+      context.localTask = task = new LocalTask(limits);
+    },
+  });
+  const result = await limited.running;
+  assert.equal(result.errorCode, "assistant_cost_limit");
+  assert.equal(limited.requests.length, 2);
+  let costAtWait;
+  const queued = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    afterDelivery: (context) => {
+      context.localTask = task = new LocalTask({ ...limits, maxCostUsd: 100 });
+    },
+    retrySleep: async () => {
+      costAtWait = task.cost;
+      queued.runtime.runs
+        .get(queued.params.runId)
+        .liveInputs.set("next", { applied: false });
+    },
+  });
+  await queued.running;
+  assert.equal(queued.requests.length, 2);
+  assert.equal(task.cost, costAtWait);
+  const raw = await readFile(queued.params.sessionFile, "utf8");
+  assert.equal(raw.split("closeout-failure").length - 1, 1);
+});
+
+test("SDK-only cancellation interrupts delivered PPTX recovery before another request", async (t) => {
+  let seen;
+  const ready = new Promise((resolve) => {
+    seen = resolve;
+  });
+  const fixture = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    retrySleep: null,
+    emit: (event) => {
+      if (event.type === "retrying") seen();
+    },
+  });
+  await Promise.race([
+    ready,
+    fixture.running.then(() => assert.fail("expected recovery wait")),
+  ]);
+  const context = fixture.runtime.runs.get(fixture.params.runId);
+  const start = Date.now();
+  await context.session.abort();
+  const result = await fixture.running;
+  assert.equal(result.status, "stopped");
+  assert.equal(
+    result.entries.filter((entry) => entry.role === "assistant").at(-1)
+      .stopReason,
+    "aborted",
+  );
+  assert.equal(context.abort.signal.aborted, false);
+  assert.ok(Date.now() - start < 500);
+  assert.equal(fixture.requests.length, 2);
 });
 
 test("retries connection failures and drops but never timeouts, aborts or other HTTP errors", async (t) => {

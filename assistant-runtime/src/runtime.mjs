@@ -27,6 +27,7 @@ import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
 import { modelActivity } from "./model-activity.mjs";
 import { modelTransport } from "./model-transport.mjs";
+import { forwardModelStream } from "./model-closeout-stream.mjs";
 import { createStreamScrubber } from "./stream-secrets.mjs";
 import {
   AttachmentStore,
@@ -2010,7 +2011,31 @@ export class AssistantRuntime {
         // Anthropic. OFox's gateway does not identify DeepSeek to Pi by URL.
         const deepSeekPlan =
           forceInitialPlan && target.id.startsWith("deepseek/");
-        const outcome = {};
+        let outcome = {};
+        let outcomeRecorded = false;
+        let recoveringCloseout = false;
+        let httpAttempts = 0;
+        const deliveredPptx = context.pptx;
+        const requestOwner = context.nativeParams ?? params;
+        const ownsCloseoutRequest = () =>
+          deliveredPptx.delivered === true &&
+          !context.runtimeFailure &&
+          !context.unknownOutcome &&
+          context.pptx === deliveredPptx &&
+          (context.nativeParams ?? params) === requestOwner &&
+          ![...context.liveInputs.values()].some((input) => !input.applied);
+        const closeoutCandidate =
+          target.api === "openai-completions" &&
+          !summaryRequest &&
+          !compactOnly &&
+          !closeoutTimeout &&
+          deliveredPptx.delivered;
+        const billingOwner = () =>
+          closeoutCandidate ? requestOwner : (context.nativeParams ?? params);
+        const fetchOnce = (input, init, attempt = outcome) => {
+          httpAttempts++;
+          return safeFetch(input, init, attempt);
+        };
         // An unknown cost never ends the task: it counts toward the user's
         // limit at the most it can have been, and the receipt stays unknown.
         const ceiling = (body) => ({
@@ -2018,10 +2043,8 @@ export class AssistantRuntime {
         });
         let sentBody;
         context.localRequests = (context.localRequests ?? 0) + 1;
-        const source = originalStream(
-          target,
-          scrubTaskPlanStructures(transcript, secrets),
-          {
+        const requestSource = () =>
+          originalStream(target, scrubTaskPlanStructures(transcript, secrets), {
             ...options,
             ...(textOnly ? { toolChoice: "none" } : {}),
             ...(forceInitialPlan
@@ -2057,6 +2080,16 @@ export class AssistantRuntime {
             maxRetries: 0,
             timeoutMs: closeoutTimeout ?? 900000,
             fetch: (input, init) => {
+              if (recoveringCloseout) {
+                context.abort.signal.throwIfAborted();
+                options?.signal?.throwIfAborted();
+                if (!ownsCloseoutRequest())
+                  throw new DOMException(
+                    "Closeout ownership changed",
+                    "AbortError",
+                  );
+                context.localTask?.beforeRequest();
+              }
               sentBody = init?.body;
               if (closeoutTimeout)
                 return safeFetch(
@@ -2073,10 +2106,10 @@ export class AssistantRuntime {
                   },
                   outcome,
                 );
-              return summaryRequest
-                ? safeFetch(input, init, outcome)
+              return summaryRequest || recoveringCloseout
+                ? fetchOnce(input, init, outcome)
                 : modelRequest(input, init, outcome, {
-                    fetch: safeFetch,
+                    fetch: fetchOnce,
                     signal: context.abort.signal,
                     sleep: this.retrySleep,
                     notify: (attempt) =>
@@ -2084,7 +2117,7 @@ export class AssistantRuntime {
                     record: (attempt) => {
                       const status = recordRequest(
                         manager,
-                        context.nativeParams ?? params,
+                        billingOwner(),
                         target,
                         "chat",
                         null,
@@ -2099,12 +2132,17 @@ export class AssistantRuntime {
             env: {},
             headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
             identity: { attribution: { name: "Ofox Desktop" } },
-          },
-        );
+          });
+        const nextAttempt = () => ({
+          source: requestSource(),
+          outcome,
+          body: () => sentBody,
+        });
+        const firstAttempt = nextAttempt();
         const filtered = new AssistantMessageEventStream();
         (async () => {
           try {
-            for await (const event of source) {
+            const push = (event) => {
               let safe = scrubTaskPlanStructures(event, secrets);
               // Pi keeps the failed message of the error event.
               if (safe.type === "error" && safe.error)
@@ -2113,22 +2151,87 @@ export class AssistantRuntime {
                   error: markFailure(safeMessage(safe.error, secrets), outcome),
                 };
               filtered.push(safe);
-            }
+            };
+            const recover = closeoutCandidate
+              ? async (failed, attempt) => {
+                  if (
+                    recoveringCloseout ||
+                    deliveredPptx.closeoutRecoveryUsed ||
+                    !ownsCloseoutRequest() ||
+                    context.runtimeFailure ||
+                    context.unknownOutcome ||
+                    context.abort.signal.aborted ||
+                    options?.signal?.aborted ||
+                    httpAttempts >= 3 ||
+                    !attempt.outcome.requested ||
+                    attempt.outcome.responseStatus !== 200 ||
+                    failed.stopReason !== "error" ||
+                    !Array.isArray(failed.content) ||
+                    failed.content.length !== 0 ||
+                    failed.errorMessage !==
+                      "failed to execute HTTP request to provider API"
+                  )
+                    return null;
+                  // The failure may already have been billed. Never infer zero
+                  // cost from the SDK's empty error-message usage defaults.
+                  recordRequest(
+                    manager,
+                    requestOwner,
+                    target,
+                    "chat",
+                    null,
+                    attempt.outcome,
+                    secrets,
+                  );
+                  outcomeRecorded = true;
+                  context.localTask?.addUsage(ceiling(attempt.body()));
+                  deliveredPptx.closeoutRecoveryUsed = true;
+                  const ready = () => {
+                    context.abort.signal.throwIfAborted();
+                    options?.signal?.throwIfAborted();
+                    if (!ownsCloseoutRequest()) return false;
+                    context.localTask?.beforeRequest();
+                    return true;
+                  };
+                  if (!ready()) return null;
+                  this.notify(context, "retrying", { attempt: 1 });
+                  await this.retrySleep(
+                    1000,
+                    AbortSignal.any(
+                      [context.abort.signal, options?.signal].filter(Boolean),
+                    ),
+                  );
+                  if (!ready()) return null;
+                  recoveringCloseout = true;
+                  outcome = {};
+                  outcomeRecorded = false;
+                  sentBody = undefined;
+                  context.localRequests++;
+                  // This SDK attempt uses one safeFetch, sharing the original
+                  // three-dispatch ceiling, without replaying any completed tool.
+                  return nextAttempt();
+                }
+              : undefined;
+            const sourceResult = await forwardModelStream(firstAttempt, {
+              push,
+              recover,
+            });
             const result = markFailure(
-              safeMessage(await source.result(), secrets),
+              safeMessage(sourceResult, secrets),
               outcome,
             );
-            recordRequest(
-              manager,
-              context.nativeParams ?? params,
-              target,
-              summaryRequest ? "compaction" : "chat",
-              result,
-              outcome,
-              secrets,
-            );
+            if (!outcomeRecorded)
+              recordRequest(
+                manager,
+                billingOwner(),
+                target,
+                summaryRequest ? "compaction" : "chat",
+                result,
+                outcome,
+                secrets,
+              );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
-            if (context.localTask) {
+            if (context.localTask && !outcomeRecorded) {
               const { usage } = result;
               const rates = params.model.cost;
               const counted =
@@ -2155,16 +2258,19 @@ export class AssistantRuntime {
               });
             filtered.end(result);
           } catch (error) {
-            recordRequest(
-              manager,
-              context.nativeParams ?? params,
-              target,
-              summaryRequest ? "compaction" : "chat",
-              null,
-              outcome,
-              secrets,
-            );
+            if (!outcomeRecorded)
+              recordRequest(
+                manager,
+                billingOwner(),
+                target,
+                summaryRequest ? "compaction" : "chat",
+                null,
+                outcome,
+                secrets,
+              );
             if (summaryRequest) recordSummaryUsage(target, null);
+            const stopped =
+              context.abort.signal.aborted || options?.signal?.aborted;
             const message = {
               role: "assistant",
               api: target.api,
@@ -2172,7 +2278,7 @@ export class AssistantRuntime {
               model: target.id,
               content: [],
               timestamp: Date.now(),
-              stopReason: "error",
+              stopReason: stopped ? "aborted" : "error",
               errorMessage: errorMessage(error, secrets),
               usage: {
                 input: 0,
@@ -2190,7 +2296,11 @@ export class AssistantRuntime {
               },
             };
             markFailure(message, outcome);
-            filtered.push({ type: "error", reason: "error", error: message });
+            filtered.push({
+              type: "error",
+              reason: message.stopReason,
+              error: message,
+            });
             filtered.end(message);
           }
         })();
