@@ -19,11 +19,12 @@ fn cold_runtime_cache_keeps_peak_memory_bounded() {
         ])
         .env("TMP", temporary.path())
         .env("TEMP", temporary.path())
+        .env("OFOX_COLD_MEMORY_TEMP", temporary.path())
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "COLD_CACHE_MEMORY_UNBOUNDED: isolated native regression failed:\n{}\n{}",
+        "isolated native memory regression failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -41,6 +42,12 @@ fn cold_runtime_cache_memory_child() {
 
     let sandbox = crate::test_sandbox::sandbox();
     let private_temp = std::env::temp_dir().canonicalize().unwrap();
+    assert_eq!(
+        private_temp,
+        PathBuf::from(std::env::var_os("OFOX_COLD_MEMORY_TEMP").unwrap())
+            .canonicalize()
+            .unwrap()
+    );
     assert!(sandbox
         .home()
         .canonicalize()
@@ -473,6 +480,7 @@ fn assert_suspended_lpac_access_controls() {
                 verified.is_ok(),
                 "actual suspended LPAC must pass the complete production verifier: diagnostic={diagnostic:?}; report={report}"
             );
+            runtime_snapshot::tests::assert_spool_lpac_denied(raw(&child.process.process));
         } else {
             assert!(
                 verified.as_ref().err().is_some_and(|error| error == UNAVAILABLE),

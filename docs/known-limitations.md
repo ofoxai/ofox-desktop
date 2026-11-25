@@ -2094,3 +2094,23 @@ or quota error with this identical message cannot be distinguished at this
 layer and may consume the same single recovery. Structured gateway evidence
 would be required for a stronger classification. Installed Windows recovery
 and exact-SHA release acceptance are not yet certified.
+
+On the user's Win11 build 26200, the release verifier against installed assets
+passed all twelve engine/isolation checks. Its first observed run took 392.662
+seconds and the second 134.930 seconds; these are fixed engine probes, not a
+complete paid PPT generation. Full source/cache hashing still cost about
+16–17 seconds per worker. Copyback took only 49 ms in the first run, so skipping
+unchanged writes does not explain the main delay. The first-versus-second
+difference does not identify a single cold-start phase conclusively.
+
+Native regression `45592997864` confirmed that the old cold-cache publisher
+committed a peak 809,713,664 bytes (3,076,096 baseline) for a 384 MiB synthetic
+runtime. Cold capture now streams through one private owner/System-only,
+non-inheritable, exclusive delete-on-close spool. The sorted manifest and
+64 KiB buffers bound memory; the source digest, retained snapshot digest,
+staging digest and final cache digest remain checked before admission.
+The warm path and capability ACL are unchanged. This adds temporary disk use
+of up to one runtime (bounded at 1 GiB) and extra sequential I/O. Its native
+memory, actual LPAC descriptor, integrity and final installed Win11 latency
+acceptance remain pending; reduced allocation alone does not certify faster
+PPT generation.

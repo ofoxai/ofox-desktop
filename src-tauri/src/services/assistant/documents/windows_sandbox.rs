@@ -12,6 +12,7 @@ mod cdb_protocol;
 #[cfg(test)]
 mod child_call;
 mod probe;
+mod runtime_snapshot;
 #[cfg(test)]
 mod startup_comparison;
 #[cfg(test)]
@@ -819,6 +820,7 @@ fn files(root: &Path, max: u64) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     result.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(result)
 }
+#[cfg(test)]
 fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
     let mut hash = Sha256::new();
     for (name, bytes) in files {
@@ -833,6 +835,15 @@ fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
 
 /// Hash warm public resources without retaining a second whole runtime in RAM.
 fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
+    tree_digest_stream(root, max, None)
+}
+
+// Both hashing and cold capture use the same bounded, no-alias tree walker.
+fn tree_digest_stream(
+    root: &Path,
+    max: u64,
+    mut capture: Option<(&mut File, &mut Vec<(PathBuf, u64)>)>,
+) -> Result<String, String> {
     let mut reader = tree_reader::TreeReader::new(root)?;
     let (mut pending, mut names, mut entries) = (vec![root.to_path_buf()], Vec::new(), 0usize);
     while let Some(directory) = pending.pop() {
@@ -875,6 +886,9 @@ fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
         hash.update(length.to_le_bytes());
+        if let Some((_, manifest)) = capture.as_mut() {
+            manifest.push((relative.clone(), length));
+        }
         let mut read = 0u64;
         loop {
             let n = io(file.read(&mut chunk))?;
@@ -886,6 +900,9 @@ fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
                 return Err(UNSAFE_FILE.into());
             }
             hash.update(&chunk[..n]);
+            if let Some((spool, _)) = capture.as_mut() {
+                io(spool.write_all(&chunk[..n]))?;
+            }
         }
         if read != length {
             return Err(UNSAFE_FILE.into());
@@ -1191,15 +1208,18 @@ fn cache_runtime_observed(
     let root = private_parent.join(&digest);
     if !root.exists() {
         observation.enter(Phase::CacheSourceRead);
-        let contents = files(&source, MAX_TREE_BYTES)?;
-        if tree_digest(&contents) != digest {
-            return Err(RUNTIME_CHANGED.into());
-        }
+        let mut snapshot = runtime_snapshot::RuntimeSnapshot::capture(
+            &source,
+            &private_parent,
+            user,
+            &digest,
+            MAX_TREE_BYTES,
+        )?;
         let staging = private_parent.join(format!("staging-{}", uuid::Uuid::new_v4().simple()));
         observation.enter(Phase::CacheStagingCreate);
         create_directory(&staging, &expected_acl)?;
         observation.enter(Phase::CacheStagingWrite);
-        let prepared = write_files(&staging, &contents).and_then(|()| {
+        let prepared = snapshot.write_to(&staging).and_then(|()| {
             observation.enter(Phase::CacheStagingDigest);
             if tree_digest_at(&staging, MAX_TREE_BYTES)? != digest {
                 return Err(UNSAFE_FILE.into());

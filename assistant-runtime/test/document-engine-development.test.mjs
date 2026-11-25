@@ -851,6 +851,8 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
       "summary.json",
       "verify_document_engine.exe",
       "document-engine-timings.json",
+      "runtime-snapshot.log",
+      "snapshot-lpac-access.log",
       ...[...checks, comparisonCheck, traceCheck].map(
         (check) => check.name + ".log",
       ),

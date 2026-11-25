@@ -110,6 +110,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw "$out/windows-sandbox.log"
           if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing native memory test' }
+      - name: Native private snapshot integrity and LPAC access regressions
+        if: ${{ inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::runtime_snapshot::tests:: -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/runtime-snapshot.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw "$out/runtime-snapshot.log"
+          if ($log -notmatch '(?m)^running 3 tests\s*$' -or $log -notmatch 'test result: ok\. 3 passed; 0 failed; 0 ignored;') { throw 'Expected exactly three passing native snapshot tests' }
+          # A suspended-control failure can contain private token/process
+          # evidence. Never stream or upload that raw diagnostic.
+          $private = "$env:RUNNER_TEMP/snapshot-lpac-private-$env:GITHUB_RUN_ATTEMPT.log"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_lpac_verifier_rejects_real_ordinary_appcontainer_before_resume -- --exact --nocapture --test-threads=1 *> $private
+          if ($LASTEXITCODE -ne 0) { throw 'Native LPAC access control failed; raw evidence kept private' }
+          $log = Get-Content -Raw $private
+          if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing actual LPAC access control test' }
+          'Native private snapshot LPAC descriptor check: 1 passed; 0 failed' | Set-Content "$out/snapshot-lpac-access.log"
       - name: Profile optimized fixed document engines
         if: ${{ inputs.copyback_only == true || inputs.memory_only == true }}
         shell: pwsh
@@ -139,6 +156,8 @@ jobs:
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/registry-scope-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/functional-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/windows-sandbox.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/runtime-snapshot.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/snapshot-lpac-access.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/verify_document_engine.exe
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/document-engine-timings.json
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-old-roundtrip.log
