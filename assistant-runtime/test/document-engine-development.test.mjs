@@ -824,7 +824,7 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     .join("\n");
   assert.equal(
     triggers,
-    '  workflow_dispatch:\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
+    '  workflow_dispatch:\n    inputs:\n      copyback_only:\n        description: Run only the native unchanged-input copyback regression\n        type: boolean\n        default: false\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
   // The WSAStartup trace is answered (run 44231498872) and registryRead is
@@ -849,6 +849,8 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     uploadPaths?.sort(),
     [
       "summary.json",
+      "verify_document_engine.exe",
+      "document-engine-timings.json",
       ...[...checks, comparisonCheck, traceCheck].map(
         (check) => check.name + ".log",
       ),
@@ -856,6 +858,17 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
       .map((name) => artifactRoot + name)
       .sort(),
   );
+  // A failure report may include private native probe evidence. It never
+  // enters an always-uploaded path, even when the verifier exits nonzero.
+  assert.match(
+    workflow,
+    /document-engine-private-\$env:GITHUB_RUN_ATTEMPT\.json/,
+  );
+  assert.match(
+    workflow,
+    /--out \$raw\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+  );
+  assert.match(workflow, /\$null -ne \$report\.diagnostic/);
   const sha = "a".repeat(40);
   assert.equal(
     successfulProbe(
@@ -1022,6 +1035,12 @@ test("functional failures retain engine checkpoints and registry decisions witho
     "\r\n";
   const panic = failureMessage(raw);
   assert.deepEqual(functionalProbeFailure(panic), receipt);
+  const copyback = structuredClone(raw);
+  copyback.worker.firstFailure = "output_snapshot";
+  assert.equal(
+    functionalProbeFailure(failureMessage(copyback)).worker.firstFailure,
+    "output_snapshot",
+  );
   const acl = {
     actualControl: "8004",
     expectedControl: "9004",

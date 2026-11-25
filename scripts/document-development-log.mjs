@@ -334,6 +334,7 @@ const workerStage = z
     "job_accounting",
     "stdout_receive",
     "stderr_receive",
+    "output_snapshot",
     "copyback",
     "task_cleanup",
     "profile_cleanup",

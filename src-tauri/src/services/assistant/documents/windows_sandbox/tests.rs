@@ -72,6 +72,134 @@ async fn document_copyback_preserves_unchanged_inputs_and_publishes_changes() {
     assert_eq!(fs::read(home.join("private.txt")).unwrap(), b"host home");
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn document_copyback_unchanged_inputs_preserve_host_changes_and_reject_aliases() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    for case in [
+        "edited",
+        "removed",
+        "parent-removed",
+        "hardlink",
+        "junction",
+        "dangling-junction",
+    ] {
+        let task = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("input.txt"), b"outside sentinel").unwrap();
+        let home = task.path().join("home");
+        let parent = task.path().join("nested");
+        let input = parent.join("input.txt");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&input, b"unchanged sandbox input").unwrap();
+        let canonical = task.path().canonicalize().unwrap();
+        let (reached, started) = std::sync::mpsc::sync_channel(1);
+        let (resume, resumed) = std::sync::mpsc::sync_channel(1);
+        COPYBACK_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                canonical.clone(),
+                Arc::new(CopybackGate {
+                    point: CopybackPoint::Drained,
+                    reached,
+                    resume: Mutex::new(resumed),
+                }),
+            );
+        let original = task.path().to_path_buf();
+        let runtime = root.clone();
+        let running = tokio::spawn(async move {
+            run_windows_engine_limited(
+                &runtime.join("node/node.exe"),
+                &["-e", "0"],
+                &original,
+                &home,
+                &runtime,
+                Duration::from_secs(30),
+                4096,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(60)))
+            .await
+            .unwrap()
+            .expect("successful child must reach the copyback handshake");
+        match case {
+            "edited" => fs::write(&input, b"host edit after snapshot").unwrap(),
+            "removed" => fs::remove_file(&input).unwrap(),
+            "parent-removed" => {
+                fs::remove_file(&input).unwrap();
+                fs::remove_dir(&parent).unwrap();
+            }
+            "hardlink" => {
+                fs::remove_file(&input).unwrap();
+                fs::hard_link(target.join("input.txt"), &input).unwrap();
+            }
+            "junction" | "dangling-junction" => {
+                fs::remove_file(&input).unwrap();
+                fs::remove_dir(&parent).unwrap();
+                let output = std::process::Command::new("cmd.exe")
+                    .args(["/D", "/C", "mklink", "/J"])
+                    .arg(&parent)
+                    .arg(&target)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "private junction fixture");
+                if case == "dangling-junction" {
+                    fs::remove_file(target.join("input.txt")).unwrap();
+                    fs::remove_dir(&target).unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        resume.send(()).unwrap();
+        let result = running.await.unwrap();
+        COPYBACK_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&canonical);
+        match case {
+            "edited" => {
+                assert_eq!(result.unwrap().status, Some(0));
+                assert_eq!(fs::read(&input).unwrap(), b"host edit after snapshot");
+            }
+            "removed" | "parent-removed" => {
+                assert_eq!(result.unwrap().status, Some(0));
+                assert!(
+                    !input.exists(),
+                    "unchanged sandbox input resurrected a host deletion"
+                );
+                if case == "parent-removed" {
+                    assert!(
+                        !parent.exists(),
+                        "unchanged input recreated its host parent"
+                    );
+                }
+            }
+            "hardlink" | "junction" => {
+                assert_eq!(result.unwrap_err(), UNSAFE_FILE, "unchanged {case} alias");
+                assert_eq!(
+                    fs::read(target.join("input.txt")).unwrap(),
+                    b"outside sentinel"
+                );
+            }
+            "dangling-junction" => {
+                assert_eq!(result.unwrap_err(), UNSAFE_FILE, "dangling junction")
+            }
+            _ => unreachable!(),
+        }
+        if matches!(case, "junction" | "dangling-junction") {
+            fs::remove_dir(&parent).unwrap();
+        }
+    }
+}
+
 /// The debugger receipt belongs only to this exact case, never to engine admission.
 #[tokio::test]
 #[serial_test::serial]

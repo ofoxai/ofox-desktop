@@ -913,6 +913,38 @@ fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), Stri
     publish_output_cancellable(root, relative, bytes, &AtomicBool::new(false))
 }
 
+/// An unchanged sandbox input is not an output to replace. Still reject host
+/// aliases and unreadable paths, but preserve host edits/removal after snapshot.
+fn validate_unchanged_output(root: &Path, relative: &Path) -> Result<(), String> {
+    let parts: Vec<_> = relative.components().collect();
+    if parts.is_empty() || parts.iter().any(|part| !matches!(part, Component::Normal(name) if !name.to_string_lossy().contains(':'))) {
+        return Err(UNSAFE_FILE.into());
+    }
+    let mut pins = pin_ancestors(root)?;
+    let physical_root = final_path(pins.last().ok_or(UNSAFE_FILE)?)?;
+    let mut path = root.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        path.push(part.as_os_str());
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            // Check every existing ancestor before accepting absence. In
+            // particular, a dangling junction is not a missing ordinary path.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(UNSAFE_FILE.into()),
+        }
+        if index + 1 == parts.len() {
+            let _file = open_regular(root, &path, MAX_TASK_BYTES)?;
+        } else {
+            let directory = open_path(&path, true)?;
+            if !final_path(&directory)?.starts_with(&physical_root) {
+                return Err(UNSAFE_FILE.into());
+            }
+            pins.push(directory);
+        }
+    }
+    Ok(())
+}
+
 fn publish_output_cancellable(
     root: &Path,
     relative: &Path,
@@ -2727,6 +2759,8 @@ async fn run_candidate_observed_until(
     check_deadline(deadline)?;
     let observation = if trusted_probe {
         observation
+    } else if std::env::var("OFOX_DOCUMENT_ENGINE_TIMINGS").as_deref() == Ok("1") {
+        Observer::timings_only()
     } else {
         Observer::default()
     };
@@ -2992,12 +3026,13 @@ fn run_blocking(
         let stderr = launched.stderr.recv_timeout(Duration::from_secs(2));
         observation.evidence(|evidence| evidence.stderr_receive = Some(receive_outcome(&stderr)));
         let stderr = stderr.map_err(|_| UNAVAILABLE.to_owned())?;
-        observation.enter(Phase::Copyback);
+        observation.enter(Phase::OutputSnapshot);
         #[cfg(test)]
         pause_copyback(&cwd, CopybackPoint::Drained)?;
         was_cancelled |= cancelled.load(Ordering::Acquire);
         if !timed_out && !was_cancelled && status == 0 {
             let outputs = files(&task.0, MAX_TASK_BYTES)?;
+            observation.enter(Phase::Copyback);
             // Original cwd is never granted to the LPAC. Keep its directory handle
             // pinned, and reject pre-existing aliases before atomic replacement.
             let _destination = pin_ancestors(&cwd)?;
@@ -3009,6 +3044,14 @@ fn run_blocking(
                     break;
                 }
                 if relative.starts_with(home_relative) {
+                    continue;
+                }
+                if inputs
+                    .binary_search_by(|(path, _)| path.cmp(&relative))
+                    .ok()
+                    .is_some_and(|index| inputs[index].1 == bytes)
+                {
+                    validate_unchanged_output(&cwd, &relative)?;
                     continue;
                 }
                 match publish_output_cancellable(&cwd, &relative, &bytes, cancelled) {
@@ -3077,6 +3120,9 @@ fn run_blocking(
     receipt["cleanupComplete"] = serde_json::json!(true);
     receipt["taskRemoved"] = serde_json::json!(true);
     receipt["profileRemoved"] = serde_json::json!(true);
+    if let Some(timings) = observation.timings() {
+        receipt["timings"] = timings;
+    }
     if let Ok(mut receipts) = RUN_RECEIPTS.get_or_init(Default::default).lock() {
         receipts.push_back(receipt);
         if receipts.len() > 512 {
@@ -4056,6 +4102,8 @@ async fn probe_inner(
 /// A redacted report suitable for the one-click client acceptance package.
 /// Successful fallback is deliberately not a successful Python acceptance.
 pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json::Value {
+    let sequence_before = RUN_SEQUENCE.load(Ordering::Acquire);
+    let started = Instant::now();
     let version = os_version().ok();
     let mut checks = Vec::new();
     let result = prove_runtime(
@@ -4064,6 +4112,7 @@ pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json:
         &mut checks,
     )
     .await;
+    let fixed_probe_elapsed_ms = started.elapsed().as_millis();
     let provenance = std::env::current_exe()
         .ok()
         .and_then(|path| fs::read(path).ok())
@@ -4076,11 +4125,18 @@ pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json:
             .get(&root)
             .map(|entry| entry.digest.clone())
     });
+    let engine_timings: Vec<_> = windows_document_sandbox_receipts(sequence_before)
+        .into_iter()
+        .filter(|row| row["trustedProbe"] == true)
+        .filter_map(|row| row.get("timings").cloned())
+        .collect();
     serde_json::json!({
         "schemaVersion": 1, "platform":"windows-x64", "success":result.is_ok(),
         "windowsBuild":version.map(|v| v.dwBuildNumber), "binarySha256":provenance,
         "runtimeSha256":runtime_digest, "nodeVersion":"22.23.4", "pyodideVersion":"314.0.7",
         "passedChecks":checks, "diagnostic":result.err(),
+        "engineTimings":engine_timings,
+        "fixedProbeElapsedMs":fixed_probe_elapsed_ms,
         "scope":"native-fixed-fixtures", "paidModelCalls":0,
         "liveModelAcceptance":false, "pythonCapabilityEnabled":false
     })

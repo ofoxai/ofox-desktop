@@ -1,4 +1,4 @@
-//! Numeric, per-candidate diagnostics for the embedded trusted probes only.
+//! Bounded numeric timings and private diagnostics for embedded trusted probes.
 //! This observer never supplies an authorization or changes a runner result.
 use std::{
     sync::{Arc, Mutex},
@@ -80,6 +80,7 @@ pub(super) enum Phase {
     JobAccounting,
     StdoutReceive,
     StderrReceive,
+    OutputSnapshot,
     Copyback,
     TaskCleanup,
     ProfileCleanup,
@@ -328,6 +329,7 @@ struct Timing {
 }
 
 struct State {
+    timings_only: bool,
     stage: Phase,
     stage_started: Instant,
     first_failure: Option<Phase>,
@@ -339,13 +341,22 @@ struct State {
     child_call_requested: bool,
 }
 
-/// Default is inert. Only the private fixed-probe orchestration allocates state.
+/// Default is inert. Ordinary runs can opt into timings, never probe evidence.
 #[derive(Clone, Default)]
 pub(super) struct Observer(Option<Arc<Mutex<State>>>);
 
 impl Observer {
     pub fn fixed_probe() -> Self {
+        Self::new(false)
+    }
+
+    pub fn timings_only() -> Self {
+        Self::new(true)
+    }
+
+    fn new(timings_only: bool) -> Self {
         Self(Some(Arc::new(Mutex::new(State {
+            timings_only,
             stage: Phase::WorkerStart,
             stage_started: Instant::now(),
             first_failure: None,
@@ -380,7 +391,11 @@ impl Observer {
     }
 
     pub fn evidence(&self, update: impl FnOnce(&mut Evidence)) {
-        self.update(|state| update(&mut state.evidence));
+        self.update(|state| {
+            if !state.timings_only {
+                update(&mut state.evidence);
+            }
+        });
     }
 
     #[cfg(test)]
@@ -450,13 +465,30 @@ impl Observer {
     }
 
     pub fn snapshot(&self) -> Option<serde_json::Value> {
+        self.0.as_ref().and_then(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            (!state.timings_only).then(|| {
+                serde_json::json!({
+                    "stage":state.stage, "firstFailure":state.first_failure,
+                    "stageElapsedMs":state.stage_started.elapsed().as_millis(),
+                    "completedStages":state.completed, "evidence":state.evidence
+                })
+            })
+        })
+    }
+
+    pub fn timings(&self) -> Option<serde_json::Value> {
         self.0.as_ref().map(|state| {
             let state = state.lock().unwrap_or_else(|error| error.into_inner());
-            serde_json::json!({
-                "stage":state.stage, "firstFailure":state.first_failure,
-                "stageElapsedMs":state.stage_started.elapsed().as_millis(),
-                "completedStages":state.completed, "evidence":state.evidence
-            })
+            // Serialize only the closed stage enum and numeric durations. Never
+            // serialize State/Evidence, argv, paths, process IDs or raw output.
+            let mut timings: Vec<_> = state.completed.iter().take(127).collect();
+            let current = Timing {
+                stage: state.stage,
+                elapsed_ms: state.stage_started.elapsed().as_millis(),
+            };
+            timings.push(&current);
+            serde_json::to_value(timings).expect("numeric timing projection")
         })
     }
 }
@@ -464,6 +496,30 @@ impl Observer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_only_observation_never_collects_probe_evidence() {
+        let observation = Observer::timings_only();
+        observation.evidence(|_| panic!("timing mode collected evidence"));
+        observation.compare_token_queries(|_, _, _, _, _| {
+            panic!("timing mode issued an additional token query")
+        });
+        assert!(observation.snapshot().is_none());
+        for _ in 0..1000 {
+            observation.enter(Phase::OutputSnapshot);
+        }
+        let timings = observation.timings().unwrap();
+        let rows = timings.as_array().unwrap();
+        assert_eq!(rows.len(), 128);
+        for row in rows {
+            assert_eq!(row.as_object().unwrap().len(), 2);
+            assert!(row["elapsedMs"].is_u64());
+            assert!(matches!(
+                row["stage"].as_str(),
+                Some("worker_start" | "output_snapshot")
+            ));
+        }
+    }
 
     #[test]
     fn first_worker_failure_survives_both_cleanup_stages() {

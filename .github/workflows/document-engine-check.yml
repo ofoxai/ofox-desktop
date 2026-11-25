@@ -91,10 +91,21 @@ jobs:
           $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
           New-Item -ItemType Directory -Path $out | Out-Null
           $env:CARGO_TERM_COLOR = 'never'
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_copyback_preserves_unchanged_inputs_and_publishes_changes -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/windows-sandbox.log"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_copyback_ -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/windows-sandbox.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $log = Get-Content -Raw "$out/windows-sandbox.log"
-          if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing native test' }
+          if ($log -notmatch '(?m)^running 2 tests\s*$' -or $log -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;') { throw 'Expected exactly two passing native tests' }
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --bin verify_document_engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item src-tauri/target/debug/verify_document_engine.exe "$out/verify_document_engine.exe"
+          $raw = "$env:RUNNER_TEMP/document-engine-private-$env:GITHUB_RUN_ATTEMPT.json"
+          & "$out/verify_document_engine.exe" --runtime "$pwd/assistant-runtime/resources" --out $raw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content -Raw $raw | ConvertFrom-Json
+          if ($report.success -ne $true -or $null -ne $report.diagnostic -or @($report.engineTimings).Count -ne 5) { throw 'Expected a successful five-engine timing report' }
+          # Failure diagnostics remain outside the uploaded directory. Only a
+          # successful fixed-fixture report can be promoted to an artifact.
+          Move-Item -LiteralPath $raw -Destination "$out/document-engine-timings.json"
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -106,6 +117,8 @@ jobs:
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/registry-scope-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/functional-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/windows-sandbox.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/verify_document_engine.exe
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/document-engine-timings.json
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-old-roundtrip.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-long-path.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-cancel-roundtrip.log
