@@ -223,6 +223,10 @@ export function AssistantPage({
 function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
+  const opening = useLoadingFox(assistant.loading, {
+    size: "block",
+    label: t("assistant.loading"),
+  });
   const shell = useOptionalShell();
   // A wide window (see ShellLayout): no frame, roomier sizes, a wider
   // column, and the title only where the list does not show it.
@@ -721,11 +725,15 @@ function AssistantWorkspace() {
     setUnseenBelow(false);
   }, [assistant.selectedId]);
   useEffect(() => {
+    // The retained loader can outlive the data read. Scroll only once the
+    // real transcript is mounted, including the loader's final transition.
+    if (opening.loading) return;
     const view = scroll.current;
     if (!view) return;
     if (follow.current) view.scrollTop = view.scrollHeight;
     else setUnseenBelow(true);
   }, [
+    opening.loading,
     assistant.stream,
     messages.length,
     assistant.localApprovals.length,
@@ -1183,6 +1191,7 @@ function AssistantWorkspace() {
     sidebar: sidebarHandle,
     scroll,
     follow,
+    transcriptReady: !opening.loading,
     focusSoon,
     landOnSidebar,
     composer,
@@ -1284,10 +1293,6 @@ function AssistantWorkspace() {
     </div>
   );
 
-  const opening = useLoadingFox(assistant.loading, {
-    size: "block",
-    label: t("assistant.loading"),
-  });
   return (
     <div
       ref={workspace}

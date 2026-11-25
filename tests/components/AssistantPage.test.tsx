@@ -6606,6 +6606,15 @@ describe("scrolling to the end of a conversation", () => {
     geometry.top = top;
     fireEvent.scroll(area);
   };
+  function deferDetail() {
+    let resolveDetail!: (detail: AssistantSessionDetail) => void;
+    mocks.getSession.mockReturnValue(
+      new Promise<AssistantSessionDetail>((resolve) => {
+        resolveDetail = resolve;
+      }),
+    );
+    return () => act(async () => resolveDetail(current));
+  }
   const run = { runId: "run-1", operationId: "operation-1" };
   /** A conversation with a reply being written, as when it is reopened. */
   async function openRunning() {
@@ -6808,6 +6817,160 @@ describe("scrolling to the end of a conversation", () => {
     await screen.findByText("Saved prefix and more");
     expect(geometry.top).toBe(3300);
     expect(toEnd()).toBeNull();
+  });
+
+  it.each([true, false])(
+    "keeps the reader's scroll preference when a reply and its reasoning are saved (following=%s)",
+    async (following) => {
+      const area = await openRunning();
+      scrollToTop(area, following ? 2500 : 1000);
+      const finalReply: AssistantMessage = {
+        id: "a",
+        role: "assistant",
+        content: "Entire final answer",
+        status: "completed",
+        createdAt: 8,
+        runId: run.runId,
+      };
+      current = {
+        ...current,
+        session: { ...current.session, activeRun: null },
+        messages: [
+          { ...current.messages[0], runId: run.runId },
+          ...Array.from({ length: 5 }, (_, index) => ({
+            id: `thought-${index}`,
+            role: "assistant" as const,
+            content: "",
+            reasoning: "An intermediate thought",
+            status: "completed" as const,
+            createdAt: index + 2,
+            runId: run.runId,
+          })),
+          finalReply,
+        ],
+      };
+      geometry.height = 3900;
+      act(() => {
+        mocks.listener?.({
+          sessionId: session.id,
+          ...run,
+          type: "message",
+          data: { message: finalReply },
+        });
+        mocks.listener?.({
+          sessionId: session.id,
+          ...run,
+          type: "run_end",
+          data: { stopped: false, status: "completed" },
+        });
+      });
+      await screen.findByText("Entire final answer");
+      await waitFor(() =>
+        expect(area.querySelectorAll("[data-reasoning]")).toHaveLength(5),
+      );
+      expect(geometry.top).toBe(following ? geometry.height : 1000);
+      if (following) expect(toEnd()).toBeNull();
+      else expect(screen.getByTestId("scroll-to-end-dot")).toBeInTheDocument();
+    },
+  );
+
+  it("scrolls to the saved answer when a slow conversation finishes opening", async () => {
+    current.messages = [
+      { id: "question", role: "user", content: "Question", createdAt: 1 },
+      ...Array.from({ length: 5 }, (_, index) => ({
+        id: `thought-${index}`,
+        role: "assistant" as const,
+        content: "",
+        reasoning: "One step of reasoning",
+        status: "completed" as const,
+        createdAt: index + 2,
+      })),
+      {
+        id: "final-answer",
+        role: "assistant",
+        content: "Final answer",
+        status: "completed",
+        createdAt: 8,
+      },
+    ];
+    const resolveDetail = deferDetail();
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    const loading = await screen.findByRole("status", {
+      name: i18n.t("assistant.loading"),
+    });
+    const area = loading.closest("[aria-busy]") as HTMLElement;
+    expect(area).not.toBeNull();
+    Object.defineProperties(area, {
+      scrollHeight: {
+        configurable: true,
+        get: () =>
+          area.querySelector('[data-message-id="final-answer"]')
+            ? geometry.height
+            : geometry.view,
+      },
+      clientHeight: { configurable: true, get: () => geometry.view },
+      scrollTop: {
+        configurable: true,
+        get: () => geometry.top,
+        set: (value: number) => {
+          geometry.top = Math.min(value, area.scrollHeight - area.clientHeight);
+        },
+      },
+    });
+    await resolveDetail();
+    expect(area).toHaveAttribute("aria-busy", "false");
+    expect(loading).toBeInTheDocument();
+    await screen.findByText("Final answer");
+    expect(area.querySelectorAll("[data-reasoning]")).toHaveLength(5);
+    expect(area.scrollTop).toBe(geometry.height - geometry.view);
+  });
+
+  it("keeps a search hit until its slow conversation is visible", async () => {
+    current.messages = [
+      {
+        id: "search-hit",
+        role: "user",
+        content: "Searched text",
+        createdAt: 1,
+      },
+      {
+        id: "final-answer",
+        role: "assistant",
+        content: "Latest answer",
+        status: "completed",
+        createdAt: 2,
+      },
+    ];
+    mocks.listSessions.mockImplementation(async (_deleted, search) => ({
+      ...listOf([current.session]),
+      matches: search ? { [session.id]: "search-hit" } : {},
+    }));
+    const resolveDetail = deferDetail();
+    render(page());
+    await screen.findByRole("button", { name: /My conversation/ });
+    await searchFor("Searched");
+    await waitFor(() =>
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "Searched"),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /My conversation/ }),
+    );
+    const loading = await screen.findByRole("status", {
+      name: i18n.t("assistant.loading"),
+    });
+    await resolveDetail();
+    expect(loading).toBeInTheDocument();
+    const scrollToMatch = vi.mocked(Element.prototype.scrollIntoView);
+    expect(scrollToMatch).not.toHaveBeenCalled();
+    await screen.findByText("Latest answer");
+    expect(scrollToMatch).toHaveBeenCalledWith({ block: "center" });
+    expect(scrollToMatch.mock.contexts.at(-1)).toHaveAttribute(
+      "data-message-id",
+      "search-hit",
+    );
   });
 
   it("starts at the end again in another conversation", async () => {

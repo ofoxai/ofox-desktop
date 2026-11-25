@@ -31,6 +31,8 @@ interface ConversationActionsOptions {
   /** The transcript's scroll view, and whether it follows the end. */
   scroll: RefObject<HTMLDivElement>;
   follow: MutableRefObject<boolean>;
+  /** A retained loader can still hide the transcript after its data arrives. */
+  transcriptReady?: boolean;
   focusSoon: (target: RefObject<HTMLElement | null>) => void;
   /** The sidebar's entry, or the toggle that opens it while it is collapsed. */
   landOnSidebar: (
@@ -56,6 +58,7 @@ export function useConversationActions({
   sidebar,
   scroll,
   follow,
+  transcriptReady = true,
   focusSoon,
   landOnSidebar,
   composer,
@@ -172,8 +175,12 @@ export function useConversationActions({
     if (loading) return;
     // Done either way: a conversation that failed to load must not scroll
     // when some later load brings it in.
+    if (detail?.session.id !== jump.sessionId) {
+      setJump(null);
+      return;
+    }
+    if (!transcriptReady) return;
     setJump(null);
-    if (detail?.session.id !== jump.sessionId) return;
     const target = [
       ...(scroll.current?.querySelectorAll("[data-message-id]") ?? []),
     ].find(
@@ -183,7 +190,7 @@ export function useConversationActions({
     // Not the end: new content below must not pull the view away again.
     follow.current = false;
     target.scrollIntoView?.({ block: "center" });
-  }, [jump, selectedId, loading, detail, scroll, follow]);
+  }, [jump, selectedId, loading, transcriptReady, detail, scroll, follow]);
 
   /** A row chosen in the list; for a search result, also the message to show. */
   const openFromList = (id: string, messageId?: string) => {

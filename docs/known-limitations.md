@@ -2047,3 +2047,15 @@ existing settlement, as do steered/follow-up child turns. This is a confirmed
 terminal-state bug, not proof of
 the reported client's exact provider response or startup latency. Its ordinary
 chat native history and a new installed-Windows acceptance are still needed.
+
+A separate display bug can hide an existing answer below the fold when a
+conversation opens slowly. Its data may finish loading while the minimum-lived
+loading animation still replaces the transcript. Scrolling the placeholder
+then loses both initial follow-to-end and search-result positioning. Both
+operations now wait for the real transcript to mount; a reader who has left
+the end keeps their position. A component regression reproduces five reasoning
+blocks followed by a complete answer that was present in the DOM but left
+below the viewport. Ordinary stream-to-history projection already follows the
+end correctly and remains covered. The reported Windows screenshot's down
+arrow is consistent with being away from the end, but its exact cause and
+whether an answer existed below it still require client confirmation.
