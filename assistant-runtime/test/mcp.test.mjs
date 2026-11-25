@@ -450,11 +450,14 @@ test("normal and cancelled pending MCP processes stop without unsafe SDK signals
     let pid;
     for (let i = 0; i < 100; i++) {
       try {
-        pid = Number(await readFile(pidFile, "utf8"));
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 10));
-      }
+        const candidate = Number(await readFile(pidFile, "utf8"));
+        // Creation can be observed before the PID bytes have been written.
+        if (Number.isSafeInteger(candidate) && candidate > 0) {
+          pid = candidate;
+          break;
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 10));
     }
     assert.ok(pid, "real subprocess started");
     if (scenario === "hang") await f.runtime.stop(f.params);

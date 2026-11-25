@@ -857,11 +857,14 @@ impl AssistantHost {
                             == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 })
             });
-        if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
-            self.wait_document_preparation().await;
-        } else {
-            self.start_document_preparation();
-        }
+        let preparation =
+            if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
+                self.prepare_document_send(&identity, generation, &request)
+                    .await?
+            } else {
+                self.start_document_preparation();
+                None
+            };
         self.ensure_current(&identity, generation).await?;
 
         // The persisted capability is eligibility. Resolve an actual target
@@ -1035,9 +1038,20 @@ impl AssistantHost {
             let selected = selected.clone();
             let search_price = search_price.clone();
             let model_id = model.id.clone();
+            let prepared_session = preparation.as_ref().map(|_| record.session.clone());
             move || {
                 host.register_run(control.clone(), generation, || {
+                    if let Some(preparation) = &preparation {
+                        preparation.check()?;
+                    }
                     store.mutate(&request.session_id, |record| {
+                        if prepared_session.as_ref().is_some_and(|expected| {
+                            record.session.model_id != expected.model_id
+                                || record.session.assistant_id != expected.assistant_id
+                                || record.session.capabilities != expected.capabilities
+                        }) {
+                            return Err(super::host::CANCELLED.into());
+                        }
                         publish_turn(
                             record,
                             &control,

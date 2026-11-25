@@ -22,6 +22,36 @@ const props = () => ({
 });
 
 describe("a live assistant task", () => {
+  it.each([
+    ["en", "Preparing the document environment…", "Elapsed 0s"],
+    ["zh", "正在准备文档运行环境…", "已用 0秒"],
+    ["ja", "ドキュメント環境を準備しています…", "経過 0秒"],
+  ])(
+    "shows the document preparation stage and elapsed time in %s",
+    async (language, label, elapsed) => {
+      await i18n.changeLanguage(language);
+      render(
+        <AssistantRunProgress {...props()} activity="preparingDocuments" />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(label);
+      expect(screen.getByText(elapsed)).toBeVisible();
+      expect(screen.queryByRole("list", { name: "Task steps" })).toBeNull();
+    },
+  );
+
+  it("shows elapsed time and a quiet hint when a reply has not produced any steps or text", () => {
+    vi.useFakeTimers();
+    render(<AssistantRunProgress {...props()} />);
+    act(() => vi.advanceTimersByTime(46_000));
+    expect(screen.getByText("Elapsed 46s")).toBeVisible();
+    expect(
+      screen.getByText(
+        "No new stage update yet. The task is still running; you can add instructions or stop it.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole("list", { name: "Task steps" })).toBeNull();
+  });
+
   it("does not hide a failed write when a different write of the same category succeeds", () => {
     render(
       <AssistantRunProgress

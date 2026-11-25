@@ -108,6 +108,7 @@ export function AssistantRunProgress({
     plan.length > 0 ||
     (live &&
       Boolean(
+        activity === "preparingDocuments" ||
         approvals ||
         warning ||
         failures.length ||
@@ -116,7 +117,7 @@ export function AssistantRunProgress({
         operationCount > 1,
       ));
   useEffect(() => {
-    if (!live || !hasExecution) return;
+    if (!live) return;
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [live, hasExecution]);
@@ -279,7 +280,7 @@ export function AssistantRunProgress({
       })}
     </ul>
   );
-  const clock = hasExecution && duration && (
+  const clock = (hasExecution || quiet) && duration && (
     <span className="shrink-0 tabular-nums text-ink-muted">
       {t("assistant.progress.elapsed", { duration })}
     </span>
@@ -318,8 +319,9 @@ export function AssistantRunProgress({
     if (!live || (replyStarted && !activity && !retryAttempt && !thinking))
       return null;
     return (
-      <div className="my-2 flex min-w-0 items-center gap-2 text-note text-ink-muted">
-        {activityLine}
+      <div className="my-2 min-w-0 space-y-2 text-note text-ink-muted">
+        <div className="flex flex-wrap items-center gap-2">{activityLine}</div>
+        {quiet && <p>{t("assistant.progress.quietHint")}</p>}
       </div>
     );
   }

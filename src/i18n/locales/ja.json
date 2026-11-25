@@ -5105,6 +5105,8 @@
       "noModels": "現在アシスタントで使えるモデルがありません。しばらくしてからもう一度お試しください。",
       "catalogUnavailable": "モデル一覧を読み込めませんでした。接続を確認してもう一度お試しください。",
       "runTimeout": "返信に時間がかかりすぎたため停止しました。もう一度お試しください。",
+      "documentPreparationTimeout": "ドキュメント環境の準備がタイムアウトしました。モデルへのリクエストは送信されていません。少し待ってから再試行してください。",
+      "emptyResponse": "モデルは思考過程のみを返し、回答を返しませんでした。再試行するか、別のモデルを選択してください。",
       "searchOutcomeUnknown": "Web 検索が実行されたか確認できなかったため、返信を停止しました。検索は課金されている可能性があるため、自動では繰り返しません。回答が必要な場合は、もう一度メッセージを送信してください。",
       "stopped": "返信を停止しました。",
       "runtimeMissing": "アシスタントの実行環境が見つかりません。アプリが正しくインストールされているか確認してから、もう一度お試しください。",
@@ -5215,6 +5217,7 @@
       "runningCommand": "ローカルコマンドを実行中…",
       "checkingResult": "結果を確認中…",
       "preparingToolRequest": "次の操作を準備しています…",
+      "preparingDocuments": "ドキュメント環境を準備しています…",
       "confirmingPlan": "生成計画を確認中…"
     },
     "welcome": "何をお手伝いしましょうか？",
@@ -5706,6 +5709,7 @@
         "runningCommand": "ローカルコマンドを実行",
         "checkingResult": "結果を確認",
         "preparingToolRequest": "ツールへのリクエストを準備",
+        "preparingDocuments": "ドキュメント環境を準備",
         "confirmingPlan": "生成計画を確認"
       },
       "reasoning": "推論の詳細",

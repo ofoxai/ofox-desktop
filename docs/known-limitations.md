@@ -2008,3 +2008,42 @@ has been exercised for this increment. Native Windows latency remains
 unverified, including PPT generation/preview, SDK cold start and the Windows
 document-isolation proof. These changes do not establish that all reported
 Windows slowness is fixed or that Windows performance matches macOS.
+
+## Windows document preparation wait (2026-11-25)
+
+Explicit PPT sends can wait for the shared native document-isolation proof
+before a model run exists. The renderer now shows this preparation stage and
+elapsed time. Stop, authority changes and a ten-minute per-send deadline end
+that wait without cancelling another session's shared proof. Session model or
+capability changes cancel a waiting send through final registration. A warm
+runtime and macOS skip the additional waiting path. Python remains unavailable
+until the native proof succeeds. These changes expose and bound the wait; they
+do not reduce the duration of the proof or of PPT generation.
+
+Live inspection of an installed Windows 1.5.3 observed the reported initial
+spinner, followed later by task steps reaching 4/6. Its captured native history
+began responding about five seconds after the saved turn was created. The
+installed source SHA could not be established, the earlier waiting interval
+has no Host-stage trace, and final PPT completion was not observed. This does
+not establish that the entire initial delay came from document preparation.
+
+Controlled temporary-session regressions cover cancellation before proof
+completion and before final registration, timeout, authority revocation,
+independent waiters, the ready fast path, event scoping and localized progress.
+The new source has not yet been installed on that Windows client. Native
+Windows CI and installation acceptance remain separate from macOS tests.
+
+The same client was subsequently reported to stall on ordinary chat. Its
+screenshot shows several reasoning-only messages and no active stop control;
+that cannot be attributed solely to the PPT preparation wait. A controlled
+Pi SDK/SSE reproduction confirms that a normal provider `stop` with reasoning
+but no visible answer was incorrectly reported as completed. Plain chat and
+read-only search now report `assistant_empty_response` in that case, without
+automatically repeating model or paid search requests. Thinking and native
+usage/request receipts remain intact; Host settlement retains its existing
+conservative cost-uncertainty policy for failed runs. Runs using other tools
+may legitimately deliver artifacts/cards without prose and retain their
+existing settlement, as do steered/follow-up child turns. This is a confirmed
+terminal-state bug, not proof of
+the reported client's exact provider response or startup latency. Its ordinary
+chat native history and a new installed-Windows acceptance are still needed.

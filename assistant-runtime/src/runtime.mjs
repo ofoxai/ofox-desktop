@@ -2726,6 +2726,35 @@ export class AssistantRuntime {
         result.errorMessage = taskFailure;
         result.errorKind = context.localRequests ? undefined : "not_sent";
       }
+      // A provider may end normally after reasoning without ever answering.
+      // Keep those receipts and thoughts, but do not silently call a plain
+      // chat/search run successful or replay potentially billed searches.
+      // Other tools can deliver files/cards without prose; leave their
+      // completion to the Host's existing artifact settlement.
+      const turnEntries = result.entries.filter(
+        (entry) => entry.active && entry.runId === params.runId,
+      );
+      if (
+        result.status === "completed" &&
+        !compactOnly &&
+        !localConfig &&
+        last?.runId === params.runId &&
+        last?.stopReason === "stop" &&
+        last.thinking?.trim() &&
+        !turnEntries.some(
+          (entry) => entry.role === "assistant" && entry.content?.trim(),
+        ) &&
+        turnEntries.every(
+          (entry) =>
+            entry.role !== "tool" ||
+            WEB_TOOLS.has(entry.toolName) ||
+            PLANNING_TOOLS.has(entry.toolName),
+        )
+      ) {
+        result.status = "error";
+        result.errorCode = "assistant_empty_response";
+        result.errorMessage = "assistant_empty_response";
+      }
       const usage = session.getContextUsage();
       result.contextUsage = usage
         ? { ...usage, modelId: params.model.id }

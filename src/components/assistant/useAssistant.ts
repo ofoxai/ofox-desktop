@@ -106,6 +106,7 @@ export type AssistantActivity =
   | "runningCommand"
   | "checkingResult"
   | "preparingToolRequest"
+  | "preparingDocuments"
   | "confirmingPlan"
   | "selectingStyle"
   | "readingGuidance"
@@ -139,6 +140,7 @@ export interface AssistantRunProgressState {
   startedAt: number;
   /** Renderer receipt time of the latest semantic event; excludes tokens. */
   lastEventAt: number;
+  preparing?: "documents";
   activities: {
     id: string;
     activity: AssistantActivity;
@@ -163,7 +165,9 @@ const preparationScopeKey = (scope: RunProgressScope) =>
   ]);
 
 const PROGRESS_EVENTS = new Set<AssistantEvent["type"]>([
+  "run_preparing",
   "run_start",
+  "run_end",
   "thinking_start",
   "thinking_end",
   "tool_start",
@@ -240,6 +244,11 @@ interface PendingSend extends AssistantRunRef {
   compactOnly?: boolean;
   sessionId: string;
   cancelled: boolean;
+  startedAt: number;
+  lastEventAt?: number;
+  preparing?: "documents";
+  preparationClosed?: boolean;
+  terminal?: boolean;
 }
 
 /** A conversation's draft as last saved; `files` unknown until read or written. */
@@ -629,9 +638,19 @@ export function useAssistant(enabled: boolean) {
       const closed = closedPreparationScopes.current;
       closed.add(preparationScopeKey(scope));
       if (closed.size > 32) closed.delete(closed.values().next().value!);
+      const pending = pendingSends.current.get(scope.runId);
+      if (pending) {
+        pending.preparing = undefined;
+        pending.preparationClosed = true;
+      }
     }
     preparationClosed.current = true;
     setPreparingTools([]);
+    setRunProgress((old) =>
+      old && old.runId === scope?.runId
+        ? { ...old, preparing: undefined }
+        : old,
+    );
   }, []);
 
   const setRun = useCallback(
@@ -676,18 +695,27 @@ export function useAssistant(enabled: boolean) {
             preparationScopeKey(progressScope.current),
           );
         const now = Date.now();
+        const pending = value
+          ? pendingSends.current.get(value.runId)
+          : undefined;
+        const began = startedAt ?? pending?.startedAt;
         setRunProgress(
           value
             ? {
                 runId: value.runId,
                 startedAt:
-                  typeof startedAt === "number" &&
-                  Number.isFinite(startedAt) &&
-                  startedAt >= 0 &&
-                  startedAt <= now
-                    ? startedAt
+                  typeof began === "number" &&
+                  Number.isFinite(began) &&
+                  began >= 0 &&
+                  began <= now
+                    ? began
                     : now,
-                lastEventAt: now,
+                lastEventAt: pending?.lastEventAt ?? pending?.startedAt ?? now,
+                ...(pending?.preparing &&
+                !pending.cancelled &&
+                !pending.preparationClosed
+                  ? { preparing: pending.preparing }
+                  : {}),
                 activities: [],
               }
             : null,
@@ -703,6 +731,37 @@ export function useAssistant(enabled: boolean) {
     if (!PROGRESS_EVENTS.has(event.type)) return;
     const scope = progressScope.current;
     const identity = bootstrapRef.current;
+    const now = Date.now();
+    const pending = pendingSends.current.get(event.runId);
+    const matchesPending =
+      pending &&
+      pending.sessionId === event.sessionId &&
+      pending.operationId === event.operationId;
+    // Local admission can outlive a selection. Keep only this operation's
+    // authenticated stage so reopening it restores the original wait.
+    if (event.type === "run_preparing") {
+      if (
+        !matchesPending ||
+        pending.cancelled ||
+        pending.preparationClosed ||
+        event.data.stage !== "documents" ||
+        typeof event.data.active !== "boolean" ||
+        event.data.owner !== identity?.owner ||
+        event.data.generation !== identity?.authorityGeneration
+      )
+        return;
+      pending.preparing = event.data.active ? "documents" : undefined;
+      pending.preparationClosed = !event.data.active;
+      pending.lastEventAt = now;
+    } else if (
+      matchesPending &&
+      (event.type === "run_start" || event.type === "run_end")
+    ) {
+      pending.preparing = undefined;
+      pending.preparationClosed = true;
+      pending.lastEventAt = now;
+      if (event.type === "run_end") pending.terminal = true;
+    }
     if (
       !scope ||
       scope.epoch !== epoch.current ||
@@ -714,7 +773,17 @@ export function useAssistant(enabled: boolean) {
       scope.operationId !== event.operationId
     )
       return;
-    const now = Date.now();
+    if (
+      event.type === "run_preparing" &&
+      (event.data.stage !== "documents" ||
+        typeof event.data.active !== "boolean" ||
+        event.data.owner !== identity?.owner ||
+        event.data.generation !== identity?.authorityGeneration ||
+        !pendingSends.current.has(event.runId) ||
+        progressMessageId.current !== null ||
+        preparationClosed.current)
+    )
+      return;
     setRunProgress((old) => {
       if (!old || old.runId !== event.runId) return old;
       let activities = old.activities;
@@ -739,6 +808,14 @@ export function useAssistant(enabled: boolean) {
       }
       return {
         ...old,
+        preparing:
+          event.type === "run_preparing"
+            ? event.data.active
+              ? "documents"
+              : undefined
+            : event.type === "run_start"
+              ? undefined
+              : old.preparing,
         lastEventAt: Math.max(old.lastEventAt, now),
         activities,
       };
@@ -1159,6 +1236,7 @@ export function useAssistant(enabled: boolean) {
         const preparing = Boolean(
           local &&
           pendingSends.current.has(local.runId) &&
+          !pendingSends.current.get(local.runId)?.terminal &&
           !value.session.activeRun,
         );
         // A reply still running (also after a restart) keeps streaming into
@@ -1174,7 +1252,11 @@ export function useAssistant(enabled: boolean) {
           text: value.session.draft,
           files: value.session.draftAttachmentIds,
         });
-        const alreadyFollowing = Boolean(runRef.current);
+        // A locally restored admission placeholder is not the saved reply.
+        // Adopt its persisted content if run_start arrived while offscreen.
+        const alreadyFollowing = Boolean(
+          runRef.current && progressMessageId.current,
+        );
         setLocalModes((old) => ({
           ...old,
           [sessionId]: value.permissionMode ?? "default",
@@ -1199,7 +1281,9 @@ export function useAssistant(enabled: boolean) {
               }
             : value;
         });
-        if (resumed && !alreadyFollowing) setStream(resumed);
+        if (resumed && !alreadyFollowing) {
+          setStream(resumed);
+        }
         if (!preparing) {
           setRun(
             value.session.activeRun,
@@ -2408,8 +2492,13 @@ export function useAssistant(enabled: boolean) {
       setNewThinking(null);
       setCompacting(false);
       const pending = [...pendingSends.current.values()].find(
-        (item) => item.sessionId === id,
+        (item) => item.sessionId === id && !item.terminal,
       );
+      if (pending && !pending.compactOnly)
+        setStream({
+          ...blankReply(pending.runId),
+          createdAt: pending.startedAt,
+        });
       setCompacting(pending?.compactOnly === true);
       setRun(
         pending
@@ -3548,7 +3637,12 @@ export function useAssistant(enabled: boolean) {
               cancelled: false,
             }
           : null;
-        preparation = { ...reference, sessionId, cancelled: false };
+        preparation = {
+          ...reference,
+          sessionId,
+          cancelled: false,
+          startedAt: Date.now(),
+        };
         pendingSends.current.set(reference.runId, preparation);
         detailSequence.current += 1;
         setRun(reference);
@@ -4427,6 +4521,7 @@ export function useAssistant(enabled: boolean) {
       ...active,
       sessionId: sid,
       cancelled: false,
+      startedAt: Date.now(),
       compactOnly: true,
     };
     pendingSends.current.set(active.runId, preparing);
@@ -4476,6 +4571,9 @@ export function useAssistant(enabled: boolean) {
   // The latest tool still running says what the reply is doing; before its
   // model request, a run reads the files it was sent with.
   const activity =
+    (runProgress?.preparing === "documents"
+      ? "preparingDocuments"
+      : undefined) ??
     tools[tools.length - 1]?.activity ??
     (preparingTools.length
       ? "preparingToolRequest"

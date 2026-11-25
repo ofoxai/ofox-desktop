@@ -1104,6 +1104,16 @@ export interface AssistantSwitchVersionRequest {
  */
 export type AssistantRunEvent =
   | {
+      /** A send is waiting for local readiness; no model run has started. */
+      type: "run_preparing";
+      data: {
+        stage: "documents";
+        active: boolean;
+        owner: string;
+        generation: number;
+      };
+    }
+  | {
       type: "runtime_state";
       data: {
         owner: string;
@@ -1847,6 +1857,8 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_catalog_invalid: "catalogUnavailable",
   assistant_catalog_too_large: "catalogUnavailable",
   assistant_run_timeout: "runTimeout",
+  assistant_document_preparation_timeout: "documentPreparationTimeout",
+  assistant_empty_response: "emptyResponse",
   assistant_search_outcome_unknown: "searchOutcomeUnknown",
   assistant_cancelled: "stopped",
   assistant_runtime_unavailable: "runtimeMissing",

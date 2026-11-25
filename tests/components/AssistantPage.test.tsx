@@ -6951,7 +6951,7 @@ describe("streamed words", () => {
     act(() => hook.result.current.select(session.id));
     expect(hook.result.current.run).not.toBeNull();
     frame();
-    expect(hook.result.current.stream).toBeNull();
+    expect(hook.result.current.stream?.content).toBe("");
     await waitFor(() => expect(hook.result.current.loading).toBe(false));
   });
 });

@@ -183,6 +183,69 @@ const toolResults = (body) =>
       message.role === "tool" && !isFixtureOpening(message.tool_call_id),
   );
 
+test("several search thoughts without a final answer fail without repeating searches", async (t) => {
+  for (const empty of [true, false]) {
+    const fixture = await sandbox(t);
+    const turns = Array.from({ length: 4 }, (_, index) => async () => {
+      const response = callTools(["web_search", { query: `Pi SDK ${index}` }]);
+      return new Response(
+        (await response.text()).replace(
+          '"role":"assistant"',
+          '"role":"assistant","reasoning_content":"Choose a source"',
+        ),
+        { headers: response.headers },
+      );
+    });
+    const model = scriptedToolModel(...turns, () =>
+      sse([
+        {
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                reasoning_content: "Review the sources",
+              },
+            },
+          ],
+        },
+        ...(empty
+          ? []
+          : [
+              {
+                choices: [
+                  { index: 0, delta: { content: "Here is the final answer." } },
+                ],
+              },
+            ]),
+        {
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        },
+      ]),
+    );
+    const { runtime } = runtimeFor(t, fixture, model);
+    const result = await runtime.run(fixture.params);
+    assert.equal(result.status, empty ? "error" : "completed");
+    assert.equal(
+      result.errorCode,
+      empty ? "assistant_empty_response" : undefined,
+    );
+    assert.equal(model.requests.length, 5);
+    assert.equal(calls(await fixture.log()).length, 4);
+    const loaded = await runtime.load(fixture.params);
+    const thoughts = loaded.entries.filter(
+      (entry) => entry.role === "assistant" && entry.thinking,
+    );
+    assert.equal(thoughts.length, 5);
+    assert.equal(
+      thoughts.at(-1).content,
+      empty ? "" : "Here is the final answer.",
+    );
+    assert.ok(loaded.entries.some((entry) => entry.role === "request"));
+  }
+});
+
 test("web tools exist only when the run enables web search, and start nothing until used", async (t) => {
   const prompts = [];
   for (const webSearch of [undefined, false, true]) {

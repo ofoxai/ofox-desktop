@@ -5105,6 +5105,8 @@
       "noModels": "目前没有助手可用的模型，请稍后再试。",
       "catalogUnavailable": "没能加载模型列表，请检查网络后重试。",
       "runTimeout": "回复超时，已停止。请重试。",
+      "documentPreparationTimeout": "文档环境准备超时，尚未发送模型请求。请稍后重试。",
+      "emptyResponse": "模型只返回了思考过程，没有给出回答。请重试或切换模型。",
       "searchOutcomeUnknown": "无法确认网页搜索是否已执行，回复已停止。这次搜索可能已经计费，因此不会自动重试。如仍需要回答，请重新发送消息。",
       "stopped": "回复已停止。",
       "runtimeMissing": "找不到助手运行环境。请确认应用安装完整后重试。",
@@ -5215,6 +5217,7 @@
       "runningCommand": "正在执行本地命令…",
       "checkingResult": "正在检查执行结果…",
       "preparingToolRequest": "正在准备下一步操作…",
+      "preparingDocuments": "正在准备文档运行环境…",
       "confirmingPlan": "正在确认生成计划…"
     },
     "welcome": "有什么可以帮你？",
@@ -5706,6 +5709,7 @@
         "runningCommand": "执行本地命令",
         "checkingResult": "检查执行结果",
         "preparingToolRequest": "准备工具请求",
+        "preparingDocuments": "准备文档运行环境",
         "confirmingPlan": "确认生成计划"
       },
       "reasoning": "查看推理详情",

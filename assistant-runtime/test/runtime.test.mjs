@@ -2928,6 +2928,46 @@ function thinkingReply(name) {
   ]);
 }
 
+test("reasoning-only normal stops are empty answers across all chat protocols", async (t) => {
+  for (const [name, input] of Object.entries(await thinkingModels())) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      fetch: async () => {
+        requests++;
+        const response = thinkingReply(name);
+        return new Response((await response.text()).replaceAll("Answer", ""), {
+          headers: response.headers,
+        });
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({
+      ...params,
+      model: atLevel(name, input),
+      thinkingLevel: "high",
+    });
+    assert.equal(result.status, "error", name);
+    assert.equal(result.errorCode, "assistant_empty_response", name);
+    assert.equal(
+      requests,
+      1,
+      "empty answers do not automatically replay requests",
+    );
+    const loaded = await runtime.load(params);
+    assert.ok(
+      loaded.entries.some(
+        (entry) => entry.role === "assistant" && entry.thinking,
+      ),
+    );
+    assert.ok(
+      !loaded.entries.some(
+        (entry) => entry.role === "assistant" && entry.content.trim(),
+      ),
+    );
+  }
+});
+
 function initialPptPlanReply(protocol, steps) {
   const name = "updatePlan";
   const input = { steps };
@@ -3693,6 +3733,84 @@ test("live input prioritizes steering over follow-up and fences authority withou
       .every((event) => event.data.previousEntryId),
   );
   assert.ok(!JSON.stringify(result).includes(token));
+});
+
+test("a steered turn can deliver a document without a written reply", async (t) => {
+  const params = await sandbox(t);
+  const firstRequest = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const reasoningOnly = async () => {
+    const response = thinkingReply("completions");
+    return new Response((await response.text()).replaceAll("Answer", ""), {
+      headers: response.headers,
+    });
+  };
+  const responses = [
+    async () => {
+      firstRequest.resolve();
+      await release.promise;
+      return reasoningOnly();
+    },
+    () => toolStream("beginSingleStep", {}, undefined, "call-plan"),
+    () =>
+      toolStream("create_document", {
+        name: "result",
+        format: "txt",
+        content: "Synthetic document",
+      }),
+    reasoningOnly,
+  ];
+  let requested = 0;
+  let delivered = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => responses[requested++](),
+    hostCall: async ({ name }) => {
+      assert.equal(name, "create_document");
+      delivered++;
+      return {
+        status: "completed",
+        file: { id: "file-1", name: "result.txt", mimeType: "text/plain" },
+      };
+    },
+  });
+  t.after(async () => {
+    release.resolve();
+    await runtime.close();
+  });
+  const running = runtime.run({
+    ...params,
+    model: { ...model, reasoning: true },
+    documents: { formats: ["txt"] },
+  });
+  await Promise.race([
+    firstRequest.promise,
+    running.then(() => assert.fail("the initial request did not start")),
+  ]);
+  await runtime.steer({
+    sessionId: params.sessionId,
+    runId: params.runId,
+    operationId: params.operationId,
+    id: "steered-turn",
+    behavior: "steer",
+    text: "Make and return a text file",
+  });
+  release.resolve();
+  const result = await running;
+  assert.equal(requested, responses.length);
+  assert.equal(delivered, 1);
+  const tool = result.entries.find(
+    (entry) => entry.toolName === "create_document",
+  );
+  assert.equal(tool.runId, "steered-turn");
+  assert.equal(tool.isError, false);
+  const last = result.entries
+    .filter((entry) => entry.role === "assistant")
+    .at(-1);
+  assert.equal(last.runId, "steered-turn");
+  assert.equal(last.stopReason, "stop");
+  assert.equal(last.thinking, "Weighing it");
+  assert.equal(last.content, "");
+  assert.equal(result.status, "completed", result.errorCode);
 });
 
 test("fork copies only the selected native context and continues independently", async (t) => {

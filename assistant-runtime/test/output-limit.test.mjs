@@ -15,7 +15,7 @@ const sse = (chunks) =>
     { headers: { "content-type": "text/event-stream" } },
   );
 const usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 };
-const reasoningOnly = () =>
+const reasoningOnly = (finish = "length") =>
   sse([
     {
       choices: [
@@ -25,7 +25,7 @@ const reasoningOnly = () =>
         },
       ],
     },
-    { choices: [{ index: 0, delta: {}, finish_reason: "length" }], usage },
+    { choices: [{ index: 0, delta: {}, finish_reason: finish }], usage },
   ]);
 const answer = () =>
   sse([
@@ -102,4 +102,18 @@ test("a long answer cut off at the limit is kept as it is", async (t) => {
   const { result, requests } = await run(t, [cut]);
   assert.equal(requests.length, 1);
   assert.equal(result.status, "completed");
+});
+
+test("a normal stop with only reasoning reports an empty answer without replaying requests", async (t) => {
+  const { result, requests } = await run(t, [() => reasoningOnly("stop")]);
+  assert.equal(requests.length, 1);
+  const reply = result.entries
+    .filter((entry) => entry.role === "assistant")
+    .at(-1);
+  assert.equal(reply.stopReason, "stop");
+  assert.equal(reply.thinking, "Still thinking…");
+  assert.equal(reply.content, "");
+  assert.equal(reply.usage.output, 5);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "assistant_empty_response");
 });

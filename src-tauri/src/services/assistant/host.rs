@@ -5,6 +5,7 @@
 //! [`Environment`], so the host runs the same against the app and in tests.
 mod catalog_refresh;
 pub mod local;
+mod preparation;
 use super::{
     catalog,
     documents::{
@@ -463,6 +464,7 @@ pub struct AssistantHost {
     /// text turns: 0 = idle/retryable, 1 = pending, 2 = successfully prepared.
     document_preparation: AtomicU64,
     document_preparation_finished: tokio::sync::Notify,
+    preparation_sends: preparation::PendingPreparations,
     #[cfg(test)]
     document_preparation_barrier:
         Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -711,6 +713,7 @@ fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure
     if let Some(code) = leading_code(
         &detail,
         &[
+            "assistant_empty_response",
             "assistant_repeat_limit",
             "assistant_duration_limit",
             "assistant_cost_limit",
@@ -923,6 +926,7 @@ impl AssistantHost {
             engines: OnceLock::new(),
             document_preparation: AtomicU64::new(0),
             document_preparation_finished: tokio::sync::Notify::new(),
+            preparation_sends: preparation::PendingPreparations::default(),
             #[cfg(test)]
             document_preparation_barrier: Mutex::default(),
             office_sandbox: EngineSandbox::default(),
@@ -1176,12 +1180,6 @@ impl AssistantHost {
             format!("document-preparation-{}", super::types::id()),
             async move {
                 host.prepare_document_engines().await;
-                // The runtime is machine-local. Publish only for the authority
-                // current when preparation ends, never the account that began it.
-                if let Ok(identity) = host.identity().await {
-                    let generation = host.generation();
-                    let _ = host.publish_runtime(&identity, generation).await;
-                }
                 let state = if host.office_sandbox.failed() || host.python_sandbox.failed() {
                     0
                 } else {
@@ -1189,13 +1187,17 @@ impl AssistantHost {
                 };
                 host.document_preparation.store(state, Ordering::SeqCst);
                 host.document_preparation_finished.notify_waiters();
+                // The runtime is machine-local. Publish only for the authority
+                // current when preparation ends, never the account that began it.
+                if let Ok(identity) = host.identity().await {
+                    let generation = host.generation();
+                    let _ = host.publish_runtime(&identity, generation).await;
+                }
             },
         );
     }
 
-    /// Explicit document work shares the background proof; ordinary chat does
-    /// not wait. A failed proof is retried by a later operation, never a loop.
-    pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+    fn start_needed_document_preparation(self: &Arc<Self>) {
         // A completed preparation can lose its native proof during a later
         // cleanup/recheck. Explicit document work may reprove it, while an
         // actual runner failure remains disabled for this process.
@@ -1208,6 +1210,16 @@ impl AssistantHost {
             );
         }
         self.start_document_preparation();
+    }
+
+    /// Explicit document work shares the background proof; ordinary chat does
+    /// not wait. A failed proof is retried by a later operation, never a loop.
+    pub(super) async fn wait_document_preparation(self: &Arc<Self>) {
+        self.start_needed_document_preparation();
+        self.await_document_preparation().await;
+    }
+
+    async fn await_document_preparation(&self) {
         loop {
             let finished = self.document_preparation_finished.notified();
             if self.document_preparation.load(Ordering::SeqCst) != 1 {
@@ -1410,12 +1422,11 @@ impl AssistantHost {
     }
 
     pub(super) fn cancel_session(&self, sid: &str) {
-        if let Some(run) = self
-            .runs
-            .lock()
-            .ok()
-            .and_then(|runs| runs.get(sid).cloned())
-        {
+        // Preparation registration and final run registration take this lock,
+        // so cancellation cannot fall between the two owners of a send.
+        let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        self.preparation_sends.cancel_session(sid);
+        if let Some(run) = runs.get(sid) {
             run.cancel.send_replace(true);
         }
     }
@@ -1451,7 +1462,9 @@ impl AssistantHost {
                 });
             }
             Ok(())
-        })
+        })?;
+        self.preparation_sends.cancel(identity, sid, rid, op);
+        Ok(())
     }
 
     /// Admit a run: `publish` saves its messages and operation under the same
@@ -5714,6 +5727,13 @@ mod tests {
             (failure.code, failure.unbilled)
         };
         let code = |code: &str, unbilled: bool| (code.to_string(), unbilled);
+        assert_eq!(
+            failure(
+                json!({"errorCode":"assistant_empty_response"}),
+                "assistant_empty_response"
+            ),
+            code("assistant_empty_response", false)
+        );
         // The runtime's structured status: a 4xx was refused, a 5xx may have
         // followed upstream billing.
         for (status, expected) in [
@@ -7950,6 +7970,306 @@ while read line; do :; done"#,
         assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
     }
+    #[tokio::test]
+    async fn ppt_preparation_stop_finishes_without_waiting_for_native_proof() {
+        let (config, env, host) = fixture_with_env();
+        let runtime = config.path().join("inert-runtime");
+        for name in [fixture_node_path(), "runtime/src/main.mjs"] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        *env.runtime.lock().unwrap() = Some(runtime);
+        env.text_send_enabled.store(true, Ordering::SeqCst);
+        let mut tool_model = model("tool/model");
+        tool_model.tools = true;
+        env.media.lock().unwrap().push(tool_model);
+        host.models("ofox.ai").await.unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("tool/model", false)
+            .unwrap()
+            .session
+            .id;
+        let (rid, op) = (id(), id());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let request = serde_json::from_value(json!({
+            "sessionId":sid,"runId":rid,"operationId":op,
+            "text":"Synthetic deck","presentationWorkflowVersion":1,
+            "presentationStyleId":"auto"
+        }))
+        .unwrap();
+        let mut pending = tokio::spawn({
+            let host = host.clone();
+            async move { host.send(request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        host.stop(&sid, &rid, &op).await.unwrap();
+        let stopped = tokio::time::timeout(Duration::from_millis(500), &mut pending).await;
+        let finished_early = matches!(&stopped, Ok(Ok(Err(code))) if code == CANCELLED);
+        release.notify_one();
+        if stopped.is_err() {
+            let _ = pending.await;
+        }
+        assert!(
+            finished_early,
+            "Stop must release a pending send while the shared native proof is still blocked"
+        );
+        let record = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert!(
+            record.messages.is_empty(),
+            "a stopped preparation never sends a model request"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_preparation_waiters_end_on_timeout_and_authority_change() {
+        for revoke in [false, true] {
+            let (_config, env, host) = fixture_with_env();
+            let store = host.store(&identity().owner).unwrap();
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let request: SendRequest = serde_json::from_value(json!({
+                "sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck"
+            }))
+            .unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            *host.document_preparation_barrier.lock().unwrap() =
+                Some((entered.clone(), release.clone()));
+            let pending = tokio::spawn({
+                let host = host.clone();
+                async move {
+                    host.prepare_document_send_until(
+                        &identity(),
+                        0,
+                        &request,
+                        tokio::time::Instant::now()
+                            + if revoke {
+                                Duration::from_secs(10)
+                            } else {
+                                Duration::from_millis(100)
+                            },
+                    )
+                    .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .unwrap();
+            if revoke {
+                host.cancel_all();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(1), pending).await;
+            let warming = host.document_preparation.load(Ordering::SeqCst) == 1;
+            release.notify_one();
+            let code = result
+                .expect("a send waiter must stop independently of the proof")
+                .unwrap()
+                .err()
+                .unwrap();
+            assert_eq!(
+                code,
+                if revoke {
+                    IDENTITY_CHANGED
+                } else {
+                    preparation::PREPARATION_TIMEOUT
+                }
+            );
+            assert!(
+                warming,
+                "ending a waiter must leave the shared native proof running"
+            );
+            assert!(!host.python_offered());
+            assert!(store.load_record(&sid).unwrap().messages.is_empty());
+            assert!(env
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|event| event.r#type != "run_start"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_one_document_preparation_preserves_other_waiters_and_the_cancel_receipt() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let mut requests = Vec::new();
+        let mut pending = Vec::new();
+        for _ in 0..2 {
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let request: SendRequest = serde_json::from_value(json!({
+                "sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck"
+            }))
+            .unwrap();
+            requests.push(request.clone());
+            pending.push(tokio::spawn({
+                let host = host.clone();
+                async move {
+                    host.prepare_document_send_until(
+                        &identity(),
+                        0,
+                        &request,
+                        tokio::time::Instant::now() + Duration::from_secs(10),
+                    )
+                    .await
+                }
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while env
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.r#type == "run_preparing" && event.data["active"] == true)
+                .count()
+                < 2
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let first = &requests[0];
+        host.stop(&first.session_id, &first.run_id, &first.operation_id)
+            .await
+            .unwrap();
+        let first_task = pending.remove(0);
+        let stopped = tokio::time::timeout(Duration::from_secs(1), first_task).await;
+        let other_still_waits = tokio::time::timeout(Duration::from_millis(20), &mut pending[0])
+            .await
+            .is_err();
+        let duplicate = host
+            .prepare_document_send_until(
+                &identity(),
+                0,
+                first,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+        release.notify_one();
+        assert_eq!(stopped.unwrap().unwrap().err().unwrap(), CANCELLED);
+        assert!(other_still_waits);
+        assert_eq!(duplicate.err().unwrap(), CANCELLED);
+        let _ = tokio::time::timeout(Duration::from_secs(1), pending.remove(0))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .load_record(&first.session_id)
+            .unwrap()
+            .operations
+            .iter()
+            .any(|op| op.id == first.operation_id && op.status == OperationStatus::Cancelled));
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.r#type != "run_start"));
+    }
+
+    #[tokio::test]
+    async fn document_preparation_cancellation_survives_readiness_until_registration() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId":sid,"runId":id(),"operationId":id(),"text":"Synthetic deck"
+        }))
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.document_preparation_barrier.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let pending = tokio::spawn({
+            let host = host.clone();
+            let request = request.clone();
+            async move { host.prepare_document_send(&identity(), 0, &request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if env.events.lock().unwrap().iter().any(|event| {
+                    event.run_id == request.run_id
+                        && event.operation_id == request.operation_id
+                        && event.r#type == "run_preparing"
+                        && event.data["active"] == true
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        release.notify_one();
+        let guard = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .expect("a real pending proof retains a cancellation guard");
+        assert!(guard.check().is_ok());
+        host.cancel_session(&sid);
+        let run = Arc::new(RunControl::new(identity(), &request, "test-key".into()));
+        let result = host.register_run(run, 0, || {
+            guard.check()?;
+            panic!("cancelled preparation must never publish a turn");
+        });
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        assert!(host.runs.lock().unwrap().is_empty());
+        assert!(store.load_record(&sid).unwrap().messages.is_empty());
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| { event.r#type == "run_preparing" && event.data["active"] == false }));
+    }
+
+    #[tokio::test]
+    async fn document_preparation_ready_path_does_not_read_history_or_publish_waiting() {
+        let (_config, env, host) = fixture_with_env();
+        // No native proof or session record is needed on this fast path.
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId":id(),"runId":id(),"operationId":id(),"text":"Synthetic deck"
+        }))
+        .unwrap();
+        let guard = host
+            .prepare_document_send(&identity(), 0, &request)
+            .await
+            .unwrap();
+        assert!(guard.is_none());
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.r#type != "run_preparing"));
+    }
+
     #[tokio::test]
     async fn cache_first_bootstrap_returns_while_document_preparation_is_pending() {
         let (config, env, host) = fixture_with_env();
