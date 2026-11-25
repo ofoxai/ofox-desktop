@@ -72,6 +72,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -
 `.github/workflows/windows-probe.yml` 已使用相同后端入口。代码推送后，Windows
 workflow 将构建两个探针并上传验证日志；全量前端检查继续由主 CI 执行。
 
+探针上传后按当前提交的精确名称分别下载。刚完成的制品可能暂时无法被读取，
+每件下载失败时会等待 5 秒后重试一次。两件制品都必须成功下载，并与本次编译的
+原始 exe 做 SHA-256 对照；下载重试、字节校验或后续原生检查失败仍会阻断门禁。
+
 ### 文档引擎开发诊断
 
 普通 Windows 主机可在已登录用户的非提权 PowerShell 中单独运行功能前置。先在仓库根目录
