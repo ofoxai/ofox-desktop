@@ -21,6 +21,57 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
         .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn document_copyback_preserves_unchanged_inputs_and_publishes_changes() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let unchanged = task.path().join("unchanged.txt");
+    fs::write(&unchanged, b"original input").unwrap();
+    let old = std::time::UNIX_EPOCH + Duration::from_secs(946684800);
+    File::options()
+        .write(true)
+        .open(&unchanged)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    fs::write(task.path().join("changed.txt"), b"before").unwrap();
+    fs::write(task.path().join("removed.txt"), b"keep host copy").unwrap();
+    fs::write(home.join("private.txt"), b"host home").unwrap();
+
+    let output = run_windows_engine_limited(
+        &root.join("node/node.exe"),
+        &["-e", "const f=require('node:fs'); f.writeFileSync('changed.txt','after'); f.writeFileSync('new.txt','new output'); f.unlinkSync('removed.txt'); f.writeFileSync('home/private.txt','sandbox home');"],
+        task.path(),
+        &home,
+        &root,
+        Duration::from_secs(30),
+        4096,
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.status, Some(0));
+    assert_eq!(fs::read(&unchanged).unwrap(), b"original input");
+    assert_eq!(
+        fs::metadata(&unchanged).unwrap().modified().unwrap(),
+        old,
+        "COPYBACK_UNCHANGED_INPUT_REWRITTEN: an unchanged input must retain its host file"
+    );
+    assert_eq!(fs::read(task.path().join("changed.txt")).unwrap(), b"after");
+    assert_eq!(
+        fs::read(task.path().join("new.txt")).unwrap(),
+        b"new output"
+    );
+    assert_eq!(
+        fs::read(task.path().join("removed.txt")).unwrap(),
+        b"keep host copy"
+    );
+    assert_eq!(fs::read(home.join("private.txt")).unwrap(), b"host home");
+}
+
 /// The debugger receipt belongs only to this exact case, never to engine admission.
 #[tokio::test]
 #[serial_test::serial]
