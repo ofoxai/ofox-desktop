@@ -67,6 +67,8 @@ export function AssistantRunProgress({
   onFinish,
   status = "streaming",
   completedAt,
+  pptxDelivered = false,
+  previewPages,
   mcpSteps = [],
   errorCode,
 }: {
@@ -84,6 +86,8 @@ export function AssistantRunProgress({
   onFinish?: () => void;
   status?: AssistantMessage["status"];
   completedAt?: number | null;
+  pptxDelivered?: boolean;
+  previewPages?: number;
   mcpSteps?: AssistantMcpStep[];
   errorCode?: string | null;
 }) {
@@ -108,6 +112,8 @@ export function AssistantRunProgress({
     plan.length > 0 ||
     (live &&
       Boolean(
+        previewPages ||
+        pptxDelivered ||
         activity === "preparingDocuments" ||
         approvals ||
         warning ||
@@ -210,11 +216,15 @@ export function AssistantRunProgress({
         : status === "error" || status === "failed"
           ? "failed"
           : "ended";
-  const terminalTitle = t(`assistant.progress.${terminalState}`);
+  const showDelivery =
+    terminalState === "ended" && pptxDelivered && completed < plan.length;
+  const terminalTitle = showDelivery
+    ? t("assistant.progress.pptxDelivered")
+    : t(`assistant.progress.${terminalState}`);
   const TerminalIcon =
     terminalState === "failed"
       ? X
-      : completed === plan.length && terminalState === "ended"
+      : (showDelivery || completed === plan.length) && terminalState === "ended"
         ? CircleCheck
         : CircleDashed;
   const count = t("assistant.progress.stepCount", {
@@ -340,15 +350,49 @@ export function AssistantRunProgress({
     >
       {live ? (
         <>
-          {plan.length > 0 && (
-            <LocalTaskProgress
-              intent={null}
-              warning={null}
-              plan={plan}
-              paused={waiting}
-              showIntent={false}
-            />
+          {(pptxDelivered || previewPages) && (
+            <p
+              role="status"
+              className="flex items-center gap-2 text-ctl text-ink"
+            >
+              <CircleCheck aria-hidden className="h-4 w-4" />
+              {pptxDelivered && (
+                <span>{t("assistant.progress.pptxDelivered")}</span>
+              )}
+              {pptxDelivered && previewPages && <span aria-hidden>·</span>}
+              {previewPages && (
+                <span>
+                  {t("assistant.progress.slidesPreviewed", {
+                    count: previewPages,
+                  })}
+                </span>
+              )}
+            </p>
           )}
+          {plan.length > 0 &&
+            (pptxDelivered || previewPages ? (
+              <details className="text-note text-ink-muted">
+                <summary className="cursor-pointer">
+                  {t("assistant.progress.reportedPlan")}
+                </summary>
+                <LocalTaskProgress
+                  intent={null}
+                  warning={null}
+                  plan={plan}
+                  paused
+                  showIntent={false}
+                  collapsible={false}
+                />
+              </details>
+            ) : (
+              <LocalTaskProgress
+                intent={null}
+                warning={null}
+                plan={plan}
+                paused={waiting}
+                showIntent={false}
+              />
+            ))}
           {hasDetails ? (
             <button
               type="button"
@@ -413,8 +457,12 @@ export function AssistantRunProgress({
           >
             <TerminalIcon aria-hidden className="h-4 w-4 shrink-0" />
             <span>{terminalTitle}</span>
-            <span aria-hidden>·</span>
-            <span>{count}</span>
+            {!showDelivery && (
+              <>
+                <span aria-hidden>·</span>
+                <span>{count}</span>
+              </>
+            )}
             {clock && (
               <>
                 <span aria-hidden>·</span>
@@ -430,6 +478,11 @@ export function AssistantRunProgress({
             />
           </button>
           <div id={detailId} hidden={!summaryOpen}>
+            {showDelivery && (
+              <p className="mb-1 text-note text-ink-muted">
+                {t("assistant.progress.reportedPlan")}
+              </p>
+            )}
             <LocalTaskProgress
               intent={null}
               warning={null}

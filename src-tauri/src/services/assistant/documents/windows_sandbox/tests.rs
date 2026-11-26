@@ -119,6 +119,64 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
         .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
 }
 
+#[test]
+fn document_svg_batch_stdin_is_finite_and_read_only() {
+    let batch = SvgBatch::new("out.pptx", &[1, 2]).unwrap();
+    let mut child_input = File::from(preview_stdin(&batch).unwrap());
+    let mut bytes = Vec::new();
+    child_input.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, batch.input());
+    assert_eq!(child_input.read(&mut [0; 1]).unwrap(), 0);
+    assert!(child_input.write_all(b"extra input").is_err());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn document_svg_batch_matches_single_pages_in_one_isolated_launch() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let fixture =
+        include_bytes!("../../../../../../assistant-runtime/test/fixtures/office/chinese.pptx");
+    let source = task.path().join("out.pptx");
+    fs::write(&source, fixture).unwrap();
+    let before = RUN_SEQUENCE.load(Ordering::Acquire);
+    let pictures = render_svg_batch(
+        SvgBatch::new("out.pptx", &[2, 1]).unwrap(),
+        task.path(),
+        &home,
+        &root,
+        Duration::from_secs(60),
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("pinned engine must render both pages using MCP inside the LPAC");
+    assert_eq!(RUN_SEQUENCE.load(Ordering::Acquire) - before, 1);
+    assert_ne!(pictures[0], pictures[1]);
+    for (page, svg) in ["2", "1"].into_iter().zip(pictures) {
+        let one = run_windows_engine_limited(
+            &root.join("engines/officecli/officecli.exe"),
+            &["view", "out.pptx", "svg", "--start", page, "--end", page],
+            task.path(),
+            &home,
+            &root,
+            Duration::from_secs(60),
+            super::super::runner::SVG_OUTPUT_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.status, Some(0));
+        assert_eq!(
+            one.stdout.trim().replace("\r\n", "\n"),
+            svg.replace("\r\n", "\n")
+        );
+    }
+    assert_eq!(fs::read(source).unwrap(), fixture);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn document_copyback_preserves_unchanged_inputs_and_publishes_changes() {
@@ -663,6 +721,7 @@ fn document_registry_scope_is_measured_and_adds_no_write_rights() {
             ContainerPolicy::Lpac,
             ConsoleMode::Detached,
             &observation,
+            None,
         )
         .unwrap();
         // The production verifier accepts only the production set.

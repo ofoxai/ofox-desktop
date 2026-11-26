@@ -1157,7 +1157,7 @@ impl AssistantHost {
             && !self.python_broken.load(Ordering::Relaxed)
     }
 
-    pub(super) fn start_document_preparation(self: &Arc<Self>) {
+    pub(crate) fn start_document_preparation(self: &Arc<Self>) {
         if self.ensure_accepting_runs().is_err()
             || self.document_preparation.load(Ordering::SeqCst) != 0
         {

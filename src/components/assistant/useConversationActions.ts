@@ -189,6 +189,10 @@ export function useConversationActions({
     if (!target) return;
     // Not the end: new content below must not pull the view away again.
     follow.current = false;
+    const group = target.closest<HTMLDetailsElement>(
+      "details[data-reasoning-group]",
+    );
+    if (group) group.open = true;
     target.scrollIntoView?.({ block: "center" });
   }, [jump, selectedId, loading, transcriptReady, detail, scroll, follow]);
 

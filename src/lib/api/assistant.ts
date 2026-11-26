@@ -1336,6 +1336,7 @@ export type AssistantRunEvent =
         plan: NonNullable<AssistantMessage["presentationPlan"]>;
       };
     }
+  | { type: "presentation_preview"; data: { messageId: string; pages: number } }
   | { type: "message"; data: { message: AssistantMessage } }
   /**
    * The saved session; its `activeRun` is null. A generated title's event

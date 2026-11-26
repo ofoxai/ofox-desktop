@@ -64,6 +64,7 @@ pub(super) fn create(
         ContainerPolicy::Lpac,
         console,
         observation,
+        None,
     )?;
     // The registry gate must see the granted catalog read and denied user keys.
     verify_token_entries(

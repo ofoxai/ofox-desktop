@@ -28,7 +28,10 @@ export const UNUSED_PACKAGE_PATHS = [
 // that engine is not offered (python-assets.mjs) it can never run.
 export const PYTHON_PACKAGE_PATHS = ["pyodide"];
 
-export async function pruneProduction(directory, { pythonEngine = true } = {}) {
+export async function pruneProduction(
+  directory,
+  { pythonEngine = true, platform = process.platform } = {},
+) {
   const unusedPaths = pythonEngine
     ? UNUSED_PACKAGE_PATHS
     : [...UNUSED_PACKAGE_PATHS, ...PYTHON_PACKAGE_PATHS];
@@ -37,13 +40,43 @@ export async function pruneProduction(directory, { pythonEngine = true } = {}) {
       recursive: true,
       force: true,
     });
-  await removeSourceMaps(directory);
+  // Windows reopens every packaged file to verify the document runtime.
+  // Node executes the JS/TS modules; the .d.* siblings are editor metadata.
+  const metadata = platform === "win32" ? /(?:\.map|\.d\.[cm]?ts)$/ : /\.map$/;
+  // These two pinned SDKs run the .js/.mjs at the package root. Their src
+  // mirrors also contain the only copies of several third-party licenses.
+  const sourceMirrors = new Map(
+    platform === "win32"
+      ? ["openai", "@anthropic-ai/sdk"].map((name) => [
+          path.join(directory, "node_modules", name, "src"),
+          /(?:\.map|\.[cm]?ts)$/,
+        ])
+      : [],
+  );
+  // These pinned packages resolve every public Node import and require to
+  // dist-cjs. dist-es is a second build for bundlers. Keep embedded notices.
+  if (platform === "win32")
+    for (const name of [
+      "@smithy/core",
+      "@aws-sdk/core",
+      "@aws-sdk/nested-clients",
+    ])
+      sourceMirrors.set(
+        path.join(directory, "node_modules", name, "dist-es"),
+        /(?:\.map|\.js|\.d\.[cm]?ts)$/,
+      );
+  await removeBuildMetadata(directory, metadata, sourceMirrors);
 }
 
-async function removeSourceMaps(directory) {
+async function removeBuildMetadata(directory, metadata, sourceMirrors) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const filename = path.join(directory, entry.name);
-    if (entry.isDirectory()) await removeSourceMaps(filename);
-    else if (entry.isFile() && entry.name.endsWith(".map")) await rm(filename);
+    if (entry.isDirectory())
+      await removeBuildMetadata(
+        filename,
+        sourceMirrors.get(filename) ?? metadata,
+        sourceMirrors,
+      );
+    else if (entry.isFile() && metadata.test(entry.name)) await rm(filename);
   }
 }

@@ -153,6 +153,85 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("real generated file workspace", () => {
+  it("shows the saved slide immediately while the full page is rendering", async () => {
+    let finish!: (page: FilePreviewPage) => void;
+    api.page.mockImplementationOnce(
+      () =>
+        new Promise<FilePreviewPage>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const generated = {
+      ...file,
+      details: { documentPreview: { mimeType: "image/jpeg", pages: [1, 3] } },
+    };
+    render(<AssistantFileWorkspace {...props()} files={[generated]} />);
+    const snapshot = await within(pane()).findByRole("img");
+    expect(snapshot.getAttribute("src")).toContain("/deck/preview/1?");
+    expect(
+      within(pane()).getByText("Generation preview · Loading full resolution…"),
+    ).toBeVisible();
+    await act(async () => finish(result(1)));
+    expect(within(pane()).getByRole("img").getAttribute("src")).toMatch(
+      /^data:image\/jpeg/,
+    );
+    expect(
+      within(pane()).queryByText(
+        "Generation preview · Loading full resolution…",
+      ),
+    ).toBeNull();
+  });
+
+  it("explicitly re-renders the current version on Reload preview", async () => {
+    render(<AssistantFileWorkspace {...props()} />);
+    await ready();
+    await openActions();
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Reload preview" }),
+    );
+    await ready();
+    expect(api.manifest).toHaveBeenCalledTimes(2);
+    expect(api.page).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares a pending full-resolution render when the viewer is closed and reopened", async () => {
+    let finish!: (page: FilePreviewPage) => void;
+    api.page.mockImplementation(
+      () =>
+        new Promise<FilePreviewPage>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const p = props();
+    const { rerender } = render(<AssistantFileWorkspace {...p} />);
+    await waitFor(() => expect(api.page).toHaveBeenCalledTimes(1));
+    rerender(<AssistantFileWorkspace {...p} selectedId={null} />);
+    rerender(<AssistantFileWorkspace {...p} />);
+    await waitFor(() => expect(api.manifest).toHaveBeenCalledTimes(2));
+    await act(async () => finish(result(1)));
+    await ready();
+    expect(api.page).toHaveBeenCalledTimes(1);
+  });
+
+  it("reopens a rendered page without launching the renderer again, after checking its version", async () => {
+    const p = props();
+    const { rerender } = render(<AssistantFileWorkspace {...p} />);
+    await ready();
+    rerender(<AssistantFileWorkspace {...p} selectedId={null} />);
+    rerender(<AssistantFileWorkspace {...p} />);
+    await ready();
+    expect(api.manifest).toHaveBeenCalledTimes(2);
+    expect(api.page).toHaveBeenCalledTimes(1);
+    rerender(<AssistantFileWorkspace {...p} selectedId={null} />);
+    api.manifest.mockResolvedValueOnce({
+      ...manifest,
+      version: "b".repeat(64),
+    });
+    rerender(<AssistantFileWorkspace {...p} />);
+    await ready();
+    expect(api.page).toHaveBeenCalledTimes(2);
+  });
+
   it("shows the loading fox while the preview has not arrived, not a bare line of text", async () => {
     api.manifest.mockReturnValue(new Promise(() => {}));
     render(<AssistantFileWorkspace {...props()} />);

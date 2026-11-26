@@ -144,7 +144,19 @@ function unbilled(message) {
 function markFailure(message, outcome) {
   if (message.stopReason !== "error") return message;
   if (outcome.status) message.errorStatus = outcome.status;
-  else if (outcome.network) {
+  else if (
+    outcome.responseStatus >= 200 &&
+    outcome.responseStatus < 300 &&
+    [
+      "terminated",
+      "Stream ended without finish_reason",
+      "Provider finish_reason: network_error",
+    ].includes(message.errorMessage)
+  ) {
+    // Node fetch can lose its SSE body after returning a successful response.
+    // The HTTP receipt remains intact and its billing outcome remains unknown.
+    message.errorKind = "network";
+  } else if (outcome.network) {
     message.errorKind = outcome.network.sent ? "network" : "not_sent";
     if (outcome.network.code) message.errorCode = outcome.network.code;
   }
@@ -276,10 +288,31 @@ async function modelRequest(input, init, outcome, options) {
 
 // A model message is conversation content; its failure text is a diagnostic.
 function safeMessage(message, secrets) {
-  const safe = scrubTaskPlanStructures(message, secrets);
-  return typeof safe?.errorMessage === "string"
-    ? { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) }
-    : safe;
+  let safe = scrubTaskPlanStructures(message, secrets);
+  if (typeof safe?.errorMessage === "string")
+    safe = { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) };
+  if (safe?.role !== "assistant" || !Array.isArray(safe.content)) return safe;
+  return {
+    ...safe,
+    content: safe.content.map((block) => {
+      if (
+        block.type !== "toolCall" ||
+        block.name !== "create_document" ||
+        (typeof block.argumentsError !== "string" &&
+          block.arguments?.name !== undefined &&
+          block.arguments?.format !== undefined)
+      )
+        return block;
+      // Keep rejected source code out of the tool call and validation
+      // feedback. An argument error blocks execution in the SDK.
+      return {
+        ...block,
+        arguments: {},
+        argumentsError:
+          "Send a complete JSON object. Include name and format. No document ran for this call. For a PPTX, use compact code with shared slide helpers and loops, or deliver an existing checked preview with fromPreview and no content.",
+      };
+    }),
+  };
 }
 
 // What a web_search result cost is known from its usage counts. It is unknown

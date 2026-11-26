@@ -4,6 +4,7 @@
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{check_deadline, EngineOutput, DEAD_PROXY, RUN_TIMEOUT};
+use super::svg_batch::{self, SvgBatch};
 mod capability_set;
 #[cfg(test)]
 mod cdb;
@@ -94,7 +95,7 @@ use windows::{
                 JobObjectExtendedLimitInformation, QueryInformationJobObject,
                 SetInformationJobObject, TerminateJobObject,
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
             },
             Pipes::CreatePipe,
             SystemInformation::OSVERSIONINFOW,
@@ -2272,6 +2273,7 @@ fn launch(
     limit: usize,
     observation: &Observer,
     _cancelled: &AtomicBool,
+    batch: Option<&SvgBatch>,
 ) -> Result<Launch, String> {
     // Declared first so it outlives (is dropped after) the suspended process.
     #[cfg(test)]
@@ -2283,10 +2285,10 @@ fn launch(
         grant = Some(held);
         suspended
     } else {
-        create_verified(exe, args, cwd, home, profile, cap, observation)?
+        create_verified(exe, args, cwd, home, profile, cap, observation, batch)?
     };
     #[cfg(not(test))]
-    let suspended = create_verified(exe, args, cwd, home, profile, cap, observation)?;
+    let suspended = create_verified(exe, args, cwd, home, profile, cap, observation, batch)?;
     #[cfg(test)]
     let mut debugger = cdb::Guard::begin(
         raw(&suspended.process.process),
@@ -2315,6 +2317,22 @@ fn launch(
     if debugger.is_some() && _cancelled.load(Ordering::Acquire) {
         observation.failed();
         return Err(CANCELLED.into());
+    }
+    if batch.is_some() {
+        // OfficeCLI buffers MCP replies before writing them. Bound the child
+        // as well as our captured stdout; feasibility never grants more rights.
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        limits.ProcessMemoryLimit = 768 * 1024 * 1024;
+        unsafe {
+            win(SetInformationJobObject(
+                raw(&process.job),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ))?;
+        }
     }
     observation.enter(Phase::Resume);
     let resumed = unsafe { ResumeThread(raw(&thread)) };
@@ -2352,8 +2370,33 @@ fn launch(
     })
 }
 
+// A finite, host-authored request file cannot block on the child's pipe
+// consumption. Only a read-only duplicate reaches the verified child.
+fn preview_stdin(batch: &SvgBatch) -> Result<OwnedHandle, String> {
+    use std::io::Seek;
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS};
+    let mut file = io(tempfile::tempfile())?;
+    io(file.write_all(batch.input()))?;
+    io(file.rewind())?;
+    let mut reader = HANDLE::default();
+    unsafe {
+        let process = GetCurrentProcess();
+        win(DuplicateHandle(
+            process,
+            HANDLE(file.as_raw_handle()),
+            process,
+            &mut reader,
+            FILE_GENERIC_READ.0,
+            true,
+            DUPLICATE_HANDLE_OPTIONS(0),
+        ))?;
+    }
+    Ok(handle(reader))
+}
+
 /// The production launch: {runtime, registryRead}, console-free, and the token
 /// (including the registry gate) verified while the process is still suspended.
+#[allow(clippy::too_many_arguments)]
 fn create_verified(
     exe: &Path,
     args: &[String],
@@ -2362,16 +2405,19 @@ fn create_verified(
     profile: &Profile,
     cap: &RuntimeCapability,
     observation: &Observer,
+    batch: Option<&SvgBatch>,
 ) -> Result<SuspendedLaunch, String> {
-    let suspended = create_suspended(
+    let suspended = create_suspended_capabilities(
         exe,
         args,
         cwd,
         home,
         profile,
-        cap,
+        &ProcessCapabilities::production(cap)?,
         ContainerPolicy::Lpac,
+        ConsoleMode::Detached,
         observation,
+        batch.map(preview_stdin).transpose()?,
     )?;
     verify_token(
         raw(&suspended.process.process),
@@ -2382,6 +2428,7 @@ fn create_verified(
     Ok(suspended)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn create_suspended(
     exe: &Path,
@@ -2403,6 +2450,7 @@ fn create_suspended(
         policy,
         ConsoleMode::Detached,
         observation,
+        None,
     )
 }
 
@@ -2417,6 +2465,7 @@ fn create_suspended_capabilities(
     policy: ContainerPolicy,
     console: ConsoleMode,
     observation: &Observer,
+    input: Option<OwnedHandle>,
 ) -> Result<SuspendedLaunch, String> {
     observation.enter(Phase::Command);
     let app = wide(exe)?;
@@ -2430,7 +2479,13 @@ fn create_suspended_capabilities(
     observation.enter(Phase::Environment);
     let env = environment(home)?;
     observation.enter(Phase::Pipes);
-    let (stdin_read, stdin_write) = pipe()?;
+    let (stdin_read, stdin_write) = match input {
+        Some(input) => (input, None),
+        None => {
+            let (read, write) = pipe()?;
+            (read, Some(write))
+        }
+    };
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     unsafe {
@@ -2447,6 +2502,7 @@ fn create_suspended_capabilities(
     }
     #[cfg(test)]
     let child_call_input = if observation.child_call_requested() {
+        let stdin_write = stdin_write.ok_or(UNAVAILABLE)?;
         unsafe {
             win(SetHandleInformation(
                 raw(&stdin_write),
@@ -2776,6 +2832,65 @@ async fn run_candidate_observed_until(
     observation: Observer,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<EngineOutput, String> {
+    run_request_until(
+        exe,
+        args,
+        cwd,
+        home,
+        read_root,
+        timeout,
+        limit,
+        trusted_probe,
+        observation,
+        deadline,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn render_svg_batch(
+    batch: SvgBatch,
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Option<Vec<String>>, String> {
+    let exe = read_root.join("engines/officecli/officecli.exe");
+    let batch = Arc::new(batch);
+    let output = run_request_until(
+        &exe,
+        &["mcp"],
+        cwd,
+        home,
+        read_root,
+        batch.timeout(timeout),
+        svg_batch::OUTPUT_LIMIT,
+        false,
+        Observer::default(),
+        deadline,
+        Some(batch.clone()),
+    )
+    .await?;
+    if output.timed_out {
+        return Err(RUN_TIMEOUT.into());
+    }
+    Ok(batch.pictures(&output))
+}
+#[allow(clippy::too_many_arguments)]
+async fn run_request_until(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    limit: usize,
+    trusted_probe: bool,
+    observation: Observer,
+    deadline: Option<tokio::time::Instant>,
+    batch: Option<Arc<SvgBatch>>,
+) -> Result<EngineOutput, String> {
     check_deadline(deadline)?;
     let observation = if trusted_probe {
         observation
@@ -2828,6 +2943,7 @@ async fn run_candidate_observed_until(
             &worker_cancelled,
             trusted_probe,
             &worker_observation,
+            batch.as_deref(),
         );
         if result.is_err() {
             worker_observation.failed();
@@ -2871,6 +2987,7 @@ fn run_blocking(
     cancelled: &AtomicBool,
     trusted_probe: bool,
     observation: &Observer,
+    batch: Option<&SvgBatch>,
 ) -> Result<EngineOutput, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err(CANCELLED.into());
@@ -2961,6 +3078,7 @@ fn run_blocking(
             limit,
             observation,
             cancelled,
+            batch,
         )?;
         #[cfg(test)]
         let mut launched = launched;
@@ -3050,7 +3168,7 @@ fn run_blocking(
         #[cfg(test)]
         pause_copyback(&cwd, CopybackPoint::Drained)?;
         was_cancelled |= cancelled.load(Ordering::Acquire);
-        if !timed_out && !was_cancelled && status == 0 {
+        if batch.is_none() && !timed_out && !was_cancelled && status == 0 {
             let outputs = files(&task.0, MAX_TASK_BYTES)?;
             observation.enter(Phase::Copyback);
             // Original cwd is never granted to the LPAC. Keep its directory handle
@@ -3738,23 +3856,6 @@ async fn ensure_ready(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<String, String> {
     check_deadline(deadline)?;
-    let root = runtime_root.to_path_buf();
-    let runtime = tokio::task::spawn_blocking(move || {
-        os_version()?;
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    check_deadline(deadline)?;
-    let ready = ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .get(&runtime.source)
-        == Some(&runtime.digest);
-    if ready {
-        return Ok(runtime.digest);
-    }
     let turn = PROBE_TURN.lock();
     let _turn = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, turn)
@@ -3762,29 +3863,12 @@ async fn ensure_ready(
             .map_err(|_| RUN_TIMEOUT.to_owned())?,
         None => turn.await,
     };
-    check_deadline(deadline)?;
-    // Another bootstrap/send may have completed all probes while we waited.
-    let root = runtime_root.to_path_buf();
-    let runtime = tokio::task::spawn_blocking(move || {
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    check_deadline(deadline)?;
-    if ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .get(&runtime.source)
-        == Some(&runtime.digest)
-    {
-        return Ok(runtime.digest);
-    }
     prove_runtime_locked(
         runtime_root,
         &runtime_root.join("engines/officecli/officecli.exe"),
         &mut Vec::new(),
         deadline,
+        true,
     )
     .await
 }
@@ -3819,7 +3903,7 @@ async fn prove_runtime(
     checks: &mut Vec<&'static str>,
 ) -> Result<String, String> {
     let _turn = PROBE_TURN.lock().await;
-    prove_runtime_locked(runtime_root, officecli, checks, None).await
+    prove_runtime_locked(runtime_root, officecli, checks, None, false).await
 }
 
 async fn prove_runtime_locked(
@@ -3827,22 +3911,31 @@ async fn prove_runtime_locked(
     officecli: &Path,
     checks: &mut Vec<&'static str>,
     deadline: Option<tokio::time::Instant>,
+    reuse_admission: bool,
 ) -> Result<String, String> {
     let mut trace = ProbeTrace::new();
     let result: Result<String, String> = async {
         check_deadline(deadline)?;
         let root = runtime_root.to_path_buf();
         let before = tokio::task::spawn_blocking(move || {
+            os_version()?;
             cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
         })
         .await
         .map_err(|_| UNAVAILABLE.to_owned())??;
         check_deadline(deadline)?;
-        ADMITTED
-            .get_or_init(Default::default)
-            .lock()
-            .map_err(|_| UNAVAILABLE)?
-            .remove(&before.source);
+        {
+            // PROBE_TURN covers both the admission lookup and the probes. The
+            // same fresh digest is the before-check if a cold proof is needed.
+            let mut proofs = ADMITTED
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|_| UNAVAILABLE)?;
+            if reuse_admission && proofs.get(&before.source) == Some(&before.digest) {
+                return Ok(before.digest);
+            }
+            proofs.remove(&before.source);
+        }
         probe_inner(runtime_root, officecli, checks, &mut trace, deadline).await?;
         check_deadline(deadline)?;
         trace.engine(ProbeStage::RuntimeAfter);

@@ -59,6 +59,13 @@ the current reply. The model can then update the same checklist. A preview can
 support review before delivery. If the Host saves a preview during run cleanup,
 the attachment can be opened and the checklist retains the last reported steps.
 
+During PPTX generation Windows and macOS show the number of slide previews
+actually saved for the current reply. A ready PPTX attachment from a completed
+document call is shown as delivered. When either receipt is present, the last
+model-reported checklist remains available in a disclosure. Reopening a completed
+reply with an unfinished checklist and a delivered PPTX shows the delivery
+receipt above those steps. Failed and stopped replies retain their final status.
+
 The Host saves optional per-message `taskProgress` presentation metadata through
 the existing atomic session store before publishing each `task_plan` event. The
 snapshot contains a fixed `startedAt` and bounded `steps`: at most twelve steps,

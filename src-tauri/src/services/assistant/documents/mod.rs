@@ -6,6 +6,8 @@ mod fix;
 pub(crate) mod math_preview;
 pub(crate) mod preview;
 pub mod runner;
+#[cfg(any(windows, test))]
+mod svg_batch;
 #[cfg(windows)]
 pub(crate) mod windows_sandbox;
 

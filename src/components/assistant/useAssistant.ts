@@ -135,6 +135,7 @@ const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
 
 /** Observed run timing and bounded tool outcomes, never estimated completion. */
 export interface AssistantRunProgressState {
+  pptxPreview?: { messageId: string; pages: number };
   runId: string;
   /** The saved reply's creation time, or when this view began following it. */
   startedAt: number;
@@ -180,6 +181,7 @@ const PROGRESS_EVENTS = new Set<AssistantEvent["type"]>([
   "retrying",
   "generation",
   "presentation_plan",
+  "presentation_preview",
   "attachment",
   "mcp_step",
   "skill_results",
@@ -784,6 +786,14 @@ export function useAssistant(enabled: boolean) {
         preparationClosed.current)
     )
       return;
+    if (
+      event.type === "presentation_preview" &&
+      (event.data.messageId !== progressMessageId.current ||
+        !Number.isSafeInteger(event.data.pages) ||
+        event.data.pages < 1 ||
+        event.data.pages > 1000)
+    )
+      return;
     setRunProgress((old) => {
       if (!old || old.runId !== event.runId) return old;
       let activities = old.activities;
@@ -808,6 +818,9 @@ export function useAssistant(enabled: boolean) {
       }
       return {
         ...old,
+        ...(event.type === "presentation_preview"
+          ? { pptxPreview: { ...event.data } }
+          : {}),
         preparing:
           event.type === "run_preparing"
             ? event.data.active

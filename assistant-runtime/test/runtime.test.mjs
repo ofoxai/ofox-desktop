@@ -4647,6 +4647,133 @@ test("partial text, reasoning and tool-call streams are never retried", async (t
   }
 });
 
+test("a terminated HTTP 200 reasoning stream identifies an interrupted response without replay", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => {
+      requests++;
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"choices":[{"index":0,"delta":{"reasoning_content":"partial thought"},"finish_reason":null}]}\n\n',
+              ),
+            );
+            setTimeout(() => controller.error(new TypeError("terminated")), 10);
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorKind, "network");
+  assert.equal(requests, 1);
+  const receipts = (await readFile(params.sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .filter((entry) => entry.customType === "ofox-desktop-request");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].data.httpStatus, 200);
+  assert.equal(receipts[0].data.status, "unknown");
+  assert.equal(receipts[0].data.estimatedCostUsd, null);
+});
+
+test("an HTTP 200 body that closes without a finish reason retains partial text and is not replayed", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () => {
+      requests++;
+      return new Response(
+        'data: {"choices":[{"index":0,"delta":{"content":"Partial answer"},"finish_reason":null}]}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorKind, "network");
+  assert.equal(requests, 1);
+  assert.equal(
+    events
+      .filter((event) => event.type === "text_delta")
+      .map((event) => event.data.delta)
+      .join(""),
+    "Partial answer",
+  );
+});
+
+for (const failure of ["incomplete JSON", "missing name and format"])
+  test(`a document call with ${failure} gets concise repair guidance without echoing partial code or executing it`, async (t) => {
+    const params = {
+      ...(await sandbox(t)),
+      documents: { formats: ["pptx"], python: true },
+    };
+    const partial = "UNFINISHED_SLIDE_CODE".repeat(600);
+    let requests = 0;
+    let retryBody;
+    const hostCalls = [];
+    const runtime = new AssistantRuntime({
+      hostCall: async (call) => {
+        hostCalls.push(call.name);
+        return {};
+      },
+      fetch: withPlanningOpening(async (_url, init) => {
+        if (requests++ > 0) {
+          retryBody = JSON.parse(init.body);
+          return stream("The deck could not be generated.");
+        }
+        const delta = {
+          role: "assistant",
+          tool_calls: [
+            {
+              index: 0,
+              id: "malformed",
+              type: "function",
+              function: {
+                name: "create_document",
+                arguments:
+                  failure === "incomplete JSON"
+                    ? '{"format":"pptx","content":{"kind":"python","code":"' +
+                      partial
+                    : JSON.stringify({
+                        content: { kind: "python", code: partial },
+                      }),
+              },
+            },
+          ],
+        };
+        return new Response(
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    });
+    t.after(() => runtime.close());
+    await runtime.run(params);
+    assert.equal(hostCalls.includes("create_document"), false);
+    const feedback = retryBody.messages.find(
+      (message) =>
+        message.role === "tool" && message.tool_call_id === "malformed",
+    );
+    assert.match(
+      feedback.content,
+      failure === "incomplete JSON"
+        ? /complete JSON object/
+        : /include name and format/i,
+    );
+    assert.doesNotMatch(JSON.stringify(retryBody), /UNFINISHED_SLIDE_CODE/);
+  });
+
 test("cancelling during retry wait stops immediately without another HTTP request", async (t) => {
   const params = await sandbox(t);
   let requests = 0,

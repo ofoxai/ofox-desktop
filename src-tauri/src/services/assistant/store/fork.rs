@@ -56,6 +56,10 @@ impl ForkStage {
     ) -> Result<SessionRecord, String> {
         let ids: HashSet<&str> = entries.iter().filter_map(|e| e["id"].as_str()).collect();
         let runs: HashSet<&str> = entries.iter().filter_map(|e| e["runId"].as_str()).collect();
+        // Resolve the stopped reply while the complete run is still present.
+        // After restricting the history to the fork, inherited runs cannot
+        // prove which reply was stopped.
+        super::super::projection::restore_cancelled_replies(&mut record);
         record.messages.retain(|m| {
             m.native_entry_id
                 .as_deref()
@@ -191,8 +195,8 @@ impl ForkStage {
         record.session.pinned_at = None;
         record.session.cleanup_warning = None;
         record.usage = json!({});
-        super::super::projection::merge_native(&mut record, &json!(entries), &[])?;
         record.inherited_usage = inherited_usage(&record, entries, &self.source)?;
+        super::super::projection::merge_native(&mut record, &json!(entries), &[])?;
         check_record(&record, &self.sid)?;
         write_record(&self.directory.join(SESSION_FILE), &record)?;
         if !fs::symlink_metadata(self.native_path())
@@ -410,6 +414,44 @@ mod tests {
             serde_json::to_value(&reopened.messages[1]).unwrap()["taskProgress"],
             progress
         );
+    }
+
+    #[test]
+    fn fork_before_a_later_stopped_steer_keeps_the_finished_reply() {
+        let (_temp, store, mut record, entries) = fixture();
+        record.messages[1].completed_at = Some(5);
+        record.operations[0].status = OperationStatus::Cancelled;
+        let steer = id();
+        record.messages.extend([
+            serde_json::from_value(json!({
+                "id":steer,"role":"user","content":"clarification","status":"completed",
+                "createdAt":6,"runId":steer,"nativeEntryId":"user2"
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "id":id(),"role":"assistant","content":"partial","status":"completed",
+                "createdAt":7,"completedAt":8,"runId":steer,"nativeEntryId":"answer2"
+            }))
+            .unwrap(),
+        ]);
+        record.operations.push(Operation {
+            id: steer.clone(),
+            run_id: steer,
+            status: OperationStatus::Cancelled,
+            media: None,
+            search_price: None,
+        });
+        let stage = store.stage_fork(&record.session.id).unwrap();
+        write_bytes(&stage.native_path(), b"native copy\n").unwrap();
+        let fork = stage
+            .publish(record, &entries, "before steer", || Ok(()))
+            .unwrap();
+        let reopened = store.load_record(&fork.session.id).unwrap();
+        assert_eq!(reopened.messages.len(), 2);
+        assert_eq!(reopened.messages[1].status, "completed");
+        // Old forks already persisted this same cancelled ledger with an
+        // inherited run receipt and must also reopen with a completed reply.
+        assert_eq!(reopened.operations[0].status, OperationStatus::Cancelled);
     }
 
     #[test]

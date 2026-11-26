@@ -2114,3 +2114,224 @@ of up to one runtime (bounded at 1 GiB) and extra sequential I/O. Its native
 memory, actual LPAC descriptor, integrity and final installed Win11 latency
 acceptance remain pending; reduced allocation alone does not certify faster
 PPT generation.
+
+## Windows PPT preview and reasoning history (2026-11-26)
+
+On the Windows 11 client, the first document call for the reported Transformer
+deck failed after 37 seconds when its Matplotlib code accessed `T.chart`.
+The second call ended in cancellation after 5 minutes 37 seconds. The saved
+session does not identify the engine stage active at cancellation. Its
+intermediate assistant entries contained distinct reasoning texts.
+
+The local changes expose the current chart palette, group adjacent saved
+reasoning-only entries, and reuse a single initial digest for document
+admission. Windows can request up to four slide pictures from one isolated
+OfficeCLI process. Existing decks and sessions require no migration.
+
+On Windows 11 build 26200, a locally compiled 1.5.3 release executable returned
+a visible answer to `hi` with DeepSeek V4.1 Flash 1017. The operation completed
+in 3.951 seconds. Native tests rendered two pages in one isolated OfficeCLI
+launch, matched both to separately rendered pages, and verified finite,
+read-only batch input. In a 10-page Transformer run after the app was already
+open, the first model tool call arrived 5.606 seconds after the user message
+was saved. The run completed in 20 minutes 27 seconds across eight document
+calls and produced two files with the same name. WPS Office opened the
+10-slide deck, including the cover and the final slide. A separate Ofox
+Search chat completed in 55 seconds and showed a final answer with two
+sources. Reopening the reported PPT conversation grouped four adjacent
+reasoning steps.
+
+The trace exposed a bare ampersand in an SVG label, two Python revisions
+missing the engine kind, and preview feedback that invited further work
+after delivery. A subsequent local runtime change handles these inputs and
+directs the model to finish after delivery. Its native tool regressions
+passed. On the same Windows client and model, a new process delivered the
+same 10-page request in 24 minutes 54 seconds from the send click. The
+message was admitted after 4 minutes 47 seconds. Two previews and one final
+render completed, producing one attachment. WPS Office 12.1.0.28043 opened
+it and displayed the cover, the Q/K/V slide and the closing slide.
+
+The Windows production bundle now removes TypeScript declaration files
+along with source maps. Its dependency tree on this client went from 11,577
+files to 6,566. Each engine launch still verifies its runtime and cache.
+In a new process the same request was admitted 44.7 seconds after clicking
+send. The Assistant tab had been open for 138 seconds, compared with 10
+seconds on the preceding run. From first opening Assistant to admission the
+observed times were about 3 minutes 3 seconds and 4 minutes 57 seconds
+respectively. These are single observations with background preparation.
+The third run completed in 15 minutes 38 seconds from the send click
+(14 minutes 52 seconds shown in the Assistant). The first document call
+returned all ten preview pages in 3 minutes 36 seconds. Python wrote the
+PPTX in about 31 seconds, after which the host checked the file and rendered
+the previews. The model revised the deck after the first preview reported
+15 warnings. The operation completed with one ready attachment. Using
+Save and Open in the desktop app opened the cover, the multi-head attention
+diagram on slide 7 and the final slide (10/10) in WPS. A new plain chat in
+the same build visibly answered `hi` within 5.5 seconds of the send click.
+
+The same Windows candidate completed the two-item Ofox Search request in
+1 minute 16 seconds. The conversation showed the final answer and source
+links despite individual page-fetch failures. Opening its generated
+Transformer deck in the file workspace showed a loading screen before
+both the cover and the second slide. The workspace rendered each page
+again with OfficeCLI and the raster worker, and discarded finished pages
+when the pane closed.
+
+The workspace now displays the saved generation image while a current,
+full-resolution page renders. Uploaded files and pages without a saved
+image still require the first render. Up to 12 pending or completed pages
+can be reused after the viewer rechecks the attachment version. Explicit
+reload requests a fresh render. The revised Windows package omits 585
+additional TypeScript source files from the two pinned provider SDKs,
+reducing the packaged dependency tree from 6,566 files to 5,981.
+
+On the same Windows machine, the revised executable opened the previously
+generated 10-slide Transformer deck. From clicking to the first readable
+frame over UU Remote, the cover took at most 0.92 seconds, slide 2 at most
+0.95 seconds, and reopening the cover at most 0.85 seconds. All three
+frames displayed the saved slide with the generation-preview label. The
+full-resolution cover replaced it 184–190 seconds after the first click,
+including background preparation and a simultaneous request for slide 2.
+After that, closing and reopening displayed the full-resolution cover
+within 1.6 seconds. The preceding executable showed only a spinner for
+at least 126 seconds on the cover and 32 seconds on slide 2 during an
+overlapping native build. Each measurement includes the remote connection.
+
+With the Assistant tab open for 138 seconds in each fresh process, the
+Windows session-to-admission interval was 43.829 seconds on the previous
+build and 0.107 seconds on the revised build. The latter already had its
+runtime staged by the preview test. This measures the wait left at send
+time. On the first attempt, the provider stream ended with `terminated`
+after HTTP 200 and partial reasoning, before the first document call.
+Billing coverage for that request was incomplete. A manual retry completed
+in 17 minutes 2 seconds from admission. Total time from the first session
+creation to the final answer, including the failure and time before retry,
+was 20 minutes 36 seconds. The two preview calls took 161 and 98 seconds,
+compared with 216 and 182 seconds on the previous run. The model supplied
+revised deck code for its final call, which took 116 seconds. WPS opened
+the delivered 10-slide file and displayed the cover, slide 7 and slide 10.
+
+During that retry, the session file contained one failed progress snapshot,
+while Windows UI Automation counted 5,708 failure buttons in the running
+app. The progress summary and the retry card were siblings with the same
+React key. Each redraw could leave the former summary in the transcript.
+The retry card now has its own stable key for the message. Regression tests
+for both a failed and a stopped planned turn reproduced five summaries after
+four keystrokes on the earlier renderer and kept one with the fix.
+Both regressions passed on Windows. Reopening the same failed answer in
+the locally compiled Windows executable showed one failure summary and a
+working retry button. Windows UI Automation still counted one summary when
+the next retry was streaming and had begun writing its response.
+
+That retry delivered a 475,443-byte PPTX with 10 slide XML files and 10 preview
+images in 16 minutes 55 seconds from admission. Three document calls took 107,
+107 and 202 seconds. Windows UI Automation saw one historical failure row in
+63 samples during the retry and zero in the completed answer. The completed
+answer still showed 2 of 5 steps because the last checklist sent by the model
+preceded delivery. The attachment and its previews were present.
+WPS opened this retry's file and displayed its cover and closing slide.
+
+The next Windows package retains the CommonJS entry points selected by its
+bundled Node and the associated licenses, and omits the bundler-only JavaScript
+mirrors of three pinned dependencies. On the test machine the packaged
+dependency tree went from 5,981 files (102.6 MiB) to 5,396 (101.8 MiB).
+In a Windows loopback test, a server returned HTTP 200 and closed the TCP
+connection after the client received 960 characters. The pinned Node runtime
+reported a network error and retained all 960 characters in the conversation.
+It issued one request and kept the HTTP 200 receipt with unknown billing.
+This test does not identify which connection ended the earlier live request.
+
+The final cold-start attempt before the generation changes showed the main
+window in 1.017 seconds. Its new PPT session waited 137.661 seconds before model
+admission, 226.363 seconds after process launch. One model response contained
+invalid document arguments, which did not run OfficeCLI or Python. The model
+submitted corrected code before the user stopped the attempt.
+
+The next revision starts the same Windows document proof during native startup,
+ahead of the Assistant tab. OpenCode's packaged desktop starts a sidecar
+discovery probe during its first-window idle period. Ofox still runs its own
+positive and negative document checks and waits for them before offering Python.
+Starting them earlier may reduce the visible wait when the user opens another
+tab first. Immediately requesting a PPT may still wait for the proof.
+
+DeepSeek Harness verifies the saved presentation and delivers that same file.
+Ofox now reuses the latest checked preview when the document recipe is unchanged.
+It permits a correction before delivery and refuses a third render after two
+successful previews of the same output. A ready PPTX receipt makes duplicate
+requests for its file return the existing attachment. This state lives in the
+current user reply. Renaming a delivered preview retires its receipt under the
+old name without reviving an older preview or blocking other file names.
+
+Malformed document arguments are still rejected before execution. The retry
+guidance now omits the unfinished code. After an HTTP 200, a reset or a stream
+that closes without a required finish reason preserves already received output
+and reports a network interruption. The client does not replay a response with
+partial output. Tests use local fixtures. A live provider interruption may still
+occur, and a successful test run cannot establish its upstream cause.
+
+One live Windows 11 run used the locally built Ofox Desktop 1.5.3 executable
+with SHA-256 `3cfc4151310b49505755cf297533131988ab6e58823d1cd4375b96c649687bfc`
+and DeepSeek V4.1 Flash 1017. The new process showed its main window in 1.000
+second. The request was admitted 2.975 seconds after Send, after roughly six
+minutes of startup and operator interaction. The document runtime had warmed
+by then, so this is not an immediate-send cold preparation measurement.
+
+The 10-slide request completed in 15 minutes 48 seconds from Send. The first
+render was rejected because slide 9 lacked a planned native chart. The next
+file contained both native charts and had eight automated findings. A revision
+reduced those findings to zero. Three renders took 135.495, 140.379 and 103.590
+seconds. The final call returned the checked preview as a single attachment in
+2.207 seconds and did not render again. Windows showed a 10-slide preview
+receipt live, 4/4 with the completed file and PPTX delivered when the earlier
+reply with a 2/5 model checklist was reopened. The generated images made the
+first two pages readable within 1.8 and 2.1 seconds over the remote session.
+Save and Open launched WPS, where the cover, chart on slide 9 and final slide
+were visible. The exported package contained 10 slides and two chart workbooks.
+
+The model made 13 chat requests estimated at USD 0.147054312, compared with 15
+estimated at USD 0.14359278 on the preceding completed retry. The completed
+generation was about 70 seconds faster from admission. This pair of runs does
+not show a cost reduction or establish repeatable latency. The model also made
+one valid JSON call that omitted both name and format, so it never reached
+the document engine. A follow-up sidecar change rejects this case with the same
+short diagnostic as invalid JSON and drops the rejected code from the next
+request. Its offline SDK regression passed. The live run used the build before
+this follow-up.
+
+A stopped presentation can end after a completed model tool call. Replaying
+its native history preserves the host's stopped reply and recovers older saved
+replies when the cancellation ledger identifies the reply that stopped.
+An inherited fork can contain only the earlier completed part of a cancelled
+run. Its cancellation ledger alone does not identify a stopped reply.
+
+A local TCP fixture on Windows 11 and macOS used the packaged Node 22.23.4
+runtime and no paid requests. After HTTP 200 the fixture ended the connection
+mid-response. Both runtimes retained the received text, redacted a split
+synthetic credential from reasoning, text and stored history, and reported a
+network error with unknown billing. Each sent one request until a manual retry,
+which completed. The earlier live request reported a provider-request error
+after HTTP 200. The gateway and upstream connection logs are needed to identify
+where that live response ended.
+
+The follow-up Windows 11 release candidate, executable SHA-256
+`0214b57d88380930828bf7c0763c2302724783a0338604e209c806671ee3d8e2`, booted in
+0.981 seconds. Its recovered historical retry finished in 12 minutes 51 seconds
+from the click and 10 minutes 18 seconds from admission. The plan reached 4/4,
+with one ready 10-slide attachment after two preview renders. Save and Open
+opened that file in WPS. The cover, attention heatmap and last slide were visible.
+The app preview showed a readable cover, the second slide, and the cover again
+on reopening within 1.2 seconds over remote control. Full-quality previews can
+still render in the background. These are single-run observations.
+
+The dual-platform session checks used 320 synthetic Claude Code transcripts.
+The in-app session list, analytics links and transcript reader worked after a
+region change and an application-level network failure. Temporarily removing a
+fixture produced a read error, and restoring it allowed Retry to load it. The
+Windows results apply to the portable release candidate.
+
+Region switching clears the OAuth slots for the current profile. The home
+override originally isolated files while still sharing the installed app's OS
+credential slots. With `CC_SWITCH_TEST_HOME` set, OFox's OS-backed credentials
+use a separate service derived from the test profile path. Use the same
+absolute path when checking credential persistence across restarts. The Tauri
+app-config directory override is configured separately from the test home.
