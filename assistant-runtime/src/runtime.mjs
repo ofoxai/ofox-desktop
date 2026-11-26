@@ -27,6 +27,8 @@ import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
 import { modelActivity } from "./model-activity.mjs";
 import { modelTransport } from "./model-transport.mjs";
+import { forwardModelStream } from "./model-closeout-stream.mjs";
+import { createStreamScrubber } from "./stream-secrets.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -142,7 +144,19 @@ function unbilled(message) {
 function markFailure(message, outcome) {
   if (message.stopReason !== "error") return message;
   if (outcome.status) message.errorStatus = outcome.status;
-  else if (outcome.network) {
+  else if (
+    outcome.responseStatus >= 200 &&
+    outcome.responseStatus < 300 &&
+    [
+      "terminated",
+      "Stream ended without finish_reason",
+      "Provider finish_reason: network_error",
+    ].includes(message.errorMessage)
+  ) {
+    // Node fetch can lose its SSE body after returning a successful response.
+    // The HTTP receipt remains intact and its billing outcome remains unknown.
+    message.errorKind = "network";
+  } else if (outcome.network) {
     message.errorKind = outcome.network.sent ? "network" : "not_sent";
     if (outcome.network.code) message.errorCode = outcome.network.code;
   }
@@ -274,10 +288,31 @@ async function modelRequest(input, init, outcome, options) {
 
 // A model message is conversation content; its failure text is a diagnostic.
 function safeMessage(message, secrets) {
-  const safe = scrubTaskPlanStructures(message, secrets);
-  return typeof safe?.errorMessage === "string"
-    ? { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) }
-    : safe;
+  let safe = scrubTaskPlanStructures(message, secrets);
+  if (typeof safe?.errorMessage === "string")
+    safe = { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) };
+  if (safe?.role !== "assistant" || !Array.isArray(safe.content)) return safe;
+  return {
+    ...safe,
+    content: safe.content.map((block) => {
+      if (
+        block.type !== "toolCall" ||
+        block.name !== "create_document" ||
+        (typeof block.argumentsError !== "string" &&
+          block.arguments?.name !== undefined &&
+          block.arguments?.format !== undefined)
+      )
+        return block;
+      // Keep rejected source code out of the tool call and validation
+      // feedback. An argument error blocks execution in the SDK.
+      return {
+        ...block,
+        arguments: {},
+        argumentsError:
+          "Send a complete JSON object. Include name and format. No document ran for this call. For a PPTX, use compact code with shared slide helpers and loops, or deliver an existing checked preview with fromPreview and no content.",
+      };
+    }),
+  };
 }
 
 // What a web_search result cost is known from its usage counts. It is unknown
@@ -2009,7 +2044,31 @@ export class AssistantRuntime {
         // Anthropic. OFox's gateway does not identify DeepSeek to Pi by URL.
         const deepSeekPlan =
           forceInitialPlan && target.id.startsWith("deepseek/");
-        const outcome = {};
+        let outcome = {};
+        let outcomeRecorded = false;
+        let recoveringCloseout = false;
+        let httpAttempts = 0;
+        const deliveredPptx = context.pptx;
+        const requestOwner = context.nativeParams ?? params;
+        const ownsCloseoutRequest = () =>
+          deliveredPptx.delivered === true &&
+          !context.runtimeFailure &&
+          !context.unknownOutcome &&
+          context.pptx === deliveredPptx &&
+          (context.nativeParams ?? params) === requestOwner &&
+          ![...context.liveInputs.values()].some((input) => !input.applied);
+        const closeoutCandidate =
+          target.api === "openai-completions" &&
+          !summaryRequest &&
+          !compactOnly &&
+          !closeoutTimeout &&
+          deliveredPptx.delivered;
+        const billingOwner = () =>
+          closeoutCandidate ? requestOwner : (context.nativeParams ?? params);
+        const fetchOnce = (input, init, attempt = outcome) => {
+          httpAttempts++;
+          return safeFetch(input, init, attempt);
+        };
         // An unknown cost never ends the task: it counts toward the user's
         // limit at the most it can have been, and the receipt stays unknown.
         const ceiling = (body) => ({
@@ -2017,10 +2076,8 @@ export class AssistantRuntime {
         });
         let sentBody;
         context.localRequests = (context.localRequests ?? 0) + 1;
-        const source = originalStream(
-          target,
-          scrubTaskPlanStructures(transcript, secrets),
-          {
+        const requestSource = () =>
+          originalStream(target, scrubTaskPlanStructures(transcript, secrets), {
             ...options,
             ...(textOnly ? { toolChoice: "none" } : {}),
             ...(forceInitialPlan
@@ -2056,6 +2113,16 @@ export class AssistantRuntime {
             maxRetries: 0,
             timeoutMs: closeoutTimeout ?? 900000,
             fetch: (input, init) => {
+              if (recoveringCloseout) {
+                context.abort.signal.throwIfAborted();
+                options?.signal?.throwIfAborted();
+                if (!ownsCloseoutRequest())
+                  throw new DOMException(
+                    "Closeout ownership changed",
+                    "AbortError",
+                  );
+                context.localTask?.beforeRequest();
+              }
               sentBody = init?.body;
               if (closeoutTimeout)
                 return safeFetch(
@@ -2072,10 +2139,10 @@ export class AssistantRuntime {
                   },
                   outcome,
                 );
-              return summaryRequest
-                ? safeFetch(input, init, outcome)
+              return summaryRequest || recoveringCloseout
+                ? fetchOnce(input, init, outcome)
                 : modelRequest(input, init, outcome, {
-                    fetch: safeFetch,
+                    fetch: fetchOnce,
                     signal: context.abort.signal,
                     sleep: this.retrySleep,
                     notify: (attempt) =>
@@ -2083,7 +2150,7 @@ export class AssistantRuntime {
                     record: (attempt) => {
                       const status = recordRequest(
                         manager,
-                        context.nativeParams ?? params,
+                        billingOwner(),
                         target,
                         "chat",
                         null,
@@ -2098,12 +2165,17 @@ export class AssistantRuntime {
             env: {},
             headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
             identity: { attribution: { name: "Ofox Desktop" } },
-          },
-        );
+          });
+        const nextAttempt = () => ({
+          source: requestSource(),
+          outcome,
+          body: () => sentBody,
+        });
+        const firstAttempt = nextAttempt();
         const filtered = new AssistantMessageEventStream();
         (async () => {
           try {
-            for await (const event of source) {
+            const push = (event) => {
               let safe = scrubTaskPlanStructures(event, secrets);
               // Pi keeps the failed message of the error event.
               if (safe.type === "error" && safe.error)
@@ -2112,22 +2184,87 @@ export class AssistantRuntime {
                   error: markFailure(safeMessage(safe.error, secrets), outcome),
                 };
               filtered.push(safe);
-            }
+            };
+            const recover = closeoutCandidate
+              ? async (failed, attempt) => {
+                  if (
+                    recoveringCloseout ||
+                    deliveredPptx.closeoutRecoveryUsed ||
+                    !ownsCloseoutRequest() ||
+                    context.runtimeFailure ||
+                    context.unknownOutcome ||
+                    context.abort.signal.aborted ||
+                    options?.signal?.aborted ||
+                    httpAttempts >= 3 ||
+                    !attempt.outcome.requested ||
+                    attempt.outcome.responseStatus !== 200 ||
+                    failed.stopReason !== "error" ||
+                    !Array.isArray(failed.content) ||
+                    failed.content.length !== 0 ||
+                    failed.errorMessage !==
+                      "failed to execute HTTP request to provider API"
+                  )
+                    return null;
+                  // The failure may already have been billed. Never infer zero
+                  // cost from the SDK's empty error-message usage defaults.
+                  recordRequest(
+                    manager,
+                    requestOwner,
+                    target,
+                    "chat",
+                    null,
+                    attempt.outcome,
+                    secrets,
+                  );
+                  outcomeRecorded = true;
+                  context.localTask?.addUsage(ceiling(attempt.body()));
+                  deliveredPptx.closeoutRecoveryUsed = true;
+                  const ready = () => {
+                    context.abort.signal.throwIfAborted();
+                    options?.signal?.throwIfAborted();
+                    if (!ownsCloseoutRequest()) return false;
+                    context.localTask?.beforeRequest();
+                    return true;
+                  };
+                  if (!ready()) return null;
+                  this.notify(context, "retrying", { attempt: 1 });
+                  await this.retrySleep(
+                    1000,
+                    AbortSignal.any(
+                      [context.abort.signal, options?.signal].filter(Boolean),
+                    ),
+                  );
+                  if (!ready()) return null;
+                  recoveringCloseout = true;
+                  outcome = {};
+                  outcomeRecorded = false;
+                  sentBody = undefined;
+                  context.localRequests++;
+                  // This SDK attempt uses one safeFetch, sharing the original
+                  // three-dispatch ceiling, without replaying any completed tool.
+                  return nextAttempt();
+                }
+              : undefined;
+            const sourceResult = await forwardModelStream(firstAttempt, {
+              push,
+              recover,
+            });
             const result = markFailure(
-              safeMessage(await source.result(), secrets),
+              safeMessage(sourceResult, secrets),
               outcome,
             );
-            recordRequest(
-              manager,
-              context.nativeParams ?? params,
-              target,
-              summaryRequest ? "compaction" : "chat",
-              result,
-              outcome,
-              secrets,
-            );
+            if (!outcomeRecorded)
+              recordRequest(
+                manager,
+                billingOwner(),
+                target,
+                summaryRequest ? "compaction" : "chat",
+                result,
+                outcome,
+                secrets,
+              );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
-            if (context.localTask) {
+            if (context.localTask && !outcomeRecorded) {
               const { usage } = result;
               const rates = params.model.cost;
               const counted =
@@ -2154,16 +2291,19 @@ export class AssistantRuntime {
               });
             filtered.end(result);
           } catch (error) {
-            recordRequest(
-              manager,
-              context.nativeParams ?? params,
-              target,
-              summaryRequest ? "compaction" : "chat",
-              null,
-              outcome,
-              secrets,
-            );
+            if (!outcomeRecorded)
+              recordRequest(
+                manager,
+                billingOwner(),
+                target,
+                summaryRequest ? "compaction" : "chat",
+                null,
+                outcome,
+                secrets,
+              );
             if (summaryRequest) recordSummaryUsage(target, null);
+            const stopped =
+              context.abort.signal.aborted || options?.signal?.aborted;
             const message = {
               role: "assistant",
               api: target.api,
@@ -2171,7 +2311,7 @@ export class AssistantRuntime {
               model: target.id,
               content: [],
               timestamp: Date.now(),
-              stopReason: "error",
+              stopReason: stopped ? "aborted" : "error",
               errorMessage: errorMessage(error, secrets),
               usage: {
                 input: 0,
@@ -2189,7 +2329,11 @@ export class AssistantRuntime {
               },
             };
             markFailure(message, outcome);
-            filtered.push({ type: "error", reason: "error", error: message });
+            filtered.push({
+              type: "error",
+              reason: message.stopReason,
+              error: message,
+            });
             filtered.end(message);
           }
         })();
@@ -2325,21 +2469,15 @@ export class AssistantRuntime {
       let pendingThinking = "";
       // Whether reasoning is under way and has said it started.
       let thinkingStarted = false;
-      // Hold back a tail long enough to hold any credential split across
-      // deltas until the rest of it arrives and it can be replaced whole.
+      // Hold only a potential credential prefix, so a short ordinary reply
+      // can be shown before its stream finishes. Host keys may change mid-run.
+      const scrubStream = createStreamScrubber(secrets);
       const flush = (type, final = false) => {
-        // A Host tool may accept a longer replacement key mid-run.
-        const retain = Math.max(
-          64,
-          ...secrets.map((secret) => secret.length - 1),
-        );
         const source = type === "text_delta" ? pendingText : pendingThinking;
-        const safe = scrubSecrets(source, secrets);
-        const length = final ? safe.length : Math.max(0, safe.length - retain);
-        if (length)
-          this.notify(context, type, { delta: safe.slice(0, length) });
-        if (type === "text_delta") pendingText = safe.slice(length);
-        else pendingThinking = safe.slice(length);
+        const { ready, pending } = scrubStream(source, final);
+        if (ready) this.notify(context, type, { delta: ready });
+        if (type === "text_delta") pendingText = pending;
+        else pendingThinking = pending;
       };
       // Reasoning stopped: the model began its text or a tool call, or the
       // block or message ended (Chat Completions ends its blocks only with
@@ -2438,7 +2576,9 @@ export class AssistantRuntime {
         if (event.type === "message_update") {
           const update = event.assistantMessageEvent;
           if (
-            ["text_delta", "thinking_delta", "toolcall_delta"].includes(update.type)
+            ["text_delta", "thinking_delta", "toolcall_delta"].includes(
+              update.type,
+            )
           )
             activity(update.delta);
           if (update.type === "text_delta") {
@@ -2728,6 +2868,35 @@ export class AssistantRuntime {
         result.errorCode = taskFailure;
         result.errorMessage = taskFailure;
         result.errorKind = context.localRequests ? undefined : "not_sent";
+      }
+      // A provider may end normally after reasoning without ever answering.
+      // Keep those receipts and thoughts, but do not silently call a plain
+      // chat/search run successful or replay potentially billed searches.
+      // Other tools can deliver files/cards without prose; leave their
+      // completion to the Host's existing artifact settlement.
+      const turnEntries = result.entries.filter(
+        (entry) => entry.active && entry.runId === params.runId,
+      );
+      if (
+        result.status === "completed" &&
+        !compactOnly &&
+        !localConfig &&
+        last?.runId === params.runId &&
+        last?.stopReason === "stop" &&
+        last.thinking?.trim() &&
+        !turnEntries.some(
+          (entry) => entry.role === "assistant" && entry.content?.trim(),
+        ) &&
+        turnEntries.every(
+          (entry) =>
+            entry.role !== "tool" ||
+            WEB_TOOLS.has(entry.toolName) ||
+            PLANNING_TOOLS.has(entry.toolName),
+        )
+      ) {
+        result.status = "error";
+        result.errorCode = "assistant_empty_response";
+        result.errorMessage = "assistant_empty_response";
       }
       const usage = session.getContextUsage();
       result.contextUsage = usage

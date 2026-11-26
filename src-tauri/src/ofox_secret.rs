@@ -43,9 +43,10 @@
 //! 跟"从未存过"语义混淆。所以 [`KeyringStore::save`] 拒绝空值；想清理时必须
 //! 调 [`SecretStore::clear`]。
 
-use std::sync::Mutex;
+use std::{borrow::Cow, path::Path, sync::Mutex};
 
 use keyring::Entry;
+use sha2::{Digest, Sha256};
 
 use crate::app_config::BindableTool;
 
@@ -145,15 +146,27 @@ pub trait SecretStore: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KeyringStore;
 
+fn keyring_service(slot: Slot, test_home: Option<&Path>) -> Cow<'static, str> {
+    let service = slot.service();
+    let Some(home) = test_home else {
+        return Cow::Borrowed(service);
+    };
+    // A native QA profile can switch regions and clear credentials, even in
+    // a release build. Keep its OS credentials separate from the normal app.
+    let profile = Sha256::digest(home.as_os_str().as_encoded_bytes());
+    Cow::Owned(format!("{service}.test.{profile:x}"))
+}
+
 impl KeyringStore {
     pub const fn new() -> Self {
         Self
     }
 
     fn entry(slot: Slot) -> Result<Entry, String> {
-        let service = slot.service();
+        let home = crate::config::home_override();
+        let service = keyring_service(slot, home.as_deref());
         let account = slot.account();
-        Entry::new(service, account).map_err(|e| {
+        Entry::new(&service, account).map_err(|e| {
             format!("keychain entry init failed (service={service}, account={account}): {e}")
         })
     }
@@ -399,6 +412,26 @@ mod file_store_tests {
     use super::*;
     use crate::app_config::AppType;
     use std::io::Write;
+
+    #[test]
+    fn native_test_profiles_use_disjoint_os_keyring_services() {
+        let profile = Path::new("native-qa-home-a");
+        let other = Path::new("native-qa-home-b");
+        for slot in [
+            Slot::AccessToken,
+            Slot::RefreshToken,
+            Slot::AssistantKey,
+            Slot::AssistantJournalKey,
+            api_key(AppType::Claude),
+        ] {
+            assert_eq!(keyring_service(slot, None), slot.service());
+            let isolated = keyring_service(slot, Some(profile));
+            assert_ne!(isolated, keyring_service(slot, None));
+            assert_ne!(isolated, keyring_service(slot, Some(other)));
+            assert_eq!(isolated, keyring_service(slot, Some(profile)));
+            assert!(!isolated.contains("native-qa-home-a"));
+        }
+    }
 
     /// 包一层，免得 `Slot::ApiKey { tool: ... }` 这个 struct literal 在断言里
     /// 被 rustfmt 展开成四行，读起来全是噪音。

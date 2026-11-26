@@ -32,15 +32,15 @@ Host text states image count (off/ceiling/exact): match `generated-image` plans;
 
 ## Preview, then deliver
 
-1. Send the code with `preview: true`. Nothing is delivered: you get a `previewId`, the issues and an overview image of the slides, each under its slide number.
-2. Look at the image and read the issues: clipped or overlapping text, empty areas, small text, a plot or figure out of place. Fix the code.
-3. Deliver under the same file name without `preview`, or use `fromPreview: "<previewId>"` without content for that exact preview. Preview twice per reply at most; the latest is delivered automatically if omitted.
+1. Send compact code with `preview: true`. Use helpers and shared loops. The result contains a `previewId`, findings and an overview.
+2. Inspect clipping, overlaps, legibility and figures. If usable, deliver with `fromPreview: "<previewId>"` under the same file name, without code.
+3. Combine fixes in one revision. Render at most twice per reply, then report remaining issues. The latest preview is delivered automatically if you finish without delivery.
 
 On Python error, fix the traceback line (at most 2 retries). After delivery, describe the file and remaining issues.
 
 ## Helpers
 
-Geometry uses inches; type uses pt. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.613`, `CW=11.893`, `TOP=1.7`, `BOTTOM=6.85`, `GAP=.3`. `T` has hex colours without `#` and body/title/data font roles. Readonly aliases: `T.card=T.tint`, `T.textMuted=T.faint`.
+Inches for geometry, pt for type. Canvas 13.333 × 7.5. `G`: `X=.72`, `R=12.613`, `CW=11.893`, `TOP=1.7`, `BOTTOM=6.85`, `GAP=.3`. `T` has hex colours without `#` and body/title/data font roles. Readonly aliases: `T.card=T.tint`, `T.textMuted=T.faint`. `T.chart` is the read-only palette. Matplotlib uses `color="#" + T.chart[i % len(T.chart)]`.
 
 - `new_deck(title="", footer="", style="navy", language="zh")`: returns `prs`; rejects unknown/disabled styles. Footer appears on content pages.
 - `source_deck()`: Host-authorized original snapshot; source mode rejects `new_deck`.

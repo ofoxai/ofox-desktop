@@ -946,6 +946,50 @@ describe("opening a search result", () => {
     expect(scrolled()).toEqual([]);
   });
 
+  it("forgets a failed search jump while the opening indicator is still visible", () => {
+    const assistant = {
+      selectedId: "a",
+      loading: true,
+      detail: null as AssistantSessionDetail | null,
+      select: vi.fn(),
+    };
+    const scroll = { current: document.createElement("div") };
+    const follow = { current: true };
+    const { result, rerender } = renderHook(
+      ({ transcriptReady }) =>
+        useConversationActions({
+          assistant: assistant as never,
+          sidebarCollapsed: false,
+          sidebar: { current: null },
+          scroll,
+          follow,
+          transcriptReady,
+          focusSoon: vi.fn(),
+          landOnSidebar: (entry) => entry,
+          composer: { current: null },
+          sidebarToggle: { current: null },
+          trashEntry: { current: null },
+          trashBack: { current: null },
+          emptyTrashButton: { current: null },
+        }),
+      { initialProps: { transcriptReady: false } },
+    );
+    act(() => result.current.openFromList("a", "a-1"));
+    assistant.loading = false;
+    rerender({ transcriptReady: false });
+
+    // The background refresh restores the conversation without a new search.
+    assistant.detail = store.a;
+    rerender({ transcriptReady: false });
+    const match = document.createElement("article");
+    match.dataset.messageId = "a-1";
+    scroll.current.append(match);
+    rerender({ transcriptReady: true });
+
+    expect(scrolled()).toEqual([]);
+    expect(follow.current).toBe(true);
+  });
+
   it("takes the marks away with the search", async () => {
     render(page());
     await screen.findByTitle(/^Trip plan/);

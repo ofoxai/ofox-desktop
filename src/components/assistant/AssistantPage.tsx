@@ -223,6 +223,10 @@ export function AssistantPage({
 function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
+  const opening = useLoadingFox(assistant.loading, {
+    size: "block",
+    label: t("assistant.loading"),
+  });
   const shell = useOptionalShell();
   // A wide window (see ShellLayout): no frame, roomier sizes, a wider
   // column, and the title only where the list does not show it.
@@ -507,6 +511,42 @@ function AssistantWorkspace() {
     newest && ["assistant", "media"].includes(newest.role)
       ? newest.id
       : undefined;
+  // Consecutive tool rounds often save several native replies containing only
+  // reasoning. Keep each native record and its actions inside the disclosure.
+  const transcriptGroups: AssistantMessage[][] = [];
+  let reasoningGroup: AssistantMessage[] | undefined;
+  for (const message of transcript) {
+    if (
+      message.role === "assistant" &&
+      message.runId &&
+      message.status === "completed" &&
+      message.reasoning?.trim() &&
+      !message.content.trim() &&
+      message.id !== latestReplyId &&
+      message.id !== liveMessage?.id &&
+      !versions.has(message.id) &&
+      !assistant.searchSkipped.has(message.id) &&
+      !assistant.searchLimited.has(message.id) &&
+      !message.errorCode &&
+      !message.taskProgress &&
+      !message.media &&
+      !message.presentationPlan &&
+      !message.mcpSteps?.length &&
+      !message.skillResults?.length &&
+      !message.generations?.length &&
+      !message.attachments?.length &&
+      !message.sources?.length
+    ) {
+      if (reasoningGroup?.[0].runId !== message.runId) {
+        reasoningGroup = [];
+        transcriptGroups.push(reasoningGroup);
+      }
+      reasoningGroup.push(message);
+    } else {
+      reasoningGroup = undefined;
+      transcriptGroups.push([message]);
+    }
+  }
   // A failed or stopped reply can be asked for again when its question is
   // still there to send: with its words, or with files that can be read.
   const retryable = (message: (typeof messages)[number]) => {
@@ -721,11 +761,15 @@ function AssistantWorkspace() {
     setUnseenBelow(false);
   }, [assistant.selectedId]);
   useEffect(() => {
+    // The retained loader can outlive the data read. Scroll only once the
+    // real transcript is mounted, including the loader's final transition.
+    if (opening.loading) return;
     const view = scroll.current;
     if (!view) return;
     if (follow.current) view.scrollTop = view.scrollHeight;
     else setUnseenBelow(true);
   }, [
+    opening.loading,
     assistant.stream,
     messages.length,
     assistant.localApprovals.length,
@@ -1183,6 +1227,7 @@ function AssistantWorkspace() {
     sidebar: sidebarHandle,
     scroll,
     follow,
+    transcriptReady: !opening.loading,
     focusSoon,
     landOnSidebar,
     composer,
@@ -1284,10 +1329,133 @@ function AssistantWorkspace() {
     </div>
   );
 
-  const opening = useLoadingFox(assistant.loading, {
-    size: "block",
-    label: t("assistant.loading"),
-  });
+  const renderMessage = (message: AssistantMessage) => {
+    const live = message.id === liveMessage?.id;
+    const turn = versions.get(message.id);
+    return (
+      <AssistantMessageView
+        onEnableLocal={
+          !assistant.localConfig && !settingsLocked && !assistant.run
+            ? () => void assistant.setLocalConfig(true)
+            : undefined
+        }
+        // The message that carries a switcher keeps its place
+        // when another version is shown, and the keyboard
+        // focus on the switcher with it.
+        key={turn ? `versions:${turn.group}` : message.id}
+        message={message}
+        taskProgress={
+          live || message.taskProgress?.steps.length ? (
+            <AssistantRunProgress
+              key={message.id}
+              startedAt={
+                message.taskProgress?.startedAt ??
+                (live ? assistant.runProgress?.startedAt : undefined) ??
+                message.createdAt
+              }
+              lastEventAt={
+                live ? assistant.runProgress?.lastEventAt : undefined
+              }
+              activities={live ? assistant.runProgress?.activities : undefined}
+              activity={live ? assistant.activity : null}
+              intent={live ? assistant.localIntent : null}
+              warning={live ? assistant.localWarning : null}
+              plan={
+                message.taskProgress?.steps ?? (live ? assistant.localPlan : [])
+              }
+              approvals={live ? assistant.localApprovals.length : 0}
+              retryAttempt={live ? assistant.retryAttempt : undefined}
+              thinking={live && assistant.thinking?.since != null}
+              replyStarted={Boolean(message.content)}
+              status={message.status}
+              completedAt={message.completedAt}
+              previewPages={
+                live &&
+                assistant.runProgress?.pptxPreview?.messageId === message.id
+                  ? assistant.runProgress.pptxPreview.pages
+                  : undefined
+              }
+              pptxDelivered={message.generations?.some(
+                (generation) =>
+                  generation.kind === "document" &&
+                  generation.params.format === "pptx" &&
+                  generation.status === "completed" &&
+                  message.attachments?.some(
+                    (file) =>
+                      file.origin === "generated" &&
+                      file.status === "ready" &&
+                      file.mimeType ===
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation" &&
+                      generation.outputs.includes(file.id),
+                  ),
+              )}
+              errorCode={message.errorCode}
+              mcpSteps={message.mcpSteps}
+              onFinish={focusComposer}
+            />
+          ) : undefined
+        }
+        retryAttempt={live ? assistant.retryAttempt : undefined}
+        activity={live ? assistant.activity : undefined}
+        thinking={live ? assistant.thinking : undefined}
+        immutable={Boolean(
+          message.runId &&
+          messages.some((item) => item.runId === message.runId && item.media),
+        )}
+        mediaBlock={
+          message.media?.kind === "video" ? (
+            videoBlock(message, live)
+          ) : message.media && session && bootstrap?.owner ? (
+            <MediaBlock
+              message={message}
+              sessionId={session.id}
+              owner={bootstrap.owner}
+              generation={bootstrap.authorityGeneration}
+              disabled={live || !writable}
+              onSave={(file) =>
+                live
+                  ? Promise.resolve(false)
+                  : assistantApi.saveMedia({
+                      sessionId: session.id,
+                      attachmentId: file.id,
+                      expectedOwner: bootstrap.owner!,
+                      expectedGeneration: bootstrap.authorityGeneration,
+                    })
+              }
+            />
+          ) : undefined
+        }
+        generations={generationCards(message, live)}
+        onOpenFile={openArtifact}
+        models={bootstrap?.models}
+        currentModelId={session?.modelId}
+        versions={live ? undefined : turn}
+        searchUnavailable={assistant.searchSkipped.has(message.id)}
+        searchLimited={assistant.searchLimited.get(message.id)}
+        onUseOfoxSearch={switchToOfoxSearch}
+        latest={message.id === latestReplyId}
+        highlight={live ? undefined : transcriptHighlight}
+        disabled={live || !writable}
+        onEdit={live ? noEdit : editMessage}
+        onEditingChange={live ? undefined : trackEdit}
+        onRegenerate={live ? noRegenerate : regenerateMessage}
+        onRetry={!live && retryable(message) ? retryReply : undefined}
+        onSwitchVersion={live ? undefined : switchVersion}
+        onFork={live ? undefined : forkMessage}
+        onSpeak={
+          !live && readAloud.available
+            ? (messageId, text) => void readAloud.speak(messageId, text)
+            : undefined
+        }
+        onQuote={
+          !live && !assistant.busy && !assistant.showTrash
+            ? quoteText
+            : undefined
+        }
+      />
+    );
+  };
+
   return (
     <div
       ref={workspace}
@@ -1739,148 +1907,24 @@ function AssistantWorkspace() {
                         wide ? column : "max-w-[760px]",
                       )}
                     >
-                      {transcript.map((message) => {
-                        const live = message.id === liveMessage?.id;
-                        const turn = versions.get(message.id);
-                        return (
-                          <AssistantMessageView
-                            onEnableLocal={
-                              !assistant.localConfig &&
-                              !settingsLocked &&
-                              !assistant.run
-                                ? () => void assistant.setLocalConfig(true)
-                                : undefined
-                            }
-                            // The message that carries a switcher keeps its place
-                            // when another version is shown, and the keyboard
-                            // focus on the switcher with it.
-                            key={turn ? `versions:${turn.group}` : message.id}
-                            message={message}
-                            taskProgress={
-                              live || message.taskProgress?.steps.length ? (
-                                <AssistantRunProgress
-                                  key={message.id}
-                                  startedAt={
-                                    message.taskProgress?.startedAt ??
-                                    (live
-                                      ? assistant.runProgress?.startedAt
-                                      : undefined) ??
-                                    message.createdAt
-                                  }
-                                  lastEventAt={
-                                    live
-                                      ? assistant.runProgress?.lastEventAt
-                                      : undefined
-                                  }
-                                  activities={
-                                    live
-                                      ? assistant.runProgress?.activities
-                                      : undefined
-                                  }
-                                  activity={live ? assistant.activity : null}
-                                  intent={live ? assistant.localIntent : null}
-                                  warning={live ? assistant.localWarning : null}
-                                  plan={
-                                    message.taskProgress?.steps ??
-                                    (live ? assistant.localPlan : [])
-                                  }
-                                  approvals={
-                                    live ? assistant.localApprovals.length : 0
-                                  }
-                                  retryAttempt={
-                                    live ? assistant.retryAttempt : undefined
-                                  }
-                                  thinking={
-                                    live && assistant.thinking?.since != null
-                                  }
-                                  replyStarted={Boolean(message.content)}
-                                  status={message.status}
-                                  completedAt={message.completedAt}
-                                  errorCode={message.errorCode}
-                                  mcpSteps={message.mcpSteps}
-                                  onFinish={focusComposer}
-                                />
-                              ) : undefined
-                            }
-                            retryAttempt={
-                              live ? assistant.retryAttempt : undefined
-                            }
-                            activity={live ? assistant.activity : undefined}
-                            thinking={live ? assistant.thinking : undefined}
-                            immutable={Boolean(
-                              message.runId &&
-                              messages.some(
-                                (item) =>
-                                  item.runId === message.runId && item.media,
-                              ),
-                            )}
-                            mediaBlock={
-                              message.media?.kind === "video" ? (
-                                videoBlock(message, live)
-                              ) : message.media &&
-                                session &&
-                                bootstrap?.owner ? (
-                                <MediaBlock
-                                  message={message}
-                                  sessionId={session.id}
-                                  owner={bootstrap.owner}
-                                  generation={bootstrap.authorityGeneration}
-                                  disabled={live || !writable}
-                                  onSave={(file) =>
-                                    live
-                                      ? Promise.resolve(false)
-                                      : assistantApi.saveMedia({
-                                          sessionId: session.id,
-                                          attachmentId: file.id,
-                                          expectedOwner: bootstrap.owner!,
-                                          expectedGeneration:
-                                            bootstrap.authorityGeneration,
-                                        })
-                                  }
-                                />
-                              ) : undefined
-                            }
-                            generations={generationCards(message, live)}
-                            onOpenFile={openArtifact}
-                            models={bootstrap?.models}
-                            currentModelId={session?.modelId}
-                            versions={live ? undefined : turn}
-                            searchUnavailable={assistant.searchSkipped.has(
-                              message.id,
-                            )}
-                            searchLimited={assistant.searchLimited.get(
-                              message.id,
-                            )}
-                            onUseOfoxSearch={switchToOfoxSearch}
-                            latest={message.id === latestReplyId}
-                            highlight={live ? undefined : transcriptHighlight}
-                            disabled={live || !writable}
-                            onEdit={live ? noEdit : editMessage}
-                            onEditingChange={live ? undefined : trackEdit}
-                            onRegenerate={
-                              live ? noRegenerate : regenerateMessage
-                            }
-                            onRetry={
-                              !live && retryable(message)
-                                ? retryReply
-                                : undefined
-                            }
-                            onSwitchVersion={live ? undefined : switchVersion}
-                            onFork={live ? undefined : forkMessage}
-                            onSpeak={
-                              !live && readAloud.available
-                                ? (messageId, text) =>
-                                    void readAloud.speak(messageId, text)
-                                : undefined
-                            }
-                            onQuote={
-                              !live && !assistant.busy && !assistant.showTrash
-                                ? quoteText
-                                : undefined
-                            }
-                          />
-                        );
-                      })}
+                      {transcriptGroups.map((group) =>
+                        group.length === 1 ? (
+                          renderMessage(group[0])
+                        ) : (
+                          <details
+                            key={`reasoning:${group[0].id}`}
+                            data-reasoning-group
+                            className="my-2 rounded-ctl bg-card-2 px-3 py-2"
+                          >
+                            <summary className="cursor-pointer text-ctl text-ink-ctl">
+                              {t("assistant.reasoningSteps", {
+                                count: group.length,
+                              })}
+                            </summary>
+                            {group.map(renderMessage)}
+                          </details>
+                        ),
+                      )}
                       {assistant.localApprovals.map((approval) => (
                         <LocalApprovalCard
                           key={approval.approvalId}

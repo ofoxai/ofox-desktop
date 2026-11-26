@@ -72,6 +72,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -
 `.github/workflows/windows-probe.yml` 已使用相同后端入口。代码推送后，Windows
 workflow 将构建两个探针并上传验证日志；全量前端检查继续由主 CI 执行。
 
+探针上传后按当前提交的精确名称分别下载。刚完成的制品可能暂时无法被读取，
+每件下载失败时会等待 5 秒后重试一次。两件制品都必须成功下载，并与本次编译的
+原始 exe 做 SHA-256 对照；下载重试、字节校验或后续原生检查失败仍会阻断门禁。
+
 ### 文档引擎开发诊断
 
 普通 Windows 主机可在已登录用户的非提权 PowerShell 中单独运行功能前置。先在仓库根目录
@@ -116,6 +120,17 @@ Cargo 两个输出流只在运行器内存中解析。CDB 在本机核对真实 
 不运行全 sidecar、release probes、安装包或付费模型。默认 Windows Host pipeline
 e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能代替完整 Windows Probe、
 发布同 SHA 门禁、安装版 UI 或 Windows 10/11 客户端验收。
+
+手动触发时可选择 `copyback_only`，单独执行未变化输入的原生回写回归。它使用
+临时文件和真实 LPAC 子进程，检查未变化文件的修改时间保留、变化及新增输出、
+删除输入不传播到宿主、私有 home 不回写。这个定向结果不替代完整门禁。
+
+固定文档引擎验收报告额外保留 `engineTimings`（每次引擎至多 128 条闭集阶段名和
+毫秒数）与 `fixedProbeElapsedMs`（包括前后运行时核验的完整固定夹具耗时）。
+该定向工作流以生产 release 优化构建验收器；debug 构建的散列时间不能代表安装版。
+普通运行仅在 `OFOX_DOCUMENT_ENGINE_TIMINGS=1` 时将同样的数值投影保留在已有
+有界内存收据中；不写同步日志，不增加探针 Token 查询，也不放宽运行时哈希、
+ACL、LPAC、Job、输出检查或取消边界。固定夹具时间不能当作完整 PPT 生成时间。
 
 独立的 `Document Engine Child Call Diagnostic` 在 Server 2022 上只观测检查点 7
 的固定子进程请求。改动 `.github/workflows/document-child-call.yml` 并推到

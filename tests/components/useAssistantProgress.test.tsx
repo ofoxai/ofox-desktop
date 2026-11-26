@@ -1097,10 +1097,156 @@ describe("observed assistant progress", () => {
       lastEventAt: now,
       activities: [],
     });
+    const preparation = {
+      stage: "documents",
+      active: true,
+      owner: identity.owner,
+      generation: identity.authorityGeneration,
+    };
+    emit("run_preparing" as AssistantEvent["type"], preparation, {
+      ...request,
+      operationId: "old-operation",
+    });
+    emit(
+      "run_preparing" as AssistantEvent["type"],
+      { ...preparation, owner: "another-owner" },
+      request,
+    );
+    expect(hook.result.current.activity).toBeNull();
+    emit("run_preparing" as AssistantEvent["type"], preparation, request);
+    expect(hook.result.current.activity).toBe("preparingDocuments");
+    expect(hook.result.current.runProgress?.activities).toEqual([]);
     now += 500;
     emit("run_start", { messageId: "reply", webSearch: false }, request);
     expect(hook.result.current.runProgress?.startedAt).toBe(10_000);
     expect(hook.result.current.runProgress?.lastEventAt).toBe(now);
+    expect(hook.result.current.activity).toBeNull();
+    emit("run_preparing" as AssistantEvent["type"], preparation, request);
+    expect(hook.result.current.activity).toBeNull();
+    await act(async () => {
+      finish();
+      await sending;
+    });
+  });
+
+  it.each(["no stage", "still preparing", "ready", "started", "completed"])(
+    "restores a pending send after navigation when it is %s",
+    async (stage) => {
+      const hook = await open(null);
+      let finish!: () => void;
+      mocks.send.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      act(() => hook.result.current.setDraft("Make a presentation"));
+      const began = now;
+      let sending!: Promise<boolean>;
+      act(() => {
+        sending = hook.result.current.send();
+      });
+      await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+      const request = mocks.send.mock.calls[0][0];
+      act(() => hook.result.current.select(null));
+      now += 60_000;
+      const preparation = {
+        stage: "documents",
+        active: true,
+        owner: identity.owner,
+        generation: identity.authorityGeneration,
+      };
+      if (stage !== "no stage") emit("run_preparing", preparation, request);
+      if (stage === "ready")
+        emit("run_preparing", { ...preparation, active: false }, request);
+      if (stage === "started") {
+        current.session.activeRun = {
+          runId: request.runId,
+          operationId: request.operationId,
+        };
+        current.messages = [
+          {
+            id: "reply",
+            role: "assistant",
+            content: "First visible answer",
+            status: "streaming",
+            createdAt: began,
+            runId: request.runId,
+          },
+        ];
+        emit("run_start", { messageId: "reply", webSearch: false }, request);
+      }
+      if (stage === "completed") {
+        current.messages = [
+          {
+            id: "reply",
+            role: "assistant",
+            content: "Saved answer",
+            status: "completed",
+            createdAt: began,
+            runId: request.runId,
+          },
+        ];
+        emit("run_end", { status: "completed", stopped: false }, request);
+      }
+      if (stage === "ready" || stage === "started")
+        emit("run_preparing", preparation, request);
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() => expect(hook.result.current.loading).toBe(false));
+      if (stage === "completed") {
+        expect(hook.result.current.run).toBeNull();
+        expect(hook.result.current.stream).toBeNull();
+        expect(hook.result.current.detail?.messages[0].content).toBe(
+          "Saved answer",
+        );
+      } else {
+        expect(hook.result.current.runProgress?.startedAt).toBe(began);
+        expect(hook.result.current.stream?.status).toBe("streaming");
+      }
+      if (stage === "started")
+        expect(hook.result.current.stream?.content).toBe(
+          "First visible answer",
+        );
+      if (stage === "no stage")
+        expect(hook.result.current.runProgress?.lastEventAt).toBe(began);
+      expect(hook.result.current.activity).toBe(
+        stage === "still preparing" ? "preparingDocuments" : null,
+      );
+      await act(async () => {
+        finish();
+        await sending;
+      });
+    },
+  );
+
+  it("clears document preparation on stop and rejects a late preparation event", async () => {
+    const hook = await open(null);
+    let finish!: () => void;
+    mocks.send.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    act(() => hook.result.current.setDraft("Make a presentation"));
+    let sending!: Promise<boolean>;
+    act(() => {
+      sending = hook.result.current.send();
+    });
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    const request = mocks.send.mock.calls[0][0];
+    const preparation = {
+      stage: "documents",
+      active: true,
+      owner: identity.owner,
+      generation: identity.authorityGeneration,
+    };
+    emit("run_preparing", preparation, request);
+    expect(hook.result.current.activity).toBe("preparingDocuments");
+    await act(async () => hook.result.current.stop());
+    expect(hook.result.current.activity).toBeNull();
+    emit("run_preparing", preparation, request);
+    expect(hook.result.current.activity).toBeNull();
     await act(async () => {
       finish();
       await sending;

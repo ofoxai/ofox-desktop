@@ -157,12 +157,40 @@ jobs:
       # Resolve each expected artifact by name: a just-finalized artifact can be
       # absent from the bulk listing, and v8 flattens a one-artifact download.
       - name: Download ChatGPT probe with release artifact action
+        id: download-chatgpt
+        continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           name: verify_chatgpt_install-${{ github.sha }}
           path: ${{ runner.temp }}/probe-artifact-roundtrip/verify_chatgpt_install-${{ github.sha }}
 
       - name: Download lifecycle probe with release artifact action
+        id: download-lifecycle
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: verify_tool_lifecycle-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-artifact-roundtrip/verify_tool_lifecycle-${{ github.sha }}
+
+      # Finalized uploads can briefly be absent from the artifact service's
+      # read index. Retry each exact named download once; never skip its
+      # digest validation or the source-byte roundtrip verification below.
+      - name: Wait before retrying probe downloads
+        if: steps.download-chatgpt.outcome == 'failure' || steps.download-lifecycle.outcome == 'failure'
+        shell: pwsh
+        run: Start-Sleep -Seconds 5
+
+      - name: Retry ChatGPT probe download
+        id: retry-chatgpt
+        if: steps.download-chatgpt.outcome == 'failure'
+        uses: actions/download-artifact@v8
+        with:
+          name: verify_chatgpt_install-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-artifact-roundtrip/verify_chatgpt_install-${{ github.sha }}
+
+      - name: Retry lifecycle probe download
+        id: retry-lifecycle
+        if: steps.download-lifecycle.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: verify_tool_lifecycle-${{ github.sha }}
@@ -170,8 +198,19 @@ jobs:
 
       - name: Verify downloaded probe artifacts
         shell: pwsh
+        env:
+          CHATGPT_DOWNLOAD: ${{ steps.download-chatgpt.outcome }}
+          CHATGPT_RETRY: ${{ steps.retry-chatgpt.outcome }}
+          LIFECYCLE_DOWNLOAD: ${{ steps.download-lifecycle.outcome }}
+          LIFECYCLE_RETRY: ${{ steps.retry-lifecycle.outcome }}
         run: |
           $ErrorActionPreference = "Stop"
+          if ($env:CHATGPT_DOWNLOAD -ne "success" -and $env:CHATGPT_RETRY -ne "success") {
+            throw "The ChatGPT probe download did not succeed"
+          }
+          if ($env:LIFECYCLE_DOWNLOAD -ne "success" -and $env:LIFECYCLE_RETRY -ne "success") {
+            throw "The lifecycle probe download did not succeed"
+          }
           $roundtripRoot = Join-Path $env:RUNNER_TEMP "probe-artifact-roundtrip"
           $downloadedDirectories = @(Get-ChildItem -LiteralPath $roundtripRoot -Directory)
           if ($downloadedDirectories.Count -ne 2) {

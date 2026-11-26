@@ -34,7 +34,7 @@ pub const AGENT_DIR_VARS: &[&str] = &[
 ];
 
 /// 读取 `CC_SWITCH_TEST_HOME` 显式覆盖；空白视为未设置。
-fn home_override() -> Option<PathBuf> {
+pub(crate) fn home_override() -> Option<PathBuf> {
     let home = std::env::var("CC_SWITCH_TEST_HOME").ok()?;
     let trimmed = home.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))

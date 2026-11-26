@@ -426,10 +426,16 @@ pub(super) fn merge_native(
                 m.branch_from = follows;
             }
             m.reasoning = thinking;
-            // A tool or transport failure can follow the last native model
-            // entry. Replaying history must not erase that saved outcome.
+            // A tool failure or user cancellation can follow the last model
+            // entry (for example, a successful call that was still rendering).
             m.status = if m.error_code.is_some() {
                 "error"
+            } else if role == "assistant"
+                && final_message
+                && m.completed_at.is_some()
+                && m.status == "stopped"
+            {
+                "stopped"
             } else {
                 status
             }
@@ -511,6 +517,7 @@ pub(super) fn merge_native(
         }
     }
     record.messages.sort_by_key(|m| m.created_at);
+    restore_cancelled_replies(record);
     recount_usage(record, entries);
     count_reply_usage(record, entries);
     scrub_secrets_in(&mut record.usage, secrets);
@@ -520,6 +527,81 @@ pub(super) fn merge_native(
         }
     }
     Ok(())
+}
+
+/// Older builds could overwrite a stopped reply with the last completed
+/// model step. The operation ledger still holds the original cancellation.
+pub(super) fn restore_cancelled_replies(record: &mut SessionRecord) {
+    if !record.operations.iter().any(|operation| {
+        operation.status == OperationStatus::Cancelled && operation.media.is_none()
+    }) {
+        return;
+    }
+    let live_inputs: HashSet<&str> = record
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let run = message.run_id.as_deref()?;
+            (message.role == "user" && message.id == run).then_some(run)
+        })
+        .collect();
+    let mut root = None;
+    let mut cancelled = HashMap::new();
+    let inherited: HashSet<&str> = record
+        .inherited_usage
+        .iter()
+        .map(|usage| usage.run_id.as_str())
+        .collect();
+    for operation in &record.operations {
+        let run = operation.run_id.as_str();
+        if operation.id != run || !live_inputs.contains(run) {
+            root = Some(run);
+        }
+        // A fork may only hold the part that finished before the stop.
+        if operation.status == OperationStatus::Cancelled
+            && operation.media.is_none()
+            && !inherited.contains(run)
+        {
+            cancelled.insert(run, root.unwrap_or(run));
+        }
+    }
+    // On a stop the ledger also cancelled earlier live replies. A steer can
+    // overtake a queued follow-up, so use the reply's finish time and leave a
+    // tie alone when the stored history does not identify which reply stopped.
+    let mut stopped = HashSet::new();
+    let mut last: HashMap<&str, (i64, Option<usize>)> = HashMap::new();
+    for (index, message) in record.messages.iter().enumerate() {
+        let (Some(at), Some(group)) = (
+            message.completed_at,
+            message.run_id.as_deref().and_then(|run| cancelled.get(run)),
+        ) else {
+            continue;
+        };
+        if message.role != "assistant" {
+            continue;
+        }
+        if message.status == "stopped" {
+            stopped.insert(*group);
+        }
+        let entry = last.entry(group).or_insert((at, Some(index)));
+        if at > entry.0 {
+            *entry = (at, Some(index));
+        } else if at == entry.0 && entry.1 != Some(index) {
+            entry.1 = None;
+        }
+    }
+    for (group, (_, index)) in last {
+        if stopped.contains(group) {
+            continue;
+        }
+        let Some(index) = index else {
+            continue;
+        };
+        let message = &mut record.messages[index];
+        if message.status == "completed" && message.error_code.is_none() {
+            message.status = "stopped".into();
+        }
+    }
 }
 
 /// Show the messages native history does not hold with the version they

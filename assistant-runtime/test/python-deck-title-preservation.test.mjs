@@ -19,7 +19,12 @@ for style in ["navy", "blue-professional", "cartesian", "course-module", "produc
     expected_muted = theme["colors"]["textMuted"].lstrip("#") if theme else "98A2AE"
     assert T.card == T.tint == expected_card
     assert T.textMuted == T.faint == expected_muted
-    for alias in ["card", "textMuted"]:
+    expected_chart = theme["colors"]["chart"] if theme else [T.primary, T.accent, T.muted]
+    assert list(T.chart) == [color.lstrip("#") for color in expected_chart]
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], color="#" + T.chart[1 % len(T.chart)])
+    plt.close(fig)
+    for alias in ["card", "textMuted", "chart"]:
         try:
             setattr(T, alias, "000000")
             raise AssertionError("alias accepted a write")

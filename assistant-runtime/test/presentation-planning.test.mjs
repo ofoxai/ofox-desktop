@@ -1393,7 +1393,13 @@ test("a preview's declared fallback survives fromPreview delivery without leakin
           }
         : {
             status: "completed",
-            file: { id: "deck", name: "deck.pptx", slides: 3 },
+            file: {
+              id: args.name,
+              name: args.name,
+              slides: 3,
+              mimeType:
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
             issues: [],
           },
   });
@@ -1419,7 +1425,8 @@ test("a preview's declared fallback survives fromPreview delivery without leakin
   assert.match(delivered.content[0].text, /Page 2.*native-summary/);
   const complete = await f
     .get("create_document")
-    .execute({ ...args, content: deck() });
+    .execute({ ...args, name: "second.pptx", content: deck() });
+  assert.equal(complete.details.file.name, "second.pptx");
   assert.equal(complete.details.presentationFallbacks, undefined);
 });
 test("PPT image calls carry plan scope but cannot grant themselves money", async () => {

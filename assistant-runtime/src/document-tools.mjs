@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Type } from "typebox";
@@ -40,6 +41,9 @@ const MAX_PYTHON_CHARACTERS = 200_000;
 // The most slides one overview image shows: a taller sheet is downscaled
 // beyond reading, or refused by a provider.
 const OVERVIEW_SLIDES = 24;
+const PPTX_RENDER_LIMIT = 2;
+const PPTX_MIME =
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const PREVIEWS = { ".png": thumbnailFromPng, ".svg": thumbnailFromSvg };
 
 // The formats a user names, in the words they use; each has its skill.
@@ -89,7 +93,7 @@ function guidelines(
         ? 'For a pptx, send the Python deck code ({"kind":"python","code":"…"}) or the deck object the skill describes; do not write slide coordinates yourself.'
         : "For a pptx, send the deck object the skill describes; do not write slide coordinates yourself."),
     python &&
-      'Send a pptx with preview: true first: look at the overview and the issues, fix what is wrong, then deliver under the same file name by calling again without preview (the code may change) or with fromPreview: "<previewId>" and no content. If you end the reply without delivering, the latest preview is delivered automatically.',
+      'Send a PPTX with preview: true and inspect the result. Deliver those checked bytes under the same file name with fromPreview: "<previewId>" and no content. Combine corrections for concrete defects in one revision. Use shared helpers and loops to keep Python compact. If you end the reply without delivering, the latest preview is delivered automatically.',
     "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
     "Write explanations, status updates and completion summaries in the user's language. Keep tool retries concise. An automated count of zero findings does not verify visual quality, formulas, interactions or editing; state what was actually checked and what remains unverified.",
     formats.includes("pptx") &&
@@ -127,13 +131,34 @@ function description(formats, python, planned = false) {
 const isObject = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
+// Same normalization as the Host's file_name for PPTX. Receipts are keyed
+// by the output file name, so independently named decks remain independent.
+function pptxName(raw) {
+  const name = raw
+    .split(/[\\/]/)
+    .at(-1)
+    .replace(
+      /[\p{Cc}<>:"|?*\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/gu,
+      "",
+    )
+    .replace(/^[.\p{White_Space}]+|\p{White_Space}+$/gu, "");
+  const extension = /^(.*)\.[a-z0-9]{1,5}$/is.exec(name);
+  const stem = extension?.[1].trim() ? extension[1] : name;
+  return (
+    Array.from(stem)
+      .slice(0, 115)
+      .join("")
+      .replace(/[.\p{White_Space}]+$/gu, "") || "document"
+  );
+}
+
 // A pptx's Python deck code, as the host reads it: the object
 // {"kind":"python","code":"…"}, Pi's list of one around it (Pi wraps an
 // object no schema variant matched, such as code over the length limit), or
 // its JSON text. Returns what the host should be sent, which is the code as
 // it came, or undefined when the content is not Python; the host checks the
 // code and its size.
-function pythonContent(content) {
+function pythonContent(content, pythonOffered) {
   let given = content;
   if (typeof given === "string") {
     try {
@@ -144,7 +169,17 @@ function pythonContent(content) {
   }
   const candidate =
     Array.isArray(given) && given.length === 1 ? given[0] : given;
-  if (!isObject(candidate) || candidate.kind !== "python") return undefined;
+  if (!isObject(candidate)) return undefined;
+  // Some providers omit the discriminator on a revision. Pi may have
+  // coerced that object to a one-element OfficeCLI batch.
+  if (
+    pythonOffered &&
+    Object.keys(candidate).length === 1 &&
+    Object.hasOwn(candidate, "code") &&
+    typeof candidate.code === "string"
+  )
+    return { kind: "python", code: candidate.code };
+  if (candidate.kind !== "python") return undefined;
   return typeof content === "string" ? content : candidate;
 }
 
@@ -261,7 +296,9 @@ function describe(result, format) {
         ? "HTML was saved; browser rendering and interactions were not verified. Do not claim buttons, keyboard behavior or layout were tested without actual browser evidence."
         : "Saving or compiling the file does not certify its visual appearance or content accuracy.",
     ...issues.map(issueLine),
-    "Do not repeat the file contents; tell the user what the file contains.",
+    format === "pptx"
+      ? "This file is already delivered. Summarize it and disclose any remaining findings in the final reply. Do not repeat the file contents. Create another version only if the user requests one."
+      : "Do not repeat the file contents; tell the user what the file contains.",
   ].join("\n");
 }
 
@@ -276,14 +313,18 @@ function describePreview(result, { name, format }) {
     quantity(result.sheets, "sheet"),
   ].filter(Boolean);
   return [
-    `Previewed ${name} (${facts.join(", ")}) as previewId ${result.previewId}; nothing is delivered yet. Automated check findings: ${issues.length}.`,
+    `Previewed ${name} (${facts.join(", ")}) as previewId ${result.previewId}; nothing is delivered yet. Update the checklist for completed slide generation and the review you actually perform. Automated check findings: ${issues.length}.`,
     "This count covers automated structure/layout findings, not visual or formula acceptance. Inspect the overview; mathematical display and target-application editing need separate verification.",
     ...issues.map(issueLine),
   ].join("\n");
 }
 
 const previewNext = (previewId) =>
-  `Fix what the issues and the slides show and call create_document again under the same file name: with preview: true for another look (a file may be previewed twice per reply), or without preview to deliver the changed code. To keep this file as it is, deliver with fromPreview: "${previewId}" and no content. If you end the reply without delivering, the latest preview is delivered automatically.`;
+  [
+    `To keep this file as it is, deliver with fromPreview: "${previewId}" and no content under the same file name.`,
+    "Reuse the checked file by default. If there is a concrete defect, combine the corrections in one call without preview. After two renders, deliver the latest preview and report remaining issues.",
+    "If you end the reply without delivering, the latest preview is delivered automatically.",
+  ].join(" ");
 
 // What the overview image is, or why there is none; nothing when a model
 // that cannot see images was shown none. `slides` is the deck's count: a
@@ -409,6 +450,8 @@ export function documentTools(runtime, context, { vision }) {
     context.params.documents.primedBuiltinSkills.includes("ofox-office-pptx");
   // Derived per preview, never a mutable shared "last fallback" result.
   const previewFallbacks = new Map();
+  // A new user reply (including live input) gets its own receipts.
+  const pptxReceipts = new WeakMap();
   const content = Type.Union([
     Type.String({ maxLength: 2_000_000 }),
     Type.Array(Type.Object({}, { additionalProperties: true }), {
@@ -499,9 +542,26 @@ export function documentTools(runtime, context, { vision }) {
       // The host reads Python code and a preview's file itself: both go to it
       // as they came, with no deck to render and no batch to check here.
       const fromPreview = args.fromPreview !== undefined;
+      let receipts;
+      let receiptKey;
+      if (args.format === "pptx") {
+        const owner = context.pptx ?? context;
+        receipts = pptxReceipts.get(owner);
+        if (!receipts) pptxReceipts.set(owner, (receipts = new Map()));
+        receiptKey = pptxName(args.name);
+      }
+      const receipt = receipts?.get(receiptKey);
+      if (
+        receipt?.delivered &&
+        (!fromPreview ||
+          (args.fromPreview === receipt.deliveredFrom &&
+            args.content === undefined &&
+            args.preview !== true))
+      )
+        return receipt.delivered;
       const code =
         !fromPreview && args.format === "pptx"
-          ? pythonContent(args.content)
+          ? pythonContent(args.content, python)
           : undefined;
       const hostReads = fromPreview || code !== undefined;
       let deck =
@@ -547,7 +607,7 @@ export function documentTools(runtime, context, { vision }) {
           details: { code: "assistant_deck_invalid" },
           isError: true,
         };
-      const request = rendered
+      let request = rendered
         ? { ...args, content: rendered.commands }
         : code !== undefined
           ? { ...args, content: code }
@@ -559,6 +619,32 @@ export function documentTools(runtime, context, { vision }) {
           details: { code: "assistant_document_content" },
           isError: true,
         };
+      let recipe;
+      if (receipts && !fromPreview) {
+        recipe = createHash("sha256")
+          .update(JSON.stringify(request.content))
+          .digest("hex");
+        const latest = receipt?.latestPreview;
+        if (latest?.recipe === recipe) {
+          if (args.preview === true) return latest.response;
+          const { content: _content, ...delivery } = request;
+          request = { ...delivery, fromPreview: latest.id };
+          presentationFallbacks = previewFallbacks.get(latest.id) ?? [];
+        } else if (receipt?.renders >= PPTX_RENDER_LIMIT) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: latest
+                  ? `This PPTX already has a checked revision. Deliver with fromPreview: "${latest.id}" and no content. Report any remaining issues in the reply.`
+                  : "Both renders were used. The checked file was already delivered under another name.",
+              },
+            ],
+            details: { code: "assistant_document_limit" },
+            isError: true,
+          };
+        }
+      }
       let result;
       runtime.markStage?.("document_tool_started");
       try {
@@ -597,7 +683,7 @@ export function documentTools(runtime, context, { vision }) {
           ? pagePaths.filter((page) => typeof page === "string")
           : [];
         const image = vision && pages.length > 0 ? await overview(pages) : null;
-        return {
+        const response = {
           content: [
             {
               type: "text",
@@ -622,6 +708,20 @@ export function documentTools(runtime, context, { vision }) {
           ],
           details,
         };
+        if (receipts && recipe) {
+          receipts.set(receiptKey, {
+            renders: (receipt?.renders ?? 0) + 1,
+            latestPreview: {
+              id: details.previewId,
+              recipe,
+              response: {
+                ...response,
+                content: response.content.slice(0, 1),
+              },
+            },
+          });
+        }
+        return response;
       }
       if (result?.status !== "completed" || !result.file) {
         const message =
@@ -646,7 +746,7 @@ export function documentTools(runtime, context, { vision }) {
         if (pages !== undefined) details.file = { ...details.file, pages };
       }
       const image = vision && previewPath ? await thumbnail(previewPath) : null;
-      return {
+      const response = {
         content: [
           {
             type: "text",
@@ -663,6 +763,18 @@ export function documentTools(runtime, context, { vision }) {
         ],
         details,
       };
+      if (receipts && details.file.mimeType === PPTX_MIME && details.file.id) {
+        if (request.fromPreview)
+          for (const other of receipts.values())
+            if (other.latestPreview?.id === request.fromPreview)
+              delete other.latestPreview;
+        receipts.set(receiptKey, {
+          renders: receipt?.renders ?? 0,
+          delivered: { ...response, content: response.content.slice(0, 1) },
+          deliveredFrom: request.fromPreview,
+        });
+      }
+      return response;
     },
   );
   return [

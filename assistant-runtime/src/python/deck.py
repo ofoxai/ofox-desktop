@@ -26,6 +26,10 @@ class _ThemeAliases(type):
     def card(cls): return cls.tint
     @property
     def textMuted(cls): return cls.faint
+    @property
+    def chart(cls):
+        colors = (_theme() or {}).get("colors", {}).get("chart") or (cls.primary, cls.accent, cls.muted)
+        return tuple(color.lstrip("#") for color in colors)
 
 class T(metaclass=_ThemeAliases):
     primary = "1E3A5F"; primaryDark = "152B47"; accent = "D9822B"
@@ -1468,7 +1472,7 @@ def native_chart(slide, kind, categories, series, x, y, w, h, title=""):
     if chart.has_legend:
         chart.legend.position = XL_LEGEND_POSITION.BOTTOM
         chart.legend.font.name = T.font; chart.legend.font.size = Pt(11)
-    colors = (_theme() or {}).get("colors", {}).get("chart", [T.primary, T.accent, T.muted])
+    colors = T.chart
     if _composition() == "spec" or _dark(slide):
         # Series, labels and grid take the page canvas's own colours, so a chart
         # stays legible on a dark or saturated page in every application.
@@ -1730,6 +1734,11 @@ def _validate_layout(prs):
 def figure(slide, svg, x, y, w, h, alt="figure"):
     """An SVG figure, rasterised by the host at 2x."""
     svg = re.sub(r"((?:fill|stroke|stop-color|color)\s*=\s*[\"'])([0-9A-Fa-f]{6})([\"'])", r"\1#\2\3", str(svg))
+    # A standalone ampersand in ordinary XML text or an attribute must be
+    # escaped. Leave declarations, CDATA, comments and their contents alone.
+    if "&" in svg and "<!DOCTYPE" not in svg:
+        svg = re.sub(r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>|(?<=\s)&(?=\s)",
+                     lambda token: "&amp;" if token[0] == "&" else token[0], svg, flags=re.S)
     m = re.search(r"viewBox\s*=\s*[\"']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)", svg)
     if m:
         vw, vh = float(m.group(1)), float(m.group(2)); pt_per_px = w * 72 / vw

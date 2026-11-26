@@ -139,6 +139,88 @@ test("production pruning drops unused PDF.js builds, viewers, decoders and fonts
     assert.equal(await exists(path.join(modules, kept)), true, kept);
 });
 
+test("Windows production dependencies omit editor declarations but keep executable modules", async (t) => {
+  const production = await mkdtemp(
+    path.join(tmpdir(), "ofox-windows-package-"),
+  );
+  t.after(() => rm(production, { recursive: true, force: true }));
+  const pkg = path.join(production, "node_modules", "@scope", "sdk", "dist");
+  await mkdir(pkg, { recursive: true });
+  const types = ["index.d.ts", "index.d.mts", "index.d.cts"];
+  const runtime = ["index.js", "index.mjs", "index.cjs", "source.ts", "NOTICE"];
+  for (const name of [...types, ...runtime])
+    await writeFile(path.join(pkg, name), "fixture");
+  await pruneProduction(production, { platform: "darwin" });
+  for (const name of types) assert.ok(await exists(path.join(pkg, name)), name);
+  await pruneProduction(production, { platform: "win32" });
+  for (const name of types)
+    assert.equal(await exists(path.join(pkg, name)), false, name);
+  for (const name of runtime)
+    assert.ok(await exists(path.join(pkg, name)), name);
+});
+
+test("Windows omits bundler-only SDK JavaScript while preserving Node code and notices", async (t) => {
+  const production = await mkdtemp(path.join(tmpdir(), "ofox-node-exports-"));
+  t.after(() => rm(production, { recursive: true, force: true }));
+  for (const name of [
+    "@smithy/core",
+    "@aws-sdk/core",
+    "@aws-sdk/nested-clients",
+  ]) {
+    const pkg = path.join(production, "node_modules", name);
+    for (const file of [
+      "dist-es/index.js",
+      "dist-es/LICENSE",
+      "dist-cjs/index.js",
+    ]) {
+      await mkdir(path.dirname(path.join(pkg, file)), { recursive: true });
+      await writeFile(path.join(pkg, file), "fixture");
+    }
+  }
+  await pruneProduction(production, { platform: "win32" });
+  for (const name of [
+    "@smithy/core",
+    "@aws-sdk/core",
+    "@aws-sdk/nested-clients",
+  ]) {
+    const pkg = path.join(production, "node_modules", name);
+    assert.equal(await exists(path.join(pkg, "dist-es/index.js")), false);
+    assert.ok(await exists(path.join(pkg, "dist-cjs/index.js")));
+    assert.ok(await exists(path.join(pkg, "dist-es/LICENSE")));
+  }
+});
+
+test("Windows omits the two provider SDK source mirrors and retains their runtime formats", async (t) => {
+  const production = await mkdtemp(
+    path.join(tmpdir(), "ofox-provider-mirrors-"),
+  );
+  t.after(() => rm(production, { recursive: true, force: true }));
+  for (const name of ["openai", "@anthropic-ai/sdk"]) {
+    const pkg = path.join(production, "node_modules", name);
+    await mkdir(path.join(pkg, "src/internal/qs"), { recursive: true });
+    for (const filename of [
+      "src/client.ts",
+      "src/internal/qs/LICENSE.md",
+      "client.js",
+      "client.mjs",
+      "LICENSE",
+    ])
+      await writeFile(path.join(pkg, filename), "fixture");
+  }
+  await pruneProduction(production, { platform: "win32" });
+  for (const name of ["openai", "@anthropic-ai/sdk"]) {
+    const pkg = path.join(production, "node_modules", name);
+    assert.equal(await exists(path.join(pkg, "src", "client.ts")), false);
+    for (const filename of [
+      "client.js",
+      "client.mjs",
+      "LICENSE",
+      "src/internal/qs/LICENSE.md",
+    ])
+      assert.ok(await exists(path.join(pkg, filename)));
+  }
+});
+
 test("production pruning removes standalone SDK CLI bundles and launchers while preserving the SDK", async (t) => {
   const production = await mkdtemp(path.join(tmpdir(), "ofox-sdk-prune-"));
   t.after(() => rm(production, { recursive: true, force: true }));

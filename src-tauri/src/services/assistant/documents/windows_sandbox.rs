@@ -4,6 +4,7 @@
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{check_deadline, EngineOutput, DEAD_PROXY, RUN_TIMEOUT};
+use super::svg_batch::{self, SvgBatch};
 mod capability_set;
 #[cfg(test)]
 mod cdb;
@@ -12,6 +13,7 @@ mod cdb_protocol;
 #[cfg(test)]
 mod child_call;
 mod probe;
+mod runtime_snapshot;
 #[cfg(test)]
 mod startup_comparison;
 #[cfg(test)]
@@ -93,7 +95,7 @@ use windows::{
                 JobObjectExtendedLimitInformation, QueryInformationJobObject,
                 SetInformationJobObject, TerminateJobObject,
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
             },
             Pipes::CreatePipe,
             SystemInformation::OSVERSIONINFOW,
@@ -819,6 +821,7 @@ fn files(root: &Path, max: u64) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     result.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(result)
 }
+#[cfg(test)]
 fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
     let mut hash = Sha256::new();
     for (name, bytes) in files {
@@ -833,6 +836,15 @@ fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
 
 /// Hash warm public resources without retaining a second whole runtime in RAM.
 fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
+    tree_digest_stream(root, max, None)
+}
+
+// Both hashing and cold capture use the same bounded, no-alias tree walker.
+fn tree_digest_stream(
+    root: &Path,
+    max: u64,
+    mut capture: Option<(&mut File, &mut Vec<(PathBuf, u64)>)>,
+) -> Result<String, String> {
     let mut reader = tree_reader::TreeReader::new(root)?;
     let (mut pending, mut names, mut entries) = (vec![root.to_path_buf()], Vec::new(), 0usize);
     while let Some(directory) = pending.pop() {
@@ -875,6 +887,9 @@ fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
         hash.update(length.to_le_bytes());
+        if let Some((_, manifest)) = capture.as_mut() {
+            manifest.push((relative.clone(), length));
+        }
         let mut read = 0u64;
         loop {
             let n = io(file.read(&mut chunk))?;
@@ -886,6 +901,9 @@ fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
                 return Err(UNSAFE_FILE.into());
             }
             hash.update(&chunk[..n]);
+            if let Some((spool, _)) = capture.as_mut() {
+                io(spool.write_all(&chunk[..n]))?;
+            }
         }
         if read != length {
             return Err(UNSAFE_FILE.into());
@@ -911,6 +929,38 @@ fn write_files(root: &Path, contents: &[(PathBuf, Vec<u8>)]) -> Result<(), Strin
 #[cfg(test)]
 fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
     publish_output_cancellable(root, relative, bytes, &AtomicBool::new(false))
+}
+
+/// An unchanged sandbox input is not an output to replace. Still reject host
+/// aliases and unreadable paths, but preserve host edits/removal after snapshot.
+fn validate_unchanged_output(root: &Path, relative: &Path) -> Result<(), String> {
+    let parts: Vec<_> = relative.components().collect();
+    if parts.is_empty() || parts.iter().any(|part| !matches!(part, Component::Normal(name) if !name.to_string_lossy().contains(':'))) {
+        return Err(UNSAFE_FILE.into());
+    }
+    let mut pins = pin_ancestors(root)?;
+    let physical_root = final_path(pins.last().ok_or(UNSAFE_FILE)?)?;
+    let mut path = root.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        path.push(part.as_os_str());
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            // Check every existing ancestor before accepting absence. In
+            // particular, a dangling junction is not a missing ordinary path.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(UNSAFE_FILE.into()),
+        }
+        if index + 1 == parts.len() {
+            let _file = open_regular(root, &path, MAX_TASK_BYTES)?;
+        } else {
+            let directory = open_path(&path, true)?;
+            if !final_path(&directory)?.starts_with(&physical_root) {
+                return Err(UNSAFE_FILE.into());
+            }
+            pins.push(directory);
+        }
+    }
+    Ok(())
 }
 
 fn publish_output_cancellable(
@@ -1159,15 +1209,18 @@ fn cache_runtime_observed(
     let root = private_parent.join(&digest);
     if !root.exists() {
         observation.enter(Phase::CacheSourceRead);
-        let contents = files(&source, MAX_TREE_BYTES)?;
-        if tree_digest(&contents) != digest {
-            return Err(RUNTIME_CHANGED.into());
-        }
+        let mut snapshot = runtime_snapshot::RuntimeSnapshot::capture(
+            &source,
+            &private_parent,
+            user,
+            &digest,
+            MAX_TREE_BYTES,
+        )?;
         let staging = private_parent.join(format!("staging-{}", uuid::Uuid::new_v4().simple()));
         observation.enter(Phase::CacheStagingCreate);
         create_directory(&staging, &expected_acl)?;
         observation.enter(Phase::CacheStagingWrite);
-        let prepared = write_files(&staging, &contents).and_then(|()| {
+        let prepared = snapshot.write_to(&staging).and_then(|()| {
             observation.enter(Phase::CacheStagingDigest);
             if tree_digest_at(&staging, MAX_TREE_BYTES)? != digest {
                 return Err(UNSAFE_FILE.into());
@@ -2220,6 +2273,7 @@ fn launch(
     limit: usize,
     observation: &Observer,
     _cancelled: &AtomicBool,
+    batch: Option<&SvgBatch>,
 ) -> Result<Launch, String> {
     // Declared first so it outlives (is dropped after) the suspended process.
     #[cfg(test)]
@@ -2231,10 +2285,10 @@ fn launch(
         grant = Some(held);
         suspended
     } else {
-        create_verified(exe, args, cwd, home, profile, cap, observation)?
+        create_verified(exe, args, cwd, home, profile, cap, observation, batch)?
     };
     #[cfg(not(test))]
-    let suspended = create_verified(exe, args, cwd, home, profile, cap, observation)?;
+    let suspended = create_verified(exe, args, cwd, home, profile, cap, observation, batch)?;
     #[cfg(test)]
     let mut debugger = cdb::Guard::begin(
         raw(&suspended.process.process),
@@ -2263,6 +2317,22 @@ fn launch(
     if debugger.is_some() && _cancelled.load(Ordering::Acquire) {
         observation.failed();
         return Err(CANCELLED.into());
+    }
+    if batch.is_some() {
+        // OfficeCLI buffers MCP replies before writing them. Bound the child
+        // as well as our captured stdout; feasibility never grants more rights.
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        limits.ProcessMemoryLimit = 768 * 1024 * 1024;
+        unsafe {
+            win(SetInformationJobObject(
+                raw(&process.job),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ))?;
+        }
     }
     observation.enter(Phase::Resume);
     let resumed = unsafe { ResumeThread(raw(&thread)) };
@@ -2300,8 +2370,33 @@ fn launch(
     })
 }
 
+// A finite, host-authored request file cannot block on the child's pipe
+// consumption. Only a read-only duplicate reaches the verified child.
+fn preview_stdin(batch: &SvgBatch) -> Result<OwnedHandle, String> {
+    use std::io::Seek;
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS};
+    let mut file = io(tempfile::tempfile())?;
+    io(file.write_all(batch.input()))?;
+    io(file.rewind())?;
+    let mut reader = HANDLE::default();
+    unsafe {
+        let process = GetCurrentProcess();
+        win(DuplicateHandle(
+            process,
+            HANDLE(file.as_raw_handle()),
+            process,
+            &mut reader,
+            FILE_GENERIC_READ.0,
+            true,
+            DUPLICATE_HANDLE_OPTIONS(0),
+        ))?;
+    }
+    Ok(handle(reader))
+}
+
 /// The production launch: {runtime, registryRead}, console-free, and the token
 /// (including the registry gate) verified while the process is still suspended.
+#[allow(clippy::too_many_arguments)]
 fn create_verified(
     exe: &Path,
     args: &[String],
@@ -2310,16 +2405,19 @@ fn create_verified(
     profile: &Profile,
     cap: &RuntimeCapability,
     observation: &Observer,
+    batch: Option<&SvgBatch>,
 ) -> Result<SuspendedLaunch, String> {
-    let suspended = create_suspended(
+    let suspended = create_suspended_capabilities(
         exe,
         args,
         cwd,
         home,
         profile,
-        cap,
+        &ProcessCapabilities::production(cap)?,
         ContainerPolicy::Lpac,
+        ConsoleMode::Detached,
         observation,
+        batch.map(preview_stdin).transpose()?,
     )?;
     verify_token(
         raw(&suspended.process.process),
@@ -2330,6 +2428,7 @@ fn create_verified(
     Ok(suspended)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn create_suspended(
     exe: &Path,
@@ -2351,6 +2450,7 @@ fn create_suspended(
         policy,
         ConsoleMode::Detached,
         observation,
+        None,
     )
 }
 
@@ -2365,6 +2465,7 @@ fn create_suspended_capabilities(
     policy: ContainerPolicy,
     console: ConsoleMode,
     observation: &Observer,
+    input: Option<OwnedHandle>,
 ) -> Result<SuspendedLaunch, String> {
     observation.enter(Phase::Command);
     let app = wide(exe)?;
@@ -2378,7 +2479,13 @@ fn create_suspended_capabilities(
     observation.enter(Phase::Environment);
     let env = environment(home)?;
     observation.enter(Phase::Pipes);
-    let (stdin_read, stdin_write) = pipe()?;
+    let (stdin_read, stdin_write) = match input {
+        Some(input) => (input, None),
+        None => {
+            let (read, write) = pipe()?;
+            (read, Some(write))
+        }
+    };
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
     unsafe {
@@ -2395,6 +2502,7 @@ fn create_suspended_capabilities(
     }
     #[cfg(test)]
     let child_call_input = if observation.child_call_requested() {
+        let stdin_write = stdin_write.ok_or(UNAVAILABLE)?;
         unsafe {
             win(SetHandleInformation(
                 raw(&stdin_write),
@@ -2724,9 +2832,70 @@ async fn run_candidate_observed_until(
     observation: Observer,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<EngineOutput, String> {
+    run_request_until(
+        exe,
+        args,
+        cwd,
+        home,
+        read_root,
+        timeout,
+        limit,
+        trusted_probe,
+        observation,
+        deadline,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn render_svg_batch(
+    batch: SvgBatch,
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Option<Vec<String>>, String> {
+    let exe = read_root.join("engines/officecli/officecli.exe");
+    let batch = Arc::new(batch);
+    let output = run_request_until(
+        &exe,
+        &["mcp"],
+        cwd,
+        home,
+        read_root,
+        batch.timeout(timeout),
+        svg_batch::OUTPUT_LIMIT,
+        false,
+        Observer::default(),
+        deadline,
+        Some(batch.clone()),
+    )
+    .await?;
+    if output.timed_out {
+        return Err(RUN_TIMEOUT.into());
+    }
+    Ok(batch.pictures(&output))
+}
+#[allow(clippy::too_many_arguments)]
+async fn run_request_until(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    limit: usize,
+    trusted_probe: bool,
+    observation: Observer,
+    deadline: Option<tokio::time::Instant>,
+    batch: Option<Arc<SvgBatch>>,
+) -> Result<EngineOutput, String> {
     check_deadline(deadline)?;
     let observation = if trusted_probe {
         observation
+    } else if std::env::var("OFOX_DOCUMENT_ENGINE_TIMINGS").as_deref() == Ok("1") {
+        Observer::timings_only()
     } else {
         Observer::default()
     };
@@ -2774,6 +2943,7 @@ async fn run_candidate_observed_until(
             &worker_cancelled,
             trusted_probe,
             &worker_observation,
+            batch.as_deref(),
         );
         if result.is_err() {
             worker_observation.failed();
@@ -2817,6 +2987,7 @@ fn run_blocking(
     cancelled: &AtomicBool,
     trusted_probe: bool,
     observation: &Observer,
+    batch: Option<&SvgBatch>,
 ) -> Result<EngineOutput, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err(CANCELLED.into());
@@ -2907,6 +3078,7 @@ fn run_blocking(
             limit,
             observation,
             cancelled,
+            batch,
         )?;
         #[cfg(test)]
         let mut launched = launched;
@@ -2992,12 +3164,13 @@ fn run_blocking(
         let stderr = launched.stderr.recv_timeout(Duration::from_secs(2));
         observation.evidence(|evidence| evidence.stderr_receive = Some(receive_outcome(&stderr)));
         let stderr = stderr.map_err(|_| UNAVAILABLE.to_owned())?;
-        observation.enter(Phase::Copyback);
+        observation.enter(Phase::OutputSnapshot);
         #[cfg(test)]
         pause_copyback(&cwd, CopybackPoint::Drained)?;
         was_cancelled |= cancelled.load(Ordering::Acquire);
-        if !timed_out && !was_cancelled && status == 0 {
+        if batch.is_none() && !timed_out && !was_cancelled && status == 0 {
             let outputs = files(&task.0, MAX_TASK_BYTES)?;
+            observation.enter(Phase::Copyback);
             // Original cwd is never granted to the LPAC. Keep its directory handle
             // pinned, and reject pre-existing aliases before atomic replacement.
             let _destination = pin_ancestors(&cwd)?;
@@ -3009,6 +3182,14 @@ fn run_blocking(
                     break;
                 }
                 if relative.starts_with(home_relative) {
+                    continue;
+                }
+                if inputs
+                    .binary_search_by(|(path, _)| path.cmp(&relative))
+                    .ok()
+                    .is_some_and(|index| inputs[index].1 == bytes)
+                {
+                    validate_unchanged_output(&cwd, &relative)?;
                     continue;
                 }
                 match publish_output_cancellable(&cwd, &relative, &bytes, cancelled) {
@@ -3077,6 +3258,9 @@ fn run_blocking(
     receipt["cleanupComplete"] = serde_json::json!(true);
     receipt["taskRemoved"] = serde_json::json!(true);
     receipt["profileRemoved"] = serde_json::json!(true);
+    if let Some(timings) = observation.timings() {
+        receipt["timings"] = timings;
+    }
     if let Ok(mut receipts) = RUN_RECEIPTS.get_or_init(Default::default).lock() {
         receipts.push_back(receipt);
         if receipts.len() > 512 {
@@ -3672,23 +3856,6 @@ async fn ensure_ready(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<String, String> {
     check_deadline(deadline)?;
-    let root = runtime_root.to_path_buf();
-    let runtime = tokio::task::spawn_blocking(move || {
-        os_version()?;
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    check_deadline(deadline)?;
-    let ready = ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .get(&runtime.source)
-        == Some(&runtime.digest);
-    if ready {
-        return Ok(runtime.digest);
-    }
     let turn = PROBE_TURN.lock();
     let _turn = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, turn)
@@ -3696,29 +3863,12 @@ async fn ensure_ready(
             .map_err(|_| RUN_TIMEOUT.to_owned())?,
         None => turn.await,
     };
-    check_deadline(deadline)?;
-    // Another bootstrap/send may have completed all probes while we waited.
-    let root = runtime_root.to_path_buf();
-    let runtime = tokio::task::spawn_blocking(move || {
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    check_deadline(deadline)?;
-    if ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .get(&runtime.source)
-        == Some(&runtime.digest)
-    {
-        return Ok(runtime.digest);
-    }
     prove_runtime_locked(
         runtime_root,
         &runtime_root.join("engines/officecli/officecli.exe"),
         &mut Vec::new(),
         deadline,
+        true,
     )
     .await
 }
@@ -3753,7 +3903,7 @@ async fn prove_runtime(
     checks: &mut Vec<&'static str>,
 ) -> Result<String, String> {
     let _turn = PROBE_TURN.lock().await;
-    prove_runtime_locked(runtime_root, officecli, checks, None).await
+    prove_runtime_locked(runtime_root, officecli, checks, None, false).await
 }
 
 async fn prove_runtime_locked(
@@ -3761,22 +3911,31 @@ async fn prove_runtime_locked(
     officecli: &Path,
     checks: &mut Vec<&'static str>,
     deadline: Option<tokio::time::Instant>,
+    reuse_admission: bool,
 ) -> Result<String, String> {
     let mut trace = ProbeTrace::new();
     let result: Result<String, String> = async {
         check_deadline(deadline)?;
         let root = runtime_root.to_path_buf();
         let before = tokio::task::spawn_blocking(move || {
+            os_version()?;
             cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
         })
         .await
         .map_err(|_| UNAVAILABLE.to_owned())??;
         check_deadline(deadline)?;
-        ADMITTED
-            .get_or_init(Default::default)
-            .lock()
-            .map_err(|_| UNAVAILABLE)?
-            .remove(&before.source);
+        {
+            // PROBE_TURN covers both the admission lookup and the probes. The
+            // same fresh digest is the before-check if a cold proof is needed.
+            let mut proofs = ADMITTED
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|_| UNAVAILABLE)?;
+            if reuse_admission && proofs.get(&before.source) == Some(&before.digest) {
+                return Ok(before.digest);
+            }
+            proofs.remove(&before.source);
+        }
         probe_inner(runtime_root, officecli, checks, &mut trace, deadline).await?;
         check_deadline(deadline)?;
         trace.engine(ProbeStage::RuntimeAfter);
@@ -4056,6 +4215,8 @@ async fn probe_inner(
 /// A redacted report suitable for the one-click client acceptance package.
 /// Successful fallback is deliberately not a successful Python acceptance.
 pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json::Value {
+    let sequence_before = RUN_SEQUENCE.load(Ordering::Acquire);
+    let started = Instant::now();
     let version = os_version().ok();
     let mut checks = Vec::new();
     let result = prove_runtime(
@@ -4064,6 +4225,7 @@ pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json:
         &mut checks,
     )
     .await;
+    let fixed_probe_elapsed_ms = started.elapsed().as_millis();
     let provenance = std::env::current_exe()
         .ok()
         .and_then(|path| fs::read(path).ok())
@@ -4076,11 +4238,18 @@ pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json:
             .get(&root)
             .map(|entry| entry.digest.clone())
     });
+    let engine_timings: Vec<_> = windows_document_sandbox_receipts(sequence_before)
+        .into_iter()
+        .filter(|row| row["trustedProbe"] == true)
+        .filter_map(|row| row.get("timings").cloned())
+        .collect();
     serde_json::json!({
         "schemaVersion": 1, "platform":"windows-x64", "success":result.is_ok(),
         "windowsBuild":version.map(|v| v.dwBuildNumber), "binarySha256":provenance,
         "runtimeSha256":runtime_digest, "nodeVersion":"22.23.4", "pyodideVersion":"314.0.7",
         "passedChecks":checks, "diagnostic":result.err(),
+        "engineTimings":engine_timings,
+        "fixedProbeElapsedMs":fixed_probe_elapsed_ms,
         "scope":"native-fixed-fixtures", "paidModelCalls":0,
         "liveModelAcceptance":false, "pythonCapabilityEnabled":false
     })

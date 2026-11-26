@@ -1309,6 +1309,7 @@ fn decode(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
         message.error_code = None;
     }
     check_record(&record, sid)?;
+    super::projection::restore_cancelled_replies(&mut record);
     Ok(record)
 }
 

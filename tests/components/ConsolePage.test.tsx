@@ -1,24 +1,37 @@
 import {
   act,
   fireEvent,
-  render,
+  render as rtlRender,
   screen,
   waitFor,
   within,
+  type RenderOptions,
 } from "@testing-library/react";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import en from "@/i18n/locales/en.json";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { sessionsApi } from "@/lib/api/sessions";
 import { queryClient } from "@/lib/query/queryClient";
 import ConsolePage from "@/components/console/ConsolePage";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { toolUpdatesApi, type ToolUpdateInfo } from "@/lib/api/toolUpdates";
 
+const render = (ui: ReactNode, options?: RenderOptions) =>
+  rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+    ...options,
+  });
+
 const mocks = vi.hoisted(() => ({
   mac: true,
   apex: "ofox.ai",
+  apexLoading: false,
   toast: Object.assign(() => undefined, {
     success: vi.fn(),
     error: vi.fn(),
@@ -35,8 +48,7 @@ const mocks = vi.hoisted(() => ({
   addManageFlow: false,
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
-    | ((toolId: string, code: number) => void)
-    | undefined,
+    ((toolId: string, code: number) => void) | undefined,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -70,7 +82,7 @@ vi.mock("@/lib/api/manageTool", async (importOriginal) => ({
   },
 }));
 vi.mock("@/hooks/useOfoxApex", () => ({
-  useOfoxApex: () => ({ apex: mocks.apex }),
+  useOfoxApex: () => ({ apex: mocks.apex, isLoading: mocks.apexLoading }),
 }));
 vi.mock("@/hooks/useToolLaunch", () => ({
   useToolLaunch: () => ({ launching: new Set(), launch: vi.fn() }),
@@ -275,6 +287,8 @@ beforeEach(async () => {
   localTools = [];
   mocks.mac = true;
   mocks.apex = "ofox.ai";
+  mocks.apexLoading = false;
+  vi.spyOn(sessionsApi, "list").mockResolvedValue([]);
   mocks.openExternal.mockClear();
   mocks.manageFocus.mockClear();
   mocks.addManageFlow = false;
@@ -384,6 +398,61 @@ describe("Console title bar of a wide window", () => {
 });
 
 describe("Console navigation", () => {
+  it("silently warms the session list before the first tab visit", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    expect(screen.queryByText("Session panel")).not.toBeInTheDocument();
+    await waitFor(() => expect(sessionsApi.list).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(["sessions", "ofox.ai"])).toEqual([]),
+    );
+    expect(screen.queryByText("Session panel")).not.toBeInTheDocument();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("waits for an active console and a resolved region before warming sessions", async () => {
+    mocks.apexLoading = true;
+    const view = render(<ConsolePage boundTools={[]} active={false} />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(sessionsApi.list).not.toHaveBeenCalled();
+    view.rerender(<ConsolePage boundTools={[]} active />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(sessionsApi.list).not.toHaveBeenCalled();
+    mocks.apex = "ofox.io";
+    mocks.apexLoading = false;
+    view.rerender(<ConsolePage boundTools={[]} active />);
+    await waitFor(() => expect(sessionsApi.list).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(["sessions", "ofox.io"])).toEqual([]),
+    );
+    expect(queryClient.getQueryData(["sessions", "ofox.ai"])).toBeUndefined();
+  });
+
+  it("keeps preloading failures silent and cancels pending work when hidden", async () => {
+    vi.mocked(sessionsApi.list).mockRejectedValue(
+      new Error("read unavailable"),
+    );
+    const view = render(<ConsolePage boundTools={[]} />);
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["sessions", "ofox.ai"])?.status).toBe(
+        "error",
+      ),
+    );
+    expect(screen.queryByText("read unavailable")).not.toBeInTheDocument();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    vi.mocked(sessionsApi.list).mockClear();
+    mocks.apex = "ofox.io";
+    view.rerender(<ConsolePage boundTools={[]} />);
+    view.rerender(<ConsolePage boundTools={[]} active={false} />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(sessionsApi.list).not.toHaveBeenCalled();
+  });
+
   it("offers 工具, 会话, 资源库, 助手 and 用量, and no 模型方案 tab", async () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");

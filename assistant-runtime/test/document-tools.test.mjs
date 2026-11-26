@@ -732,6 +732,182 @@ const PYTHON = {
   code: 'from deck import *\nprs = new_deck()\ncover_slide(prs, "Quarterly results")\n',
 };
 
+test("a code-only PPT repair reaches Python only when offered, including Pi's coerced input", async () => {
+  const args = {
+    name: "deck.pptx",
+    format: "pptx",
+    content: { code: PYTHON.code },
+  };
+  const { tool, calls } = createDocument({ python: true });
+  for (const content of [args.content, JSON.stringify(args.content)]) {
+    const checked = validateToolArguments(tool, {
+      name: tool.name,
+      arguments: { ...args, content },
+    });
+    await tool.execute("repair", checked);
+    assert.deepEqual(calls.at(-1)?.args.content, PYTHON);
+  }
+  const plain = createDocument({ python: false });
+  await plain.tool.execute("repair", args);
+  assert.equal(plain.calls.length, 0);
+});
+
+test("PPT delivery reports outstanding findings and ends work on that file", async () => {
+  const { tool } = createDocument({
+    python: true,
+    reply: () => completed({ issues: ["layout warning"] }),
+  });
+  const result = await tool.execute("final", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+  });
+  assert.match(result.content[0].text, /layout warning/);
+  assert.match(result.content[0].text, /already delivered.*summarize/i);
+});
+
+test("the second successful preview of the same file gives a delivery step", async () => {
+  let count = 0;
+  const { tool } = createDocument({
+    python: true,
+    reply: () => previewed({ previewId: "p" + ++count }),
+  });
+  const preview = (name) =>
+    tool.execute(name, {
+      name,
+      format: "pptx",
+      content: { ...PYTHON, code: PYTHON.code + "# " + name },
+      preview: true,
+    });
+  await preview("deck");
+  const second = await preview("deck.pptx");
+  assert.match(second.content[0].text, /fromPreview: "p2"/);
+  assert.doesNotMatch(second.content[0].text, /another look|one more preview/i);
+});
+
+test("a Python deck preview is reused for repeated preview and unchanged delivery", async () => {
+  const { tool, calls } = createDocument({
+    python: true,
+    vision: false,
+    reply: (_name, args) => (args.preview ? previewed() : completed()),
+  });
+  const deck = { name: "deck", format: "pptx", content: PYTHON };
+  const first = await tool.execute("preview", { ...deck, preview: true });
+  const duplicate = await tool.execute("same-preview", {
+    ...deck,
+    name: "folder\\deck.tmp",
+    preview: true,
+  });
+  assert.equal(first.details.previewId, duplicate.details.previewId);
+  assert.equal(calls.length, 1);
+  const final = await tool.execute("deliver", deck);
+  assert.equal(final.details.file.id, "att-deck");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].args.fromPreview, first.details.previewId);
+  assert.equal(calls[1].args.content, undefined);
+});
+
+test("a delivered PPTX receipt stops rebuilding the same file while a second deck is allowed", async () => {
+  const { tool, calls } = createDocument({
+    python: true,
+    vision: false,
+    reply: (_name, args) =>
+      completed({
+        file: { ...completed().file, name: args.name, id: args.name },
+      }),
+  });
+  const deck = { name: "deck.pptx", format: "pptx", content: PYTHON };
+  const final = await tool.execute("deliver", deck);
+  const repeated = await tool.execute("after-delivery", {
+    ...deck,
+    content: { ...PYTHON, code: PYTHON.code + "# regenerate it" },
+    preview: true,
+  });
+  assert.equal(repeated.details.file.id, final.details.file.id);
+  assert.equal(calls.length, 1);
+  await tool.execute("another-deck", { ...deck, name: "appendix.pptx" });
+  assert.equal(calls.length, 2);
+});
+
+test("two successful previews allow delivery of the latest without a third rebuild", async () => {
+  let count = 0;
+  const { tool, calls } = createDocument({
+    python: true,
+    vision: false,
+    reply: (_name, args) =>
+      args.preview ? previewed({ previewId: "p" + ++count }) : completed(),
+  });
+  const deck = { name: "deck.pptx", format: "pptx", content: PYTHON };
+  const code = (marker) => ({ ...PYTHON, code: PYTHON.code + "# " + marker });
+  await tool.execute("preview", { ...deck, preview: true });
+  await tool.execute("revision", {
+    ...deck,
+    content: code("fix"),
+    preview: true,
+  });
+  const prohibited = await tool.execute("third-rebuild", {
+    ...deck,
+    content: code("another fix"),
+  });
+  assert.equal(prohibited.isError, true);
+  assert.match(prohibited.content[0].text, /fromPreview: "p2"/);
+  assert.equal(calls.length, 2);
+  const final = await tool.execute("deliver", {
+    name: deck.name,
+    format: deck.format,
+    fromPreview: "p2",
+  });
+  assert.equal(final.details.file.id, "att-deck");
+  assert.equal(calls.length, 3);
+});
+
+test("saving under another name consumes that preview receipt but does not block the original file name", async () => {
+  let count = 0;
+  const { tool, calls } = createDocument({
+    python: true,
+    vision: false,
+    reply: (_name, args) =>
+      args.preview ? previewed({ previewId: "p" + ++count }) : completed(),
+  });
+  const deck = { name: "deck.pptx", format: "pptx", content: PYTHON };
+  await tool.execute("preview", { ...deck, preview: true });
+  await tool.execute("rename", {
+    name: "renamed.pptx",
+    format: "pptx",
+    fromPreview: "p1",
+  });
+  const next = await tool.execute("original", { ...deck, preview: true });
+  assert.equal(next.details.previewId, "p2");
+  await tool.execute("deliver", deck);
+  assert.equal(calls.at(-1).args.fromPreview, "p2");
+});
+
+test("renaming the latest revision never rolls the original name back to an older preview", async () => {
+  let count = 0;
+  const { tool, calls } = createDocument({
+    python: true,
+    vision: false,
+    reply: (_name, args) =>
+      args.preview ? previewed({ previewId: "p" + ++count }) : completed(),
+  });
+  const original = { name: "deck.pptx", format: "pptx", content: PYTHON };
+  const revision = {
+    ...original,
+    content: { ...PYTHON, code: PYTHON.code + "# fix" },
+  };
+  await tool.execute("preview", { ...original, preview: true });
+  await tool.execute("revision", { ...revision, preview: true });
+  await tool.execute("rename", {
+    name: "renamed.pptx",
+    format: "pptx",
+    fromPreview: "p2",
+  });
+  const obsolete = await tool.execute("old-content", original);
+  assert.equal(calls.length, 3);
+  assert.equal(obsolete.isError, true);
+  assert.doesNotMatch(obsolete.content[0].text, /p1/);
+});
+
 const previewed = (extra = {}) => ({
   status: "completed",
   preview: true,

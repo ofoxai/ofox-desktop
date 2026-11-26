@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { LocalTask } from "../src/local-task.mjs";
 import { pdfPages } from "./fixtures/pdf.mjs";
 import {
   probeGuideline,
@@ -452,6 +453,111 @@ test("conversation text passes byte for byte; only the run's own key is replaced
   );
 });
 
+for (const kind of ["text", "thinking"]) {
+  test(`a short streamed ${kind} appears before the provider finishes`, async (t) => {
+    const params = await sandbox(t);
+    let firstChunk;
+    const started = new Promise((resolve) => {
+      firstChunk = resolve;
+    });
+    let delivered;
+    const shown = new Promise((resolve) => {
+      delivered = resolve;
+    });
+    let finish;
+    const events = [];
+    const runtime = new AssistantRuntime({
+      emit: (event) => {
+        events.push(event);
+        if (event.type === `${kind}_delta`) delivered(event.data.delta);
+      },
+      fetch: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              const send = (value) =>
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${JSON.stringify(value)}\n\n`,
+                  ),
+                );
+              send({
+                id: "short",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      [kind === "text" ? "content" : "reasoning_content"]:
+                        "你好，已收到。",
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              });
+              finish = () => {
+                if (kind === "thinking")
+                  send({
+                    id: "short",
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { content: "Done." },
+                        finish_reason: null,
+                      },
+                    ],
+                  });
+                send({
+                  id: "short",
+                  choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                  usage: {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                  },
+                });
+                controller.enqueue(
+                  new TextEncoder().encode("data: [DONE]\n\n"),
+                );
+                controller.close();
+              };
+              firstChunk();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    t.after(() => runtime.close());
+    const running = runtime.run({
+      ...params,
+      model: { ...model, reasoning: true },
+      thinkingLevel: "high",
+    });
+    await started;
+    let timer;
+    try {
+      const first = await Promise.race([
+        shown,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("short text was withheld until completion")),
+            1000,
+          );
+        }),
+      ]);
+      assert.equal(first, "你好，已收到。");
+      assert.equal(
+        events.some((event) => event.type === "message_end"),
+        false,
+      );
+    } finally {
+      clearTimeout(timer);
+      finish();
+      await running;
+    }
+  });
+}
+
 test("a key split across streamed deltas never reaches an event", async (t) => {
   const params = await sandbox(t);
   const events = [];
@@ -482,6 +588,52 @@ test("a key split across streamed deltas never reaches an event", async (t) => {
     false,
   );
 });
+
+for (const kind of ["text", "thinking"]) {
+  test(`a short MCP PIN split across ${kind} deltas is never exposed`, async (t) => {
+    const pin = "418731";
+    const params = {
+      ...(await sandbox(t)),
+      knownSecrets: [pin],
+      mcp: {
+        servers: {
+          fixture: {
+            enabled: false,
+            command: "never-run",
+            env: { PIN: pin, DEBUG: "1" },
+          },
+        },
+      },
+      model: { ...model, reasoning: true },
+      thinkingLevel: "high",
+    };
+    const events = [];
+    const runtime = new AssistantRuntime({
+      emit: (event) => events.push(event),
+      fetch: async () =>
+        new Response(
+          ["PIN: 418", "731 DEBUG=1"]
+            .map(
+              (content) =>
+                `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: { [kind === "text" ? "content" : "reasoning_content"]: content }, finish_reason: null }] })}\n\n`,
+            )
+            .join("") +
+            (kind === "thinking"
+              ? `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: { content: "Done." }, finish_reason: null }] })}\n\n`
+              : "") +
+            `data: ${JSON.stringify({ id: "pin", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    t.after(() => runtime.close());
+    assert.equal((await runtime.run(params)).status, "completed");
+    const deltas = events
+      .filter((event) => event.type === `${kind}_delta`)
+      .map((event) => event.data.delta);
+    assert.equal(deltas.join(""), "PIN: *** DEBUG=1");
+    assert.equal(deltas.join("").includes(pin), false);
+  });
+}
 
 test("an earlier key of the run handed over as knownSecrets is replaced too", async (t) => {
   const refused = "refused-credential-of-this-run-0123456789";
@@ -2777,6 +2929,46 @@ function thinkingReply(name) {
   ]);
 }
 
+test("reasoning-only normal stops are empty answers across all chat protocols", async (t) => {
+  for (const [name, input] of Object.entries(await thinkingModels())) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      fetch: async () => {
+        requests++;
+        const response = thinkingReply(name);
+        return new Response((await response.text()).replaceAll("Answer", ""), {
+          headers: response.headers,
+        });
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({
+      ...params,
+      model: atLevel(name, input),
+      thinkingLevel: "high",
+    });
+    assert.equal(result.status, "error", name);
+    assert.equal(result.errorCode, "assistant_empty_response", name);
+    assert.equal(
+      requests,
+      1,
+      "empty answers do not automatically replay requests",
+    );
+    const loaded = await runtime.load(params);
+    assert.ok(
+      loaded.entries.some(
+        (entry) => entry.role === "assistant" && entry.thinking,
+      ),
+    );
+    assert.ok(
+      !loaded.entries.some(
+        (entry) => entry.role === "assistant" && entry.content.trim(),
+      ),
+    );
+  }
+});
+
 function initialPptPlanReply(protocol, steps) {
   const name = "updatePlan";
   const input = { steps };
@@ -3135,9 +3327,8 @@ test("reasoning end is signalled when the text begins, before its held-back text
               chunk({ role: "assistant", reasoning_content: "Short thought" }),
             );
             await new Promise((resolve) => setTimeout(resolve, 50));
-            // Shorter than the tail the runtime holds back for key scrubbing:
-            // it is forwarded only when the text ends.
-            controller.enqueue(chunk({ content: "Answer" }));
+            // A possible credential prefix stays private until text ends.
+            controller.enqueue(chunk({ content: token.slice(0, 15) }));
             await new Promise((resolve) => setTimeout(resolve, 300));
             controller.enqueue(chunk({}, "stop"));
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -3215,9 +3406,12 @@ test("reasoning start is signalled at once, before its held-back text", async (t
       new Response(
         new ReadableStream({
           async start(controller) {
-            // Shorter than the tail the runtime holds back for key scrubbing.
+            // A possible credential prefix needs buffering even in reasoning.
             controller.enqueue(
-              chunk({ role: "assistant", reasoning_content: "Short thought" }),
+              chunk({
+                role: "assistant",
+                reasoning_content: token.slice(0, 15),
+              }),
             );
             await new Promise((resolve) => setTimeout(resolve, 300));
             controller.enqueue(chunk({ content: "Answer" }));
@@ -3368,7 +3562,10 @@ test("tool preparation is visible while arguments stream, before any execution a
     );
     assert.equal(calls.length, 0, "the Host has not executed a tool");
     const activity = events.filter((event) => event.type === "model_activity");
-    assert.ok(activity.length > 0, "streamed arguments must renew model liveness");
+    assert.ok(
+      activity.length > 0,
+      "streamed arguments must renew model liveness",
+    );
     assert.deepEqual(Object.keys(activity[0].data), ["bytes"]);
     assert.ok(activity[0].data.bytes > 0);
   } finally {
@@ -3537,6 +3734,84 @@ test("live input prioritizes steering over follow-up and fences authority withou
       .every((event) => event.data.previousEntryId),
   );
   assert.ok(!JSON.stringify(result).includes(token));
+});
+
+test("a steered turn can deliver a document without a written reply", async (t) => {
+  const params = await sandbox(t);
+  const firstRequest = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const reasoningOnly = async () => {
+    const response = thinkingReply("completions");
+    return new Response((await response.text()).replaceAll("Answer", ""), {
+      headers: response.headers,
+    });
+  };
+  const responses = [
+    async () => {
+      firstRequest.resolve();
+      await release.promise;
+      return reasoningOnly();
+    },
+    () => toolStream("beginSingleStep", {}, undefined, "call-plan"),
+    () =>
+      toolStream("create_document", {
+        name: "result",
+        format: "txt",
+        content: "Synthetic document",
+      }),
+    reasoningOnly,
+  ];
+  let requested = 0;
+  let delivered = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => responses[requested++](),
+    hostCall: async ({ name }) => {
+      assert.equal(name, "create_document");
+      delivered++;
+      return {
+        status: "completed",
+        file: { id: "file-1", name: "result.txt", mimeType: "text/plain" },
+      };
+    },
+  });
+  t.after(async () => {
+    release.resolve();
+    await runtime.close();
+  });
+  const running = runtime.run({
+    ...params,
+    model: { ...model, reasoning: true },
+    documents: { formats: ["txt"] },
+  });
+  await Promise.race([
+    firstRequest.promise,
+    running.then(() => assert.fail("the initial request did not start")),
+  ]);
+  await runtime.steer({
+    sessionId: params.sessionId,
+    runId: params.runId,
+    operationId: params.operationId,
+    id: "steered-turn",
+    behavior: "steer",
+    text: "Make and return a text file",
+  });
+  release.resolve();
+  const result = await running;
+  assert.equal(requested, responses.length);
+  assert.equal(delivered, 1);
+  const tool = result.entries.find(
+    (entry) => entry.toolName === "create_document",
+  );
+  assert.equal(tool.runId, "steered-turn");
+  assert.equal(tool.isError, false);
+  const last = result.entries
+    .filter((entry) => entry.role === "assistant")
+    .at(-1);
+  assert.equal(last.runId, "steered-turn");
+  assert.equal(last.stopReason, "stop");
+  assert.equal(last.thinking, "Weighing it");
+  assert.equal(last.content, "");
+  assert.equal(result.status, "completed", result.errorCode);
 });
 
 test("fork copies only the selected native context and continues independently", async (t) => {
@@ -3974,6 +4249,294 @@ test("honours Retry-After up to 10 seconds on 429 and stops after two retries", 
   }
 });
 
+test("a delivered PPTX recovers one empty provider failure without delivering the file again", async (t) => {
+  const params = await sandbox(t);
+  const calls = [],
+    requests = [],
+    events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    retrySleep: async () => {},
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "delivered-deck",
+          name: "deck.pptx",
+          bytes: 1234,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        },
+        issues: [],
+      };
+    },
+    fetch: withPlanningOpening(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      if (requests.length === 1)
+        return toolStream("create_document", {
+          name: "deck.pptx",
+          format: "pptx",
+          fromPreview: "checked-preview",
+        });
+      if (requests.length === 2)
+        return new Response(
+          'data: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "x-request-id": "failed-summary",
+            },
+          },
+        );
+      return stream("The deck is ready.");
+    }),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...params,
+    documents: { formats: ["pptx"], python: true },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "create_document");
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[2].messages, requests[1].messages);
+  const raw = await readFile(params.sessionFile, "utf8");
+  const receipts = raw
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .filter((e) => e.customType === "ofox-desktop-request")
+    .map((e) => e.data);
+  assert.deepEqual(
+    receipts.slice(-2).map((e) => [e.httpStatus, e.status]),
+    [
+      [200, "unknown"],
+      [200, "completed"],
+    ],
+  );
+  assert.equal(receipts.at(-2).estimatedCostUsd, null);
+  assert.equal(receipts.at(-2).requestId, "failed-summary");
+  assert.equal(
+    result.entries.filter(
+      (e) => e.role === "assistant" && e.stopReason === "error",
+    ).length,
+    0,
+  );
+  assert.equal(events.filter((e) => e.type === "retrying").length, 1);
+  assert.deepEqual(
+    result.entries
+      .filter((e) => e.role === "assistant")
+      .map((e) => e.stopReason),
+    ["toolUse", "toolUse", "stop"],
+  );
+});
+
+const pptConnectionError = () =>
+  new Response(
+    'data: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+    {
+      headers: {
+        "content-type": "text/event-stream",
+        "x-request-id": "closeout-failure",
+      },
+    },
+  );
+
+async function startPptCloseout(
+  t,
+  {
+    reply,
+    apex = "ofox.io",
+    retrySleep = async () => {},
+    afterDelivery,
+    emit,
+  } = {},
+) {
+  const params = {
+    ...(await sandbox(t)),
+    apex,
+    documents: { formats: ["pptx"], python: true },
+    model: { ...model, pricingKnown: true, cost: { input: 1, output: 1 } },
+  };
+  const calls = [],
+    requests = [],
+    events = [];
+  const runtime = new AssistantRuntime({
+    ...(retrySleep ? { retrySleep } : {}),
+    emit: (event) => {
+      events.push(event);
+      emit?.(event);
+    },
+    hostCall: async (call) => {
+      calls.push(call);
+      afterDelivery?.(runtime.runs.get(params.runId));
+      return {
+        status: "completed",
+        file: {
+          id: "checked-deck",
+          name: "deck.pptx",
+          bytes: 1234,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        },
+        issues: [],
+      };
+    },
+    fetch: withPlanningOpening(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      if (requests.length === 1)
+        return toolStream("create_document", {
+          name: "deck.pptx",
+          format: "pptx",
+          fromPreview: "checked-preview",
+        });
+      return reply(requests.length - 2);
+    }),
+  });
+  t.after(() => runtime.close());
+  return {
+    runtime,
+    params,
+    calls,
+    requests,
+    events,
+    running: runtime.run(params),
+  };
+}
+
+test("delivered PPTX recovery works on both apexes and keeps one extra HTTP dispatch at most", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const fixture = await startPptCloseout(t, {
+      apex,
+      reply: (index) => (index === 0 ? pptConnectionError() : stream("Ready")),
+    });
+    assert.equal((await fixture.running).status, "completed");
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.requests.length, 3);
+  }
+  for (const reply of [
+    () => pptConnectionError(),
+    (index) =>
+      index === 0
+        ? pptConnectionError()
+        : Response.json({ error: { message: "busy" } }, { status: 503 }),
+  ]) {
+    const fixture = await startPptCloseout(t, { reply });
+    assert.equal((await fixture.running).status, "error");
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.requests.length, 3);
+    assert.equal(fixture.events.filter((e) => e.type === "retrying").length, 1);
+  }
+  const exhausted = await startPptCloseout(t, {
+    reply: (index) =>
+      index < 2
+        ? Response.json({ error: { message: "busy" } }, { status: 503 })
+        : pptConnectionError(),
+  });
+  assert.equal((await exhausted.running).status, "error");
+  assert.equal(exhausted.requests.length, 4); // One delivery plus the existing three-dispatch ceiling.
+});
+
+test("PPTX recovery refuses ordinary failures, partial output and absent delivery", async (t) => {
+  for (const response of [
+    () => Response.json({ error: { message: "invalid key" } }, { status: 401 }),
+    () =>
+      new Response('data: {"error":{"message":"insufficient quota"}}\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    () =>
+      new Response(
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Partial"},"finish_reason":null}]}\n\ndata: {"error":{"message":"failed to execute HTTP request to provider API"}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  ]) {
+    const fixture = await startPptCloseout(t, { reply: response });
+    assert.equal((await fixture.running).status, "error");
+    assert.equal(fixture.requests.length, 2);
+  }
+  let count = 0;
+  const runtime = new AssistantRuntime({
+    retrySleep: async () =>
+      assert.fail("ordinary chat is not a delivered PPTX"),
+    fetch: async () => {
+      count++;
+      return pptConnectionError();
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(await sandbox(t))).status, "error");
+  assert.equal(count, 1);
+});
+
+test("PPTX recovery checks budget and queued input without counting a failed attempt twice", async (t) => {
+  const limits = {
+    maxDurationSeconds: 60,
+    maxToolCalls: 20,
+    maxCostUsd: 0.0001,
+  };
+  let task;
+  const limited = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    afterDelivery: (context) => {
+      context.localTask = task = new LocalTask(limits);
+    },
+  });
+  const result = await limited.running;
+  assert.equal(result.errorCode, "assistant_cost_limit");
+  assert.equal(limited.requests.length, 2);
+  let costAtWait;
+  const queued = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    afterDelivery: (context) => {
+      context.localTask = task = new LocalTask({ ...limits, maxCostUsd: 100 });
+    },
+    retrySleep: async () => {
+      costAtWait = task.cost;
+      queued.runtime.runs
+        .get(queued.params.runId)
+        .liveInputs.set("next", { applied: false });
+    },
+  });
+  await queued.running;
+  assert.equal(queued.requests.length, 2);
+  assert.equal(task.cost, costAtWait);
+  const raw = await readFile(queued.params.sessionFile, "utf8");
+  assert.equal(raw.split("closeout-failure").length - 1, 1);
+});
+
+test("SDK-only cancellation interrupts delivered PPTX recovery before another request", async (t) => {
+  let seen;
+  const ready = new Promise((resolve) => {
+    seen = resolve;
+  });
+  const fixture = await startPptCloseout(t, {
+    reply: pptConnectionError,
+    retrySleep: null,
+    emit: (event) => {
+      if (event.type === "retrying") seen();
+    },
+  });
+  await Promise.race([
+    ready,
+    fixture.running.then(() => assert.fail("expected recovery wait")),
+  ]);
+  const context = fixture.runtime.runs.get(fixture.params.runId);
+  const start = Date.now();
+  await context.session.abort();
+  const result = await fixture.running;
+  assert.equal(result.status, "stopped");
+  assert.equal(
+    result.entries.filter((entry) => entry.role === "assistant").at(-1)
+      .stopReason,
+    "aborted",
+  );
+  assert.equal(context.abort.signal.aborted, false);
+  assert.ok(Date.now() - start < 500);
+  assert.equal(fixture.requests.length, 2);
+});
+
 test("retries connection failures and drops but never timeouts, aborts or other HTTP errors", async (t) => {
   const cases = [
     [
@@ -4083,6 +4646,133 @@ test("partial text, reasoning and tool-call streams are never retried", async (t
     await runtime.close();
   }
 });
+
+test("a terminated HTTP 200 reasoning stream identifies an interrupted response without replay", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => {
+      requests++;
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"choices":[{"index":0,"delta":{"reasoning_content":"partial thought"},"finish_reason":null}]}\n\n',
+              ),
+            );
+            setTimeout(() => controller.error(new TypeError("terminated")), 10);
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorKind, "network");
+  assert.equal(requests, 1);
+  const receipts = (await readFile(params.sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .filter((entry) => entry.customType === "ofox-desktop-request");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].data.httpStatus, 200);
+  assert.equal(receipts[0].data.status, "unknown");
+  assert.equal(receipts[0].data.estimatedCostUsd, null);
+});
+
+test("an HTTP 200 body that closes without a finish reason retains partial text and is not replayed", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () => {
+      requests++;
+      return new Response(
+        'data: {"choices":[{"index":0,"delta":{"content":"Partial answer"},"finish_reason":null}]}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorKind, "network");
+  assert.equal(requests, 1);
+  assert.equal(
+    events
+      .filter((event) => event.type === "text_delta")
+      .map((event) => event.data.delta)
+      .join(""),
+    "Partial answer",
+  );
+});
+
+for (const failure of ["incomplete JSON", "missing name and format"])
+  test(`a document call with ${failure} gets concise repair guidance without echoing partial code or executing it`, async (t) => {
+    const params = {
+      ...(await sandbox(t)),
+      documents: { formats: ["pptx"], python: true },
+    };
+    const partial = "UNFINISHED_SLIDE_CODE".repeat(600);
+    let requests = 0;
+    let retryBody;
+    const hostCalls = [];
+    const runtime = new AssistantRuntime({
+      hostCall: async (call) => {
+        hostCalls.push(call.name);
+        return {};
+      },
+      fetch: withPlanningOpening(async (_url, init) => {
+        if (requests++ > 0) {
+          retryBody = JSON.parse(init.body);
+          return stream("The deck could not be generated.");
+        }
+        const delta = {
+          role: "assistant",
+          tool_calls: [
+            {
+              index: 0,
+              id: "malformed",
+              type: "function",
+              function: {
+                name: "create_document",
+                arguments:
+                  failure === "incomplete JSON"
+                    ? '{"format":"pptx","content":{"kind":"python","code":"' +
+                      partial
+                    : JSON.stringify({
+                        content: { kind: "python", code: partial },
+                      }),
+              },
+            },
+          ],
+        };
+        return new Response(
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    });
+    t.after(() => runtime.close());
+    await runtime.run(params);
+    assert.equal(hostCalls.includes("create_document"), false);
+    const feedback = retryBody.messages.find(
+      (message) =>
+        message.role === "tool" && message.tool_call_id === "malformed",
+    );
+    assert.match(
+      feedback.content,
+      failure === "incomplete JSON"
+        ? /complete JSON object/
+        : /include name and format/i,
+    );
+    assert.doesNotMatch(JSON.stringify(retryBody), /UNFINISHED_SLIDE_CODE/);
+  });
 
 test("cancelling during retry wait stops immediately without another HTTP request", async (t) => {
   const params = await sandbox(t);

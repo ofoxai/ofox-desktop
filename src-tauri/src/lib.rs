@@ -1168,6 +1168,11 @@ pub fn run() {
                     let host = host.clone();
                     app.listen(event, move |_| host.cancel_all());
                 }
+                #[cfg(windows)]
+                {
+                    let host = host.clone();
+                    tauri::async_runtime::spawn(async move { host.start_document_preparation() });
+                }
                 let recovering = host.clone();
                 tauri::async_runtime::spawn(async move { recovering.recover_all().await });
                 app.manage(host);

@@ -746,6 +746,25 @@ test(
 );
 
 test(
+  "a literal ampersand in a figure label renders like its XML spelling",
+  options,
+  async () => {
+    const result = await build(
+      [
+        'prs = new_deck(); s = content_slide(prs, "Encoder")',
+        'svg = \'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 80"><text x="2" y="50" font-size="22">{}</text></svg>\'',
+        "def picture(label): return figure(s, svg.format(label), 1, 2, 3, 1.2).image.blob",
+        'assert picture("加法 & 归一化") == picture("加法 &amp; 归一化")',
+        'assert picture("<![CDATA[加法 & 归一化]]>") == picture("加法 &amp; 归一化")',
+        'svg = \'<?xml version="1.0"?>\' + svg',
+        'assert picture("<tspan><![CDATA[A & B]]></tspan> C & D") == picture("A &amp; B C &amp; D")',
+      ].join("\n"),
+    );
+    assert.equal(result.status, 0, result.stderr);
+  },
+);
+
+test(
   "a figure whose SVG names no font still draws Chinese with a CJK font",
   options,
   async () => {

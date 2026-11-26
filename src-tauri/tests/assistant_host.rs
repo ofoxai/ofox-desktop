@@ -8373,11 +8373,16 @@ mod documents {
         let told = outcome.sent_of(preview);
         assert!(
             told.contains(&format!(
-                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet. Automated check findings: 0."
+                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet."
             )),
             "{told}"
         );
+        assert!(told.contains("Automated check findings: 0."), "{told}");
         assert!(told.contains("not visual or formula acceptance"), "{told}");
+        assert!(
+            told.contains("After two renders, deliver the latest preview"),
+            "{told}"
+        );
         assert!(!told.contains("attachment"), "{told}");
 
         // One document, published by the delivering call: the preview made

@@ -77,6 +77,7 @@ fn case(
             ContainerPolicy::Lpac,
             console,
             &observation,
+            None,
         )?;
         drop(stdin_read);
         drop(stdout_write);

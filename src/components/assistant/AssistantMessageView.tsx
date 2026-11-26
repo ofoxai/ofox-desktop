@@ -583,7 +583,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       )}
       {retryCard ? (
         <RetryCard
-          key={message.id}
+          key={`retry:${message.id}`}
           errorCode={message.status === "error" ? message.errorCode : null}
           models={models}
           currentModelId={currentModelId}

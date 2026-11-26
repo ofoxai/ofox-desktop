@@ -37,6 +37,14 @@ test("a built-page receipt is taken out of the issues and compared with the froz
   assert.deepEqual(planDrift(["a"], plan).issues, ["a"]);
 });
 
+test("a fork-join on a planned hierarchy page identifies the matching Python helper", () => {
+  const { issues } = planDrift(["plan-receipt:1=fj,k3"], {
+    slides: [page("hierarchy", "native-diagram")],
+  });
+  assert.equal(issues.length, 1);
+  assert.match(issues[0], /pyramid\(/);
+});
+
 test("a code figure is planned as one and is drift only when no figure or plot was drawn", () => {
   const plan = {
     slides: [

@@ -53,7 +53,7 @@ export const PRESENTATION_REQUIREMENTS_SCHEMA = object({
     {
       maxItems: 5,
       description:
-        "Document-wide visual-need tags, at most five distinct values; not a per-slide list. Put each page's chosen visual in slides[].visual.",
+        "Document-wide tags, not a per-slide list. Use only none, photo, concept, data or process. For a flow diagram choose process, and for a chart choose data. Put individual visuals in slides[].visual.",
     },
   ),
   roundTrip: Type.String({
@@ -379,10 +379,15 @@ export function planDrift(issues, plan) {
       !expected?.some((tag) => tag === "C" || tag === "S")
         ? ["fg", "pl"]
         : [];
-    if (expected && !has([...expected, ...drawn]))
+    if (expected && !has([...expected, ...drawn])) {
+      const guidance =
+        slide.pageKind === "hierarchy"
+          ? " The Python helper for a hierarchy is pyramid(slide, levels, x, y, w, h)."
+          : "";
       drift.push(
-        `plan drift: page ${index + 1} planned page kind "${slide.pageKind}" but was built as: ${built}. Rebuild it as planned, or say in your reply what changed and why.`,
+        `plan drift: page ${index + 1} planned page kind "${slide.pageKind}" but was built as: ${built}.${guidance} Explain any remaining difference in your reply.`,
       );
+    }
   });
   return { issues: [...rest, ...drift], receipt };
 }

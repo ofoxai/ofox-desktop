@@ -3,6 +3,15 @@ name: Document Engine Development Checks
 # Separate developer diagnostics, never Windows Probe or release evidence.
 on:
   workflow_dispatch:
+    inputs:
+      copyback_only:
+        description: Run only the native unchanged-input copyback regression
+        type: boolean
+        default: false
+      memory_only:
+        description: Run only the native cold-runtime memory regression
+        type: boolean
+        default: false
   # Register this new workflow without changing main. Only edits to this file
   # on this one development branch bootstrap a run; source changes stay manual.
   push:
@@ -71,6 +80,7 @@ jobs:
       # The runner's first Cargo command is the exact synthetic ACL test. A
       # failure stops immediately; subsequent fixed filters must run >0 tests.
       - name: ACL prerequisite then focused native regressions
+        if: ${{ inputs.copyback_only != true && inputs.memory_only != true }}
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
         env:
@@ -78,6 +88,63 @@ jobs:
           OFOX_DOCUMENT_CHILD_BLOCK_EVENT: "1"
         # Unassisted gate: no debugger trace (answered by run 44231498872) and
         # no launch comparison; the production set includes registryRead.
+      - name: Native unchanged-input copyback regression
+        if: ${{ inputs.copyback_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $env:CARGO_TERM_COLOR = 'never'
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_copyback_ -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/windows-sandbox.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw "$out/windows-sandbox.log"
+          if ($log -notmatch '(?m)^running 2 tests\s*$' -or $log -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;') { throw 'Expected exactly two passing native tests' }
+      - name: Native cold-runtime memory regression
+        if: ${{ inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $env:CARGO_TERM_COLOR = 'never'
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::cold_runtime_cache_keeps_peak_memory_bounded -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/windows-sandbox.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw "$out/windows-sandbox.log"
+          if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing native memory test' }
+      - name: Native private snapshot integrity and LPAC access regressions
+        if: ${{ inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::runtime_snapshot::tests:: -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$out/runtime-snapshot.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content -Raw "$out/runtime-snapshot.log"
+          if ($log -notmatch '(?m)^running 3 tests\s*$' -or $log -notmatch 'test result: ok\. 3 passed; 0 failed; 0 ignored;') { throw 'Expected exactly three passing native snapshot tests' }
+          # A suspended-control failure can contain private token/process
+          # evidence. Never stream or upload that raw diagnostic.
+          $private = "$env:RUNNER_TEMP/snapshot-lpac-private-$env:GITHUB_RUN_ATTEMPT.log"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_lpac_verifier_rejects_real_ordinary_appcontainer_before_resume -- --exact --nocapture --test-threads=1 *> $private
+          if ($LASTEXITCODE -ne 0) { throw 'Native LPAC access control failed; raw evidence kept private' }
+          $log = Get-Content -Raw $private
+          if ($log -notmatch '(?m)^running 1 test\s*$' -or $log -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one passing actual LPAC access control test' }
+          'Native private snapshot LPAC descriptor check: 1 passed; 0 failed' | Set-Content "$out/snapshot-lpac-access.log"
+      - name: Profile optimized fixed document engines
+        if: ${{ inputs.copyback_only == true || inputs.memory_only == true }}
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
+          # Measure the production optimization profile. Debug hashing can be
+          # much slower and cannot establish installed-client latency.
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin verify_document_engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item src-tauri/target/release/verify_document_engine.exe "$out/verify_document_engine.exe"
+          $raw = "$env:RUNNER_TEMP/document-engine-private-$env:GITHUB_RUN_ATTEMPT.json"
+          & "$out/verify_document_engine.exe" --runtime "$pwd/assistant-runtime/resources" --out $raw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content -Raw $raw | ConvertFrom-Json
+          if ($report.success -ne $true -or $null -ne $report.diagnostic -or @($report.engineTimings).Count -ne 5) { throw 'Expected a successful five-engine timing report' }
+          # Failure diagnostics remain outside the uploaded directory. Only a
+          # successful fixed-fixture report can be promoted to an artifact.
+          Move-Item -LiteralPath $raw -Destination "$out/document-engine-timings.json"
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -89,6 +156,10 @@ jobs:
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/registry-scope-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/functional-prerequisite.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/windows-sandbox.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/runtime-snapshot.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/snapshot-lpac-access.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/verify_document_engine.exe
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/document-engine-timings.json
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-old-roundtrip.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-long-path.log
             ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-cancel-roundtrip.log

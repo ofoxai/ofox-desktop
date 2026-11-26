@@ -4,6 +4,7 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -48,7 +49,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import type { AssistantAttachment } from "@/lib/api/assistant";
+import {
+  assistantDocumentPreview,
+  assistantDocumentPreviewUrl,
+  type AssistantAttachment,
+} from "@/lib/api/assistant";
 import {
   assistantPreviewApi,
   assistantPresentationRevision,
@@ -61,6 +66,8 @@ import { cn } from "@/lib/utils";
 
 type Authority = Omit<FilePreviewRequest, "attachmentId">;
 type CachedPage = FilePreviewPage & { src: string; scale: 1 | 2 };
+type PageEntry = { image?: CachedPage; render: Promise<CachedPage> };
+type PageCache = Map<string, PageEntry>;
 type PreviewHeader = (actions?: ReactNode) => ReactNode;
 
 /** The chat remains mounted while its file pane opens, resizes or expands. */
@@ -126,6 +133,14 @@ export function AssistantFileWorkspace({
   const [expanded, setExpanded] = useState(false);
   const id = useId();
   const selected = files.find((file) => file.id === selectedId);
+  const pageCache = useMemo(
+    () => new Map<string, PageEntry>(),
+    [
+      authority?.expectedOwner,
+      authority?.expectedGeneration,
+      authority?.sessionId,
+    ],
+  );
   const open = Boolean(active && authority && selected);
   const chatHidden = open && ((narrow && tab === "files") || expanded);
   const previousView = useRef({ open, chatHidden });
@@ -393,6 +408,8 @@ export function AssistantFileWorkspace({
             <ArtifactPreview
               key={`${authority.expectedOwner}:${authority.expectedGeneration}:${authority.sessionId}:${selected.id}:${selected.sizeBytes}:${expectedVersion ?? "latest"}`}
               request={{ ...authority, attachmentId: selected.id }}
+              savedPages={assistantDocumentPreview(selected)?.pages}
+              pageCache={pageCache}
               expectedVersion={expectedVersion}
               header={header}
               revisionControl={
@@ -571,6 +588,8 @@ function RevisionSwitch({
 
 function ArtifactPreview({
   request,
+  savedPages,
+  pageCache,
   expectedVersion,
   initialPage,
   onQuote,
@@ -580,6 +599,8 @@ function ArtifactPreview({
 }: {
   header: PreviewHeader;
   revisionControl: ReactNode;
+  savedPages?: number[];
+  pageCache: PageCache;
   request: FilePreviewRequest;
   expectedVersion?: string;
   initialPage?: number;
@@ -672,6 +693,8 @@ function ArtifactPreview({
       {manifest.kind === "pptx" ? (
         <PptxPreview
           key={manifest.version}
+          savedPages={savedPages}
+          pageCache={pageCache}
           request={request}
           manifest={manifest}
           header={header}
@@ -679,7 +702,12 @@ function ArtifactPreview({
           initialPage={initialPage}
           onQuote={quote}
           onPrepare={prepare}
-          onReload={() => setAttempt((old) => old + 1)}
+          onReload={() => {
+            const prefix = `${request.attachmentId}:${manifest.version}:`;
+            for (const key of pageCache.keys())
+              if (key.startsWith(prefix)) pageCache.delete(key);
+            setAttempt((old) => old + 1);
+          }}
         />
       ) : (
         <HtmlPreview
@@ -862,6 +890,8 @@ function PreviewActions({
 
 function PptxPreview({
   request,
+  savedPages,
+  pageCache,
   manifest,
   initialPage,
   onQuote,
@@ -872,6 +902,8 @@ function PptxPreview({
 }: {
   header: PreviewHeader;
   revisionControl: ReactNode;
+  savedPages?: number[];
+  pageCache: PageCache;
   request: FilePreviewRequest;
   manifest: FilePreviewManifest;
   initialPage?: number;
@@ -897,7 +929,8 @@ function PptxPreview({
   const [result, setResult] = useState<CachedPage | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const cache = useRef(new Map<string, CachedPage>());
+  const pagePrefix = `${request.attachmentId}:${manifest.version}:`;
+  const [brokenSnapshot, setBrokenSnapshot] = useState<string | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const navigation = useRef<HTMLElement>(null);
   const [showThumbnails, setShowThumbnails] = useState(false);
@@ -923,30 +956,38 @@ function PptxPreview({
   useEffect(() => {
     if (lastPage === 0) return;
     let current = true;
-    const key = `${page}:${scale}`;
+    const key = `${pagePrefix}${page}:${scale}`;
     setFailed(false);
-    const cached = cache.current.get(key);
-    setResult(cached ?? null);
-    if (!cached)
-      void assistantPreviewApi
-        .page({ ...request, version: manifest.version, page, scale })
-        .then(
-          (value) => {
-            if (!current) return;
-            const next = {
+    let entry = pageCache.get(key);
+    if (!entry) {
+      const created: PageEntry = {
+        render: assistantPreviewApi
+          .page({ ...request, version: manifest.version, page, scale })
+          .then((value) => {
+            const image = {
               ...value,
               scale,
               src: `data:image/jpeg;base64,${value.dataBase64}`,
             };
-            cache.current.set(key, next);
-            if (cache.current.size > 12)
-              cache.current.delete(cache.current.keys().next().value!);
-            setResult(next);
-          },
-          () => {
-            if (current) setFailed(true);
-          },
-        );
+            created.image = image;
+            return image;
+          }),
+      };
+      entry = created;
+      pageCache.set(key, entry);
+      if (pageCache.size > 12) pageCache.delete(pageCache.keys().next().value!);
+    }
+    setResult(entry.image ?? null);
+    if (!entry.image)
+      void entry.render.then(
+        (image) => {
+          if (current) setResult(image);
+        },
+        () => {
+          if (pageCache.get(key) === entry) pageCache.delete(key);
+          if (current) setFailed(true);
+        },
+      );
     return () => {
       current = false;
     };
@@ -956,6 +997,8 @@ function PptxPreview({
     request.expectedGeneration,
     request.attachmentId,
     manifest.version,
+    pageCache,
+    pagePrefix,
     page,
     scale,
     attempt,
@@ -986,6 +1029,15 @@ function PptxPreview({
   // Late responses can never label a previous page as the current one.
   const visible =
     result?.page === page && result.scale === scale ? result : null;
+  const snapshot = savedPages?.includes(page)
+    ? assistantDocumentPreviewUrl(
+        request.sessionId,
+        request.attachmentId,
+        request.expectedOwner,
+        request.expectedGeneration,
+        page,
+      )
+    : null;
   const start = Math.max(1, Math.min(page - 4, lastPage - 8));
   const thumbnails = Array.from(
     { length: Math.min(lastPage, 9) },
@@ -1096,10 +1148,23 @@ function PptxPreview({
             }
             onError={() => {
               if (imageTicketRef.current !== imageTicket) return;
-              cache.current.delete(`${page}:${scale}`);
+              pageCache.delete(`${pagePrefix}${page}:${scale}`);
               setFailed(true);
             }}
           />
+        ) : !failed && snapshot && brokenSnapshot !== snapshot ? (
+          <div className="flex h-full w-full flex-col items-center">
+            <img
+              key={snapshot}
+              src={snapshot}
+              alt={t("assistant.document.previewPage", { page })}
+              className="min-h-0 w-full flex-1 object-contain"
+              onError={() => setBrokenSnapshot(snapshot)}
+            />
+            <span className="text-note text-ink-muted">
+              {t("assistant.workspace.generationPreview")}
+            </span>
+          </div>
         ) : !failed ? (
           <PreviewLoading />
         ) : (
@@ -1110,7 +1175,7 @@ function PptxPreview({
                 variant="secondary"
                 className="mt-2"
                 onClick={() => {
-                  cache.current.delete(`${page}:${scale}`);
+                  pageCache.delete(`${pagePrefix}${page}:${scale}`);
                   setAttempt((old) => old + 1);
                 }}
               >
@@ -1130,8 +1195,8 @@ function PptxPreview({
         >
           {thumbnails.map((number) => {
             const image =
-              cache.current.get(`${number}:1`) ??
-              cache.current.get(`${number}:2`);
+              pageCache.get(`${pagePrefix}${number}:1`)?.image ??
+              pageCache.get(`${pagePrefix}${number}:2`)?.image;
             return (
               <button
                 key={number}

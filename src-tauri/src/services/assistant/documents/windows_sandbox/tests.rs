@@ -5,6 +5,104 @@ use super::*;
 mod module_load;
 mod office_load;
 
+#[test]
+#[serial_test::serial]
+fn cold_runtime_cache_keeps_peak_memory_bounded() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "services::assistant::documents::windows_sandbox::tests::cold_runtime_cache_memory_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("TMP", temporary.path())
+        .env("TEMP", temporary.path())
+        .env("OFOX_COLD_MEMORY_TEMP", temporary.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated native memory regression failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("OFOX_COLD_CACHE_MEMORY_OK"));
+}
+
+// A fresh process makes the native peak-commit counter independent of all
+// other unit tests. Its only large input is a newly created synthetic file.
+#[test]
+#[ignore = "invoked in an isolated process by the bounded-memory regression"]
+#[serial_test::serial]
+fn cold_runtime_cache_memory_child() {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+
+    let sandbox = crate::test_sandbox::sandbox();
+    let private_temp = std::env::temp_dir().canonicalize().unwrap();
+    assert_eq!(
+        private_temp,
+        PathBuf::from(std::env::var_os("OFOX_COLD_MEMORY_TEMP").unwrap())
+            .canonicalize()
+            .unwrap()
+    );
+    assert!(sandbox
+        .home()
+        .canonicalize()
+        .unwrap()
+        .starts_with(&private_temp));
+    let public = sandbox.home().join("synthetic-public-runtime");
+    fs::create_dir(&public).unwrap();
+    let resource = public.join(format!("resource-{}", uuid::Uuid::new_v4()));
+    let mut file = File::create(&resource).unwrap();
+    let chunk = [0u8; 64 * 1024];
+    for _ in 0..(384 * 1024 / 64) {
+        file.write_all(&chunk).unwrap();
+    }
+    drop(file);
+    let mut baseline = PROCESS_MEMORY_COUNTERS::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut baseline,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+        .unwrap();
+    }
+    let capability = RuntimeCapability::new().unwrap();
+    let cached = cache_runtime(&public, &capability, &current_user().unwrap()).unwrap();
+    assert!(cached
+        .root
+        .canonicalize()
+        .unwrap()
+        .starts_with(private_temp));
+    assert_eq!(
+        fs::metadata(cached.root.join(resource.file_name().unwrap()))
+            .unwrap()
+            .len(),
+        384 * 1024 * 1024
+    );
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+        .unwrap();
+    }
+    // Only this test's UUID-bearing content-addressed cache is removed.
+    fs::remove_dir_all(&cached.root).unwrap();
+    assert!(
+        counters.PeakPagefileUsage.saturating_sub(baseline.PeakPagefileUsage) < 192 * 1024 * 1024,
+        "COLD_CACHE_MEMORY_UNBOUNDED: peak committed bytes {}, baseline {}, for a 384 MiB synthetic runtime",
+        counters.PeakPagefileUsage, baseline.PeakPagefileUsage
+    );
+    println!("OFOX_COLD_CACHE_MEMORY_OK");
+}
+
 fn runtime() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources")
 }
@@ -19,6 +117,243 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
     probe_windows_document_engines(&root, &office)
         .await
         .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
+}
+
+#[test]
+fn document_svg_batch_stdin_is_finite_and_read_only() {
+    let batch = SvgBatch::new("out.pptx", &[1, 2]).unwrap();
+    let mut child_input = File::from(preview_stdin(&batch).unwrap());
+    let mut bytes = Vec::new();
+    child_input.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, batch.input());
+    assert_eq!(child_input.read(&mut [0; 1]).unwrap(), 0);
+    assert!(child_input.write_all(b"extra input").is_err());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn document_svg_batch_matches_single_pages_in_one_isolated_launch() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let fixture =
+        include_bytes!("../../../../../../assistant-runtime/test/fixtures/office/chinese.pptx");
+    let source = task.path().join("out.pptx");
+    fs::write(&source, fixture).unwrap();
+    let before = RUN_SEQUENCE.load(Ordering::Acquire);
+    let pictures = render_svg_batch(
+        SvgBatch::new("out.pptx", &[2, 1]).unwrap(),
+        task.path(),
+        &home,
+        &root,
+        Duration::from_secs(60),
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("pinned engine must render both pages using MCP inside the LPAC");
+    assert_eq!(RUN_SEQUENCE.load(Ordering::Acquire) - before, 1);
+    assert_ne!(pictures[0], pictures[1]);
+    for (page, svg) in ["2", "1"].into_iter().zip(pictures) {
+        let one = run_windows_engine_limited(
+            &root.join("engines/officecli/officecli.exe"),
+            &["view", "out.pptx", "svg", "--start", page, "--end", page],
+            task.path(),
+            &home,
+            &root,
+            Duration::from_secs(60),
+            super::super::runner::SVG_OUTPUT_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.status, Some(0));
+        assert_eq!(
+            one.stdout.trim().replace("\r\n", "\n"),
+            svg.replace("\r\n", "\n")
+        );
+    }
+    assert_eq!(fs::read(source).unwrap(), fixture);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn document_copyback_preserves_unchanged_inputs_and_publishes_changes() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let unchanged = task.path().join("unchanged.txt");
+    fs::write(&unchanged, b"original input").unwrap();
+    let old = std::time::UNIX_EPOCH + Duration::from_secs(946684800);
+    File::options()
+        .write(true)
+        .open(&unchanged)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    fs::write(task.path().join("changed.txt"), b"before").unwrap();
+    fs::write(task.path().join("removed.txt"), b"keep host copy").unwrap();
+    fs::write(home.join("private.txt"), b"host home").unwrap();
+
+    let output = run_windows_engine_limited(
+        &root.join("node/node.exe"),
+        &["-e", "const f=require('node:fs'); f.writeFileSync('changed.txt','after'); f.writeFileSync('new.txt','new output'); f.unlinkSync('removed.txt'); f.writeFileSync('home/private.txt','sandbox home');"],
+        task.path(),
+        &home,
+        &root,
+        Duration::from_secs(30),
+        4096,
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.status, Some(0));
+    assert_eq!(fs::read(&unchanged).unwrap(), b"original input");
+    assert_eq!(
+        fs::metadata(&unchanged).unwrap().modified().unwrap(),
+        old,
+        "COPYBACK_UNCHANGED_INPUT_REWRITTEN: an unchanged input must retain its host file"
+    );
+    assert_eq!(fs::read(task.path().join("changed.txt")).unwrap(), b"after");
+    assert_eq!(
+        fs::read(task.path().join("new.txt")).unwrap(),
+        b"new output"
+    );
+    assert_eq!(
+        fs::read(task.path().join("removed.txt")).unwrap(),
+        b"keep host copy"
+    );
+    assert_eq!(fs::read(home.join("private.txt")).unwrap(), b"host home");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn document_copyback_unchanged_inputs_preserve_host_changes_and_reject_aliases() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    for case in [
+        "edited",
+        "removed",
+        "parent-removed",
+        "hardlink",
+        "junction",
+        "dangling-junction",
+    ] {
+        let task = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("input.txt"), b"outside sentinel").unwrap();
+        let home = task.path().join("home");
+        let parent = task.path().join("nested");
+        let input = parent.join("input.txt");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&input, b"unchanged sandbox input").unwrap();
+        let canonical = task.path().canonicalize().unwrap();
+        let (reached, started) = std::sync::mpsc::sync_channel(1);
+        let (resume, resumed) = std::sync::mpsc::sync_channel(1);
+        COPYBACK_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                canonical.clone(),
+                Arc::new(CopybackGate {
+                    point: CopybackPoint::Drained,
+                    reached,
+                    resume: Mutex::new(resumed),
+                }),
+            );
+        let original = task.path().to_path_buf();
+        let runtime = root.clone();
+        let running = tokio::spawn(async move {
+            run_windows_engine_limited(
+                &runtime.join("node/node.exe"),
+                &["-e", "0"],
+                &original,
+                &home,
+                &runtime,
+                Duration::from_secs(30),
+                4096,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(60)))
+            .await
+            .unwrap()
+            .expect("successful child must reach the copyback handshake");
+        match case {
+            "edited" => fs::write(&input, b"host edit after snapshot").unwrap(),
+            "removed" => fs::remove_file(&input).unwrap(),
+            "parent-removed" => {
+                fs::remove_file(&input).unwrap();
+                fs::remove_dir(&parent).unwrap();
+            }
+            "hardlink" => {
+                fs::remove_file(&input).unwrap();
+                fs::hard_link(target.join("input.txt"), &input).unwrap();
+            }
+            "junction" | "dangling-junction" => {
+                fs::remove_file(&input).unwrap();
+                fs::remove_dir(&parent).unwrap();
+                let output = std::process::Command::new("cmd.exe")
+                    .args(["/D", "/C", "mklink", "/J"])
+                    .arg(&parent)
+                    .arg(&target)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "private junction fixture");
+                if case == "dangling-junction" {
+                    fs::remove_file(target.join("input.txt")).unwrap();
+                    fs::remove_dir(&target).unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        resume.send(()).unwrap();
+        let result = running.await.unwrap();
+        COPYBACK_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&canonical);
+        match case {
+            "edited" => {
+                assert_eq!(result.unwrap().status, Some(0));
+                assert_eq!(fs::read(&input).unwrap(), b"host edit after snapshot");
+            }
+            "removed" | "parent-removed" => {
+                assert_eq!(result.unwrap().status, Some(0));
+                assert!(
+                    !input.exists(),
+                    "unchanged sandbox input resurrected a host deletion"
+                );
+                if case == "parent-removed" {
+                    assert!(
+                        !parent.exists(),
+                        "unchanged input recreated its host parent"
+                    );
+                }
+            }
+            "hardlink" | "junction" => {
+                assert_eq!(result.unwrap_err(), UNSAFE_FILE, "unchanged {case} alias");
+                assert_eq!(
+                    fs::read(target.join("input.txt")).unwrap(),
+                    b"outside sentinel"
+                );
+            }
+            "dangling-junction" => {
+                assert_eq!(result.unwrap_err(), UNSAFE_FILE, "dangling junction")
+            }
+            _ => unreachable!(),
+        }
+        if matches!(case, "junction" | "dangling-junction") {
+            fs::remove_dir(&parent).unwrap();
+        }
+    }
 }
 
 /// The debugger receipt belongs only to this exact case, never to engine admission.
@@ -203,6 +538,7 @@ fn assert_suspended_lpac_access_controls() {
                 verified.is_ok(),
                 "actual suspended LPAC must pass the complete production verifier: diagnostic={diagnostic:?}; report={report}"
             );
+            runtime_snapshot::tests::assert_spool_lpac_denied(raw(&child.process.process));
         } else {
             assert!(
                 verified.as_ref().err().is_some_and(|error| error == UNAVAILABLE),
@@ -385,6 +721,7 @@ fn document_registry_scope_is_measured_and_adds_no_write_rights() {
             ContainerPolicy::Lpac,
             ConsoleMode::Detached,
             &observation,
+            None,
         )
         .unwrap();
         // The production verifier accepts only the production set.

@@ -3394,7 +3394,7 @@ fn view_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
 
 /// The folder of a deck's slide pictures, in the document's folder.
 const PAGES: &str = "pages";
-/// At most this many slides are drawn as pictures (one engine run each); a
+/// At most this many slides are drawn as pictures; a
 /// longer deck's other slides have none, with one warning.
 const MAX_SVG_PAGES: u64 = 60;
 
@@ -3436,19 +3436,68 @@ async fn svg_pages(
         Some(pages) => pages.iter().map(|page| u64::from(*page)).collect(),
         None => (1..=count.min(MAX_SVG_PAGES)).collect(),
     };
-    for n in requested {
-        let at = n.to_string();
-        let view = ["view", file, "svg", "--start", &at, "--end", &at];
-        let Ok(output) = work.run_limited(&view, SVG_OUTPUT_LIMIT).await else {
-            issues.push(no_preview(n, count));
-            stopped = true;
-            break;
+    #[cfg(windows)]
+    let mut batch_available = work.profile == OFFICE_SANDBOX
+        && work
+            .sandbox
+            .is_some_and(|root| work.exe == root.join("engines/officecli/officecli.exe"));
+    #[cfg(windows)]
+    let mut pictures = std::collections::VecDeque::new();
+    for (index, &n) in requested.iter().enumerate() {
+        #[cfg(windows)]
+        let picture = {
+            if batch_available && pictures.is_empty() {
+                let end = requested.len().min(index + super::svg_batch::MAX_PAGES);
+                if let (Some(root), Some(batch)) = (
+                    work.sandbox,
+                    super::svg_batch::SvgBatch::new(file, &requested[index..end]),
+                ) {
+                    match super::windows_sandbox::render_svg_batch(
+                        batch,
+                        work.dir,
+                        work.home,
+                        root,
+                        work.timeout,
+                        work.deadline,
+                    )
+                    .await
+                    {
+                        Ok(Some(rendered)) => pictures = rendered.into(),
+                        // No pictures from a partial batch are published. Older
+                        // engines can still render using the per-page command.
+                        Ok(None) => batch_available = false,
+                        Err(_) => {
+                            issues.push(no_preview(n, count));
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            pictures.pop_front()
+        };
+        #[cfg(not(windows))]
+        let picture: Option<String> = {
+            let _ = index;
+            None
+        };
+        let svg = if let Some(svg) = picture {
+            Some(svg)
+        } else {
+            let at = n.to_string();
+            let view = ["view", file, "svg", "--start", &at, "--end", &at];
+            let Ok(output) = work.run_limited(&view, SVG_OUTPUT_LIMIT).await else {
+                issues.push(no_preview(n, count));
+                stopped = true;
+                break;
+            };
+            whole_svg(&output).map(str::to_owned)
         };
         let path = folder.join(format!("{n}.svg"));
-        let written = match whole_svg(&output) {
+        let written = match svg {
             Some(svg) => {
                 let (folder, target) = (folder.clone(), path.clone());
-                let bytes = svg.as_bytes().to_vec();
+                let bytes = svg.into_bytes();
                 blocking(move || {
                     // The engine ran since the folder was made.
                     if !real_folder(&folder) {
@@ -3774,6 +3823,7 @@ impl AssistantHost {
         document: &Document,
         engine: Option<PathBuf>,
     ) -> Result<Value, String> {
+        let message_id = run.reply_id();
         media.record_preview(&document.name, doc_id)?;
         let previewed = async {
             let made = self.make_file(run, doc_id, document, engine).await?;
@@ -3787,6 +3837,7 @@ impl AssistantHost {
         .await;
         match previewed {
             Ok((made, result)) => {
+                let pages = made.pages.len();
                 media.keep_preview(PreviewRecord {
                     name: document.name.clone(),
                     doc_id: doc_id.to_owned(),
@@ -3794,6 +3845,17 @@ impl AssistantHost {
                     format: document.format,
                     made,
                 });
+                if document.format == DocumentFormat::Pptx
+                    && pages > 0
+                    && !run.cancelled()
+                    && run.reply_id() == message_id
+                {
+                    self.emit(
+                        run,
+                        "presentation_preview",
+                        json!({"messageId":message_id,"pages":pages}),
+                    );
+                }
                 Ok(result)
             }
             Err(error) => {
@@ -9853,6 +9915,10 @@ esac
         assert_eq!(text["preview"], true);
         assert_eq!(text["pagePaths"], json!([]));
         assert!(text.get("slides").is_none(), "{text}");
+        assert_eq!(
+            f.events("presentation_preview"),
+            [json!({"messageId":f.run.reply_id(),"pages":2})]
+        );
         assert!(f.record().attachments.is_empty());
     }
 

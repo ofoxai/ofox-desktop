@@ -857,11 +857,14 @@ impl AssistantHost {
                             == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 })
             });
-        if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
-            self.wait_document_preparation().await;
-        } else {
-            self.start_document_preparation();
-        }
+        let preparation =
+            if request.presentation_workflow_version == Some(1) && model.tools && deck_context {
+                self.prepare_document_send(&identity, generation, &request)
+                    .await?
+            } else {
+                self.start_document_preparation();
+                None
+            };
         self.ensure_current(&identity, generation).await?;
 
         // The persisted capability is eligibility. Resolve an actual target
@@ -1035,9 +1038,20 @@ impl AssistantHost {
             let selected = selected.clone();
             let search_price = search_price.clone();
             let model_id = model.id.clone();
+            let prepared_session = preparation.as_ref().map(|_| record.session.clone());
             move || {
                 host.register_run(control.clone(), generation, || {
+                    if let Some(preparation) = &preparation {
+                        preparation.check()?;
+                    }
                     store.mutate(&request.session_id, |record| {
+                        if prepared_session.as_ref().is_some_and(|expected| {
+                            record.session.model_id != expected.model_id
+                                || record.session.assistant_id != expected.assistant_id
+                                || record.session.capabilities != expected.capabilities
+                        }) {
+                            return Err(super::host::CANCELLED.into());
+                        }
                         publish_turn(
                             record,
                             &control,
@@ -3601,6 +3615,104 @@ mod tests {
                 "assistant_invalid_message"
             );
         }
+    }
+
+    #[test]
+    fn retry_of_a_stopped_presentation_survives_replaying_its_last_tool_call() {
+        let (mut record, _, _, _) = fixture();
+        let start = send(&record, "Create a presentation", json!({}));
+        let stopped = publish(&mut record, &start, "m").unwrap();
+        let complete_model_steps = json!([
+            {"id":"ppt-user","role":"user","runId":start.run_id,"active":true},
+            {"id":"ppt-plan","role":"assistant","runId":start.run_id,
+             "content":"Planned the deck","stopReason":"toolUse","final":false,"active":true},
+            {"id":"ppt-render","role":"assistant","runId":start.run_id,
+             "content":"Rendering the slides","stopReason":"toolUse","final":true,"active":true}
+        ]);
+        merge_native(&mut record, &complete_model_steps, &[]).unwrap();
+        super::super::projection::settle_run(&mut record, &stopped, false, true, false, None)
+            .unwrap();
+        // No later model message was written: the user stopped the document tool.
+        merge_native(&mut record, &complete_model_steps, &[]).unwrap();
+        let saved_reply = |record: &SessionRecord| {
+            record
+                .messages
+                .iter()
+                .position(|message| message.id == stopped.message_id)
+                .unwrap()
+        };
+        assert_eq!(record.messages[saved_reply(&record)].status, "stopped");
+        // A released app already replayed this history and saved the wrong status.
+        let legacy_reply = saved_reply(&record);
+        record.messages[legacy_reply].status = "completed".into();
+        merge_native(&mut record, &complete_model_steps, &[]).unwrap();
+        assert_eq!(record.messages[legacy_reply].status, "stopped");
+        assert!(record.messages.iter().any(|message| {
+            message.native_entry_id.as_deref() == Some("ppt-plan") && message.status == "completed"
+        }));
+        let retry = send(
+            &record,
+            "Create a presentation",
+            json!({"retryMessageId": stopped.message_id}),
+        );
+        let branch = Branch::resolve(&record, &retry).unwrap();
+        assert_eq!(branch.edit_entry.as_deref(), Some("ppt-user"));
+        assert!(publish(&mut record, &retry, "m").is_ok());
+    }
+
+    #[test]
+    fn repairing_a_stopped_turn_keeps_a_finished_reply_before_consumed_steering() {
+        let (mut record, _, _, _) = fixture();
+        let initial = send(&record, "Create a presentation", json!({}));
+        let control = publish(&mut record, &initial, "m").unwrap();
+        let follow_up = id();
+        let earlier_reply = id();
+        let queued = id();
+        for (run, status, finished_at) in [
+            (&follow_up, "completed", Some(3)),
+            (&earlier_reply, "completed", Some(2)),
+            (&queued, "error", None),
+        ] {
+            let mut user = message("user", run, &[]);
+            user.id.clone_from(run);
+            user.status = status.into();
+            record.messages.push(user);
+            if let Some(at) = finished_at {
+                let mut reply = message("assistant", run, &[]);
+                reply.completed_at = Some(at);
+                record.messages.push(reply);
+            }
+            record.operations.push(Operation {
+                id: run.clone(),
+                run_id: run.clone(),
+                status: OperationStatus::Cancelled,
+                search_price: None,
+                media: None,
+            });
+        }
+        let initial_reply = record
+            .messages
+            .iter_mut()
+            .find(|message| message.id == control.message_id)
+            .unwrap();
+        initial_reply.status = "completed".into();
+        initial_reply.completed_at = Some(1);
+        record.operations[0].status = OperationStatus::Cancelled;
+
+        super::super::projection::restore_cancelled_replies(&mut record);
+        let reply_status = |run: &str| {
+            record
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == "assistant" && message.run_id.as_deref() == Some(run)
+                })
+                .map(|message| message.status.as_str())
+        };
+        assert_eq!(reply_status(&initial.run_id), Some("completed"));
+        assert_eq!(reply_status(&follow_up), Some("stopped"));
+        assert_eq!(reply_status(&earlier_reply), Some("completed"));
+        assert_eq!(reply_status(&queued), None);
     }
 
     #[test]
