@@ -15,7 +15,7 @@
          #[cfg(test)]
          pause_copyback(&cwd, CopybackPoint::Drained)?;
 +        was_cancelled |= cancelled.load(Ordering::Acquire);
-         if !timed_out && !was_cancelled && status == 0 {
+         if batch.is_none() && !timed_out && !was_cancelled && status == 0 {
              let outputs = files(&task.0, MAX_TASK_BYTES)?;
              observation.enter(Phase::Copyback);
 @@ -2155,6 +2159,10 @@
